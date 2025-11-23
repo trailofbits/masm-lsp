@@ -1,0 +1,16 @@
+[package]
+name = "masm-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
+tower-lsp = "0.20"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+miden-utils-diagnostics = { git = "https://github.com/0xMiden/miden-vm", package = "miden-utils-diagnostics", default-features = true }
+
+# Miden toolchain
+miden-assembly-syntax = { git = "https://github.com/0xMiden/miden-vm", package = "miden-assembly-syntax", default-features = true }
+miden-debug-types = { git = "https://github.com/0xMiden/miden-vm", package = "miden-debug-types", default-features = true }
