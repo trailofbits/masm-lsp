@@ -1,9 +1,4 @@
-mod client;
-mod diagnostics;
-mod server;
-mod util;
-
-use server::Backend;
+use masm_lsp::server::Backend;
 use tower_lsp::{LspService, Server};
 
 #[tokio::main]

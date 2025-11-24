@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::{collections::{HashMap, VecDeque}, sync::Arc};
 
 use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager, Uri};
@@ -10,9 +7,11 @@ use tokio::sync::RwLock;
 use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
-        self, Diagnostic, InitializeParams, InitializeResult, InitializedParams,
-        ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-        TextDocumentSyncKind, Url,
+        self, request::{GotoImplementationParams, GotoImplementationResponse},
+        Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, InitializeParams,
+        InitializeResult, InitializedParams, Location, ReferenceParams, ServerCapabilities,
+        SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
     },
     LanguageServer,
 };
@@ -21,6 +20,8 @@ use tracing::{error, info};
 use crate::{
     client::PublishDiagnostics,
     diagnostics::diagnostics_from_report,
+    index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
+    resolution::resolve_symbol_at_position,
     util::{guess_module_kinds, lsp_range_to_selection},
 };
 
@@ -34,6 +35,8 @@ pub struct Backend<C = tower_lsp::Client> {
     client: C,
     sources: Arc<DefaultSourceManager>,
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
+    symbols: Arc<RwLock<HashMap<Url, DocumentSymbols>>>,
+    workspace: Arc<RwLock<WorkspaceIndex>>,
 }
 
 impl<C> Backend<C> {
@@ -42,7 +45,20 @@ impl<C> Backend<C> {
             client,
             sources: Arc::new(DefaultSourceManager::default()),
             documents: Arc::new(RwLock::new(HashMap::new())),
+            symbols: Arc::new(RwLock::new(HashMap::new())),
+            workspace: Arc::new(RwLock::new(WorkspaceIndex::default())),
         }
+    }
+}
+
+impl<C> Backend<C> {
+    pub async fn snapshot_workspace(&self) -> WorkspaceIndex {
+        self.workspace.read().await.clone()
+    }
+
+    pub async fn snapshot_document_symbols(&self, uri: &Url) -> Option<DocumentSymbols> {
+        let docs = self.symbols.read().await;
+        docs.get(uri).cloned()
     }
 }
 
@@ -59,6 +75,7 @@ where
         let miden_uri = to_miden_uri(&uri);
         self.sources.load(SourceLanguage::Masm, miden_uri, text);
         self.set_document_version(uri.clone(), version).await;
+        let _ = self.parse_and_index(&uri).await;
         Ok(self.publish_diagnostics(uri).await)
     }
 
@@ -84,6 +101,7 @@ where
         }
 
         self.set_document_version(uri.clone(), version).await;
+        let _ = self.parse_and_index(&uri).await;
         self.publish_diagnostics(uri).await;
     }
 
@@ -105,7 +123,10 @@ where
         };
 
         let diagnostics = match self.parse_module(&uri).await {
-            Ok(_) => Vec::new(),
+            Ok(_) => {
+                let _ = self.parse_and_index(&uri).await;
+                Vec::new()
+            }
             Err(report) => diagnostics_from_report(&self.sources, &uri, report),
         };
 
@@ -133,6 +154,9 @@ where
         while let Some(kind) = candidates.pop_front() {
             let mut opts = ParseOptions::default();
             opts.kind = kind;
+            if let Some(path) = module_path_from_uri(uri) {
+                opts.path = Some(path.into());
+            }
             match source_file
                 .clone()
                 .parse_with_options(self.sources.as_ref(), opts)
@@ -165,6 +189,36 @@ where
 
         Err(first_err.unwrap_or_else(|| diagnostics::report!("parse failed")))
     }
+
+    async fn parse_and_index(
+        &self,
+        uri: &Url,
+    ) -> std::result::Result<DocumentSymbols, miden_assembly_syntax::Report> {
+        let module = self.parse_module(uri).await?;
+        let doc_symbols = build_document_symbols(module, self.sources.as_ref());
+
+        {
+            let mut docs = self.symbols.write().await;
+            docs.insert(uri.clone(), doc_symbols.clone());
+        }
+
+        {
+            let mut ws = self.workspace.write().await;
+            ws.update_document(uri.clone(), &doc_symbols.definitions, &doc_symbols.references);
+        }
+
+        Ok(doc_symbols)
+    }
+
+    async fn get_or_parse_document(&self, uri: &Url) -> Option<DocumentSymbols> {
+        {
+            let docs = self.symbols.read().await;
+            if let Some(doc) = docs.get(uri) {
+                return Some(doc.clone());
+            }
+        }
+        self.parse_and_index(uri).await.ok()
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -177,6 +231,12 @@ where
             text_document_sync: Some(TextDocumentSyncCapability::Kind(
                 TextDocumentSyncKind::INCREMENTAL,
             )),
+            definition_provider: Some(lsp_types::OneOf::Left(true)),
+            implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(
+                true,
+            )),
+            references_provider: Some(lsp_types::OneOf::Left(true)),
+            workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
             ..Default::default()
         };
 
@@ -211,6 +271,115 @@ where
     async fn did_close(&self, params: lsp_types::DidCloseTextDocumentParams) {
         self.handle_close(params.text_document.uri).await;
     }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let Some(doc) = self.get_or_parse_document(&uri).await else {
+            return Ok(None);
+        };
+
+        let resolved =
+            resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos).map_err(|e| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "failed to resolve symbol: {e}"
+                ))
+            })?;
+        let Some(symbol) = resolved else {
+            // fallback: try lookup by token name
+            if let Some(token) = self
+                .sources
+                .get_by_uri(&miden_debug_types::Uri::new(uri.as_str()))
+                .and_then(|src| crate::util::extract_token_at_position(&src, pos))
+            {
+                let workspace = self.workspace.read().await;
+                if let Some(loc) = workspace.definition_by_name(&token) {
+                    return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                }
+            }
+            return Ok(None);
+        };
+
+        let workspace = self.workspace.read().await;
+        if let Some(loc) = workspace
+            .definition(&symbol.path)
+            .or_else(|| workspace.definition_by_name(&symbol.name))
+        {
+            return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+        }
+
+        Ok(None)
+    }
+
+    async fn goto_implementation(
+        &self,
+        params: GotoImplementationParams,
+    ) -> Result<Option<GotoImplementationResponse>> {
+        let res = self
+            .goto_definition(GotoDefinitionParams {
+                text_document_position_params: params.text_document_position_params.clone(),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await?;
+        Ok(res.map(GotoDefinitionResponse::into))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let Some(doc) = self.get_or_parse_document(&uri).await else {
+            return Ok(None);
+        };
+
+        let resolved =
+            resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos).map_err(|e| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "failed to resolve symbol: {e}"
+                ))
+            })?;
+        let Some(symbol) = resolved else {
+            return Ok(None);
+        };
+
+        let workspace = self.workspace.read().await;
+        let mut refs = workspace.references(&symbol.path);
+        if params.context.include_declaration {
+            if let Some(def) = workspace.definition(&symbol.path) {
+                refs.push(def);
+            }
+        }
+
+        Ok(Some(refs))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let workspace = self.workspace.read().await;
+        let syms = workspace
+            .workspace_symbols(&params.query)
+            .into_iter()
+            .map(|(name, loc)| {
+                #[allow(deprecated)]
+                {
+                    SymbolInformation {
+                        name,
+                        location: loc,
+                        kind: SymbolKind::FUNCTION,
+                        tags: None,
+                        container_name: None,
+                        deprecated: None,
+                    }
+                }
+            })
+            .collect();
+        Ok(Some(syms))
+    }
 }
 
 fn to_miden_uri(uri: &Url) -> Uri {
@@ -224,6 +393,30 @@ fn enqueue_kind(
     if !queue.contains(&kind) {
         queue.push_back(kind);
     }
+}
+
+fn module_path_from_uri(uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
+    let path = uri.path();
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return None;
+    }
+    let mut buf = miden_assembly_syntax::ast::PathBuf::default();
+    for (i, seg) in segments.iter().enumerate() {
+        let cleaned = if i == segments.len() - 1 {
+            seg.split('.').next().unwrap_or(*seg)
+        } else {
+            seg
+        };
+        if cleaned.is_empty() {
+            continue;
+        }
+        buf.push(cleaned);
+    }
+    Some(buf)
 }
 
 #[cfg(test)]
