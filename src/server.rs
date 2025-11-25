@@ -14,10 +14,11 @@ use tower_lsp::{
     lsp_types::{
         self,
         request::{GotoImplementationParams, GotoImplementationResponse},
-        Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, InitializeParams,
-        InitializeResult, InitializedParams, InlayHint, InlayHintParams, Location, ReferenceParams,
-        ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
-        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
+        Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+        HoverParams, InitializeParams, InitializeResult, InitializedParams, InlayHint,
+        InlayHintParams, Location, MarkupContent, MarkupKind, ReferenceParams, ServerCapabilities,
+        SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkspaceSymbolParams,
     },
     LanguageServer,
 };
@@ -452,6 +453,7 @@ where
             text_document_sync: Some(TextDocumentSyncCapability::Kind(
                 TextDocumentSyncKind::INCREMENTAL,
             )),
+            hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
             definition_provider: Some(lsp_types::OneOf::Left(true)),
             implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(
                 true,
@@ -539,6 +541,57 @@ where
         }
 
         Ok(None)
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let Some(doc) = self.get_or_parse_document(&uri).await else {
+            return Ok(None);
+        };
+
+        let symbol = match resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("hover: {e}");
+                return Ok(None);
+            }
+        };
+
+        // Find the definition location
+        let workspace = self.workspace.read().await;
+        let def_loc = workspace
+            .definition(symbol.path.as_str())
+            .or_else(|| workspace.definition_by_suffix(symbol.path.as_str()))
+            .or_else(|| workspace.definition_by_name(&symbol.name));
+        drop(workspace);
+
+        let Some(loc) = def_loc else {
+            return Ok(None);
+        };
+
+        // Get the source file for the definition
+        let def_uri = to_miden_uri(&loc.uri);
+        let Some(source) = self.sources.get_by_uri(&def_uri) else {
+            return Ok(None);
+        };
+
+        // Extract comments above the definition
+        let content = source.as_str();
+        let def_line = loc.range.start.line as usize;
+        let comment = extract_doc_comment(content, def_line);
+
+        if let Some(comment_text) = comment {
+            Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: comment_text,
+                }),
+                range: None,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn goto_implementation(
@@ -730,6 +783,52 @@ fn build_path_from_root(
         buf.push(seg.as_ref());
     }
     Some(buf)
+}
+
+/// Extract doc comments above a definition at the given line.
+/// Doc comments are lines starting with "#!" immediately before the definition.
+/// Returns the comment text with "#!" prefixes stripped.
+fn extract_doc_comment(source: &str, def_line: usize) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    if def_line == 0 || def_line > lines.len() {
+        return None;
+    }
+
+    let mut comment_lines = Vec::new();
+    let mut line_idx = def_line.saturating_sub(1);
+
+    // Walk backwards collecting comment lines
+    loop {
+        let line = lines.get(line_idx)?;
+        let trimmed = line.trim();
+        if trimmed.starts_with("#!") {
+            // Strip the "#!" and optional space
+            let comment_text = trimmed.strip_prefix("#!").unwrap_or(trimmed);
+            let comment_text = comment_text.strip_prefix(' ').unwrap_or(comment_text);
+            comment_lines.push(comment_text.to_string());
+        } else if trimmed.is_empty() {
+            // Skip blank lines between comments and definition
+            if !comment_lines.is_empty() {
+                break;
+            }
+        } else {
+            // Non-comment, non-empty line - stop
+            break;
+        }
+
+        if line_idx == 0 {
+            break;
+        }
+        line_idx -= 1;
+    }
+
+    if comment_lines.is_empty() {
+        return None;
+    }
+
+    // Reverse since we collected bottom-up
+    comment_lines.reverse();
+    Some(comment_lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -1162,6 +1261,42 @@ end
         let path = uri.to_file_path().unwrap();
         let text = std::fs::read_to_string(path).unwrap();
         position_of(&text, needle)
+    }
+
+    #[test]
+    fn extract_doc_comment_single_line() {
+        let source = "#! This is a comment\nproc foo\n  nop\nend\n";
+        let comment = extract_doc_comment(source, 1);
+        assert_eq!(comment, Some("This is a comment".to_string()));
+    }
+
+    #[test]
+    fn extract_doc_comment_multi_line() {
+        let source = "#! Line one\n#! Line two\nproc foo\n  nop\nend\n";
+        let comment = extract_doc_comment(source, 2);
+        assert_eq!(comment, Some("Line one\nLine two".to_string()));
+    }
+
+    #[test]
+    fn extract_doc_comment_no_comment() {
+        let source = "proc foo\n  nop\nend\n";
+        let comment = extract_doc_comment(source, 0);
+        assert_eq!(comment, None);
+    }
+
+    #[test]
+    fn extract_doc_comment_with_blank_line() {
+        let source = "#! Comment\n\nproc foo\n  nop\nend\n";
+        let comment = extract_doc_comment(source, 2);
+        assert_eq!(comment, Some("Comment".to_string()));
+    }
+
+    #[test]
+    fn extract_doc_comment_ignores_regular_comments() {
+        // Regular comments starting with just "#" should be ignored
+        let source = "# Regular comment\nproc foo\n  nop\nend\n";
+        let comment = extract_doc_comment(source, 1);
+        assert_eq!(comment, None);
     }
 
     #[async_trait::async_trait]
