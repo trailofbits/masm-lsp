@@ -630,12 +630,13 @@ where
             results.extend(workspace.references_by_suffix(symbol.path.as_str()));
         }
 
-        if params.context.include_declaration {
-            if let Some(def) = workspace.definition(symbol.path.as_str()) {
-                results.push(def);
-            } else if let Some(def) = workspace.definition_by_suffix(symbol.path.as_str()) {
-                results.push(def);
-            }
+        // Always include the definition - users expect to see where a symbol is defined
+        // alongside its usages. This matches common IDE behavior.
+        if let Some(def) = workspace
+            .definition(symbol.path.as_str())
+            .or_else(|| workspace.definition_by_suffix(symbol.path.as_str()))
+        {
+            results.push(def);
         }
 
         if results.is_empty() {
