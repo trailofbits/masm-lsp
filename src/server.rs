@@ -210,11 +210,11 @@ where
         let module_path = self.module_path_from_uri(uri).await;
 
         // Try parsing with Library kind first (most permissive for many constructs)
-        let mut opts = ParseOptions::default();
-        opts.kind = ModuleKind::Library;
-        if let Some(path) = module_path.clone() {
-            opts.path = Some(path.into());
-        }
+        let opts = ParseOptions {
+            kind: ModuleKind::Library,
+            path: module_path.clone().map(Into::into),
+            ..Default::default()
+        };
 
         match source_file
             .clone()
@@ -226,7 +226,7 @@ where
                 if module.kind() != detected_kind {
                     module.set_kind(detected_kind);
                 }
-                return Ok(module);
+                Ok(module)
             }
             Err(library_err) => {
                 // Library parsing failed - check if it's an entrypoint-related error
@@ -271,11 +271,11 @@ where
         kind: miden_assembly_syntax::ast::ModuleKind,
     ) -> std::result::Result<Box<miden_assembly_syntax::ast::Module>, miden_assembly_syntax::Report>
     {
-        let mut opts = ParseOptions::default();
-        opts.kind = kind;
-        if let Some(path) = self.module_path_from_uri(uri).await {
-            opts.path = Some(path.into());
-        }
+        let opts = ParseOptions {
+            kind,
+            path: self.module_path_from_uri(uri).await.map(Into::into),
+            ..Default::default()
+        };
         source_file
             .clone()
             .parse_with_options(self.sources.as_ref(), opts)
@@ -552,7 +552,7 @@ where
                 partial_result_params: Default::default(),
             })
             .await?;
-        Ok(res.map(GotoDefinitionResponse::into))
+        Ok(res)
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
