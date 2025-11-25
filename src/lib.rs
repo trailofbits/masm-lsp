@@ -4,7 +4,10 @@ pub mod index;
 pub mod inlay_hints;
 pub mod resolution;
 pub mod server;
+pub mod symbol_path;
 pub mod util;
+
+pub use symbol_path::SymbolPath;
 
 /// Configuration shared across handlers.
 #[derive(Debug, Clone)]

@@ -1,0 +1,13 @@
+proc add
+  push.1
+end
+
+use ::tmp::aliases::add->plus
+
+proc foo
+  exec.plus
+end
+
+proc bar
+  call.foo
+end

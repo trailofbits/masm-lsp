@@ -1,5 +1,5 @@
-use crate::util::extract_token_at_position;
-use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Uri};
+use crate::util::{extract_token_at_position, to_miden_uri};
+use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan};
 use miden_utils_diagnostics::{Diagnostic as Midiag, Severity};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
@@ -111,10 +111,6 @@ pub fn span_to_range(sources: &DefaultSourceManager, span: SourceSpan) -> Option
             end.column.to_usize().saturating_sub(1) as u32,
         ),
     ))
-}
-
-fn to_miden_uri(uri: &Url) -> Uri {
-    Uri::new(uri.as_str())
 }
 
 fn map_severity(sev: Severity) -> DiagnosticSeverity {

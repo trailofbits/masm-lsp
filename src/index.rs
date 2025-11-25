@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module};
 use miden_debug_types::{DefaultSourceManager, Spanned};
@@ -6,16 +6,17 @@ use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 use crate::diagnostics::span_to_range;
 use crate::resolution::resolve_symbol_at_span;
+use crate::symbol_path::SymbolPath;
 
 #[derive(Clone, Debug)]
 pub struct Definition {
-    pub path: String,
+    pub path: SymbolPath,
     pub range: Range,
 }
 
 #[derive(Clone, Debug)]
 pub struct Reference {
-    pub path: String,
+    pub path: SymbolPath,
     pub range: Range,
 }
 
@@ -51,10 +52,10 @@ impl DocumentSymbols {
 
 #[derive(Default, Debug, Clone)]
 pub struct WorkspaceIndex {
-    definitions: HashMap<String, Location>,
-    def_by_uri: HashMap<Url, Vec<String>>,
-    references: HashMap<String, Vec<Location>>,
-    refs_by_uri: HashMap<Url, Vec<String>>,
+    definitions: HashMap<SymbolPath, Location>,
+    def_by_uri: HashMap<Url, Vec<SymbolPath>>,
+    references: HashMap<SymbolPath, Vec<Location>>,
+    refs_by_uri: HashMap<Url, Vec<SymbolPath>>,
 }
 
 impl WorkspaceIndex {
@@ -77,15 +78,15 @@ impl WorkspaceIndex {
             def_paths.push(def.path.clone());
             self.definitions
                 .insert(def.path.clone(), Location::new(uri.clone(), def.range));
-            if let Some(name) = def.path.rsplit("::").next() {
-                self.definitions
-                    .entry(name.to_string())
-                    .or_insert(Location::new(uri.clone(), def.range));
-            }
+            // Also index by short name for quick lookups
+            let name = def.path.name();
+            self.definitions
+                .entry(SymbolPath::new(name))
+                .or_insert(Location::new(uri.clone(), def.range));
         }
         self.def_by_uri.insert(uri.clone(), def_paths);
 
-        let mut ref_paths: Vec<String> = Vec::new();
+        let mut ref_paths: Vec<SymbolPath> = Vec::new();
         for r in refs {
             ref_paths.push(r.path.clone());
             self.references
@@ -96,17 +97,23 @@ impl WorkspaceIndex {
         self.refs_by_uri.insert(uri, ref_paths);
     }
 
+    /// Look up a definition by exact path.
     pub fn definition(&self, path: &str) -> Option<Location> {
-        self.definitions.get(path).cloned()
+        self.definitions.get(&SymbolPath::new(path)).cloned()
     }
 
+    /// Look up references by exact path.
     pub fn references(&self, path: &str) -> Vec<Location> {
-        self.references.get(path).cloned().unwrap_or_default()
+        self.references
+            .get(&SymbolPath::new(path))
+            .cloned()
+            .unwrap_or_default()
     }
 
+    /// Look up a definition by its short name (last segment).
     pub fn definition_by_name(&self, name: &str) -> Option<Location> {
         self.definitions.iter().find_map(|(path, loc)| {
-            if path.rsplit("::").next().map(|n| n == name).unwrap_or(false) {
+            if path.name_matches(name) {
                 Some(loc.clone())
             } else {
                 None
@@ -114,6 +121,7 @@ impl WorkspaceIndex {
         })
     }
 
+    /// Look up a definition by path suffix.
     pub fn definition_by_suffix(&self, suffix: &str) -> Option<Location> {
         self.definitions.iter().find_map(|(path, loc)| {
             if path.ends_with(suffix) {
@@ -124,6 +132,7 @@ impl WorkspaceIndex {
         })
     }
 
+    /// Look up references by path suffix.
     pub fn references_by_suffix(&self, suffix: &str) -> Vec<Location> {
         self.references
             .iter()
@@ -132,6 +141,7 @@ impl WorkspaceIndex {
             .collect()
     }
 
+    /// Look up definitions by path suffix.
     pub fn definitions_by_suffix(&self, suffix: &str) -> Vec<Location> {
         self.definitions
             .iter()
@@ -140,18 +150,14 @@ impl WorkspaceIndex {
             .collect()
     }
 
+    /// Search for workspace symbols matching a query string.
     pub fn workspace_symbols(&self, query: &str) -> Vec<(String, Location)> {
         self.definitions
             .iter()
-            .filter(|(name, _)| {
-                name.contains(query)
-                    || name
-                        .rsplit("::")
-                        .next()
-                        .map(|last| last.contains(query))
-                        .unwrap_or(false)
+            .filter(|(path, _)| {
+                path.as_str().contains(query) || path.name().contains(query)
             })
-            .map(|(name, loc)| (name.clone(), loc.clone()))
+            .map(|(path, loc)| (path.to_string(), loc.clone()))
             .collect()
     }
 }
@@ -170,20 +176,20 @@ fn collect_definitions(module: &Module, source_manager: &DefaultSourceManager) -
     // Include module itself as a definition so module-level lookups can resolve.
     if let Some(range) = span_to_range(source_manager, module.span()) {
         defs.push(Definition {
-            path: module.path().to_string(),
+            path: SymbolPath::new(module.path().to_string()),
             range,
         });
     }
     for item in module.items() {
         let name = item.name().as_str();
-        let path = build_item_path(module, name);
+        let path = SymbolPath::from_module_and_name(module, name);
         let range = span_to_range(source_manager, item.name().span()).unwrap_or_else(zero_range);
         defs.push(Definition { path, range });
     }
     defs
 }
 
-fn defs_to_set(defs: &[Definition]) -> std::collections::HashSet<String> {
+fn defs_to_set(defs: &[Definition]) -> HashSet<SymbolPath> {
     defs.iter().map(|d| d.path.clone()).collect()
 }
 
@@ -205,12 +211,6 @@ fn collect_references(
     (collector.refs, collector.unresolved)
 }
 
-fn build_item_path(module: &Module, name: &str) -> String {
-    let mut buf = module.path().to_path_buf();
-    buf.push(name);
-    buf.to_string()
-}
-
 fn zero_range() -> Range {
     Range::new(Position::new(0, 0), Position::new(0, 0))
 }
@@ -218,14 +218,14 @@ fn zero_range() -> Range {
 fn infer_path_from_target(
     module: &Module,
     target: &miden_assembly_syntax::ast::InvocationTarget,
-) -> Option<String> {
+) -> Option<SymbolPath> {
     match target {
         miden_assembly_syntax::ast::InvocationTarget::Symbol(ident) => {
-            Some(build_item_path(module, ident.as_str()))
+            Some(SymbolPath::from_module_and_name(module, ident.as_str()))
         }
         miden_assembly_syntax::ast::InvocationTarget::Path(path) => {
             let path = path.inner();
-            Some(path.as_str().to_string())
+            Some(SymbolPath::new(path.as_str()))
         }
         miden_assembly_syntax::ast::InvocationTarget::MastRoot(_) => None,
     }
@@ -237,7 +237,7 @@ struct InvocationCollector<'a> {
     source_manager: &'a DefaultSourceManager,
     refs: Vec<Reference>,
     unresolved: Vec<UnresolvedReference>,
-    known_defs: std::collections::HashSet<String>,
+    known_defs: HashSet<SymbolPath>,
 }
 
 impl<'a> InvocationCollector<'a> {
@@ -245,13 +245,14 @@ impl<'a> InvocationCollector<'a> {
         let resolved = resolve_symbol_at_span(self.module, &self.resolver, target.span());
         let path = resolved
             .clone()
+            .map(SymbolPath::new)
             .or_else(|| infer_path_from_target(self.module, target));
         let range = span_to_range(self.source_manager, target.span()).unwrap_or_else(zero_range);
         match path {
             Some(path) => {
                 if resolved.is_none()
                     && !self.known_defs.contains(&path)
-                    && !self.known_defs.iter().any(|p| p.ends_with(&path))
+                    && !self.known_defs.iter().any(|p| p.ends_with(path.as_str()))
                 {
                     self.unresolved.push(UnresolvedReference {
                         target: target.to_string(),

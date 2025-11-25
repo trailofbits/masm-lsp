@@ -1,13 +1,14 @@
-use crate::util::extract_token_at_position;
+use crate::symbol_path::SymbolPath;
+use crate::util::{extract_token_at_position, to_miden_uri};
 use miden_assembly_syntax::ast::{
     LocalSymbolResolutionError, LocalSymbolResolver, Module, SymbolResolution,
 };
-use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned, Uri};
+use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned};
 use tower_lsp::lsp_types::{Position, Url};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedSymbol {
-    pub path: String,
+    pub path: SymbolPath,
     pub name: String,
 }
 
@@ -18,7 +19,7 @@ pub fn resolve_symbol_at_position(
     source_manager: &DefaultSourceManager,
     position: Position,
 ) -> Result<Option<ResolvedSymbol>, LocalSymbolResolutionError> {
-    let source = source_manager.get_by_uri(&Uri::new(uri.as_str()));
+    let source = source_manager.get_by_uri(&to_miden_uri(uri));
     let Some(source_file) = source else {
         return Ok(None);
     };
@@ -28,7 +29,7 @@ pub fn resolve_symbol_at_position(
 
     if has_local_name(module, token.as_str()) {
         return Ok(Some(ResolvedSymbol {
-            path: build_item_path(module, token.as_str()),
+            path: SymbolPath::from_module_and_name(module, token.as_str()),
             name: token,
         }));
     }
@@ -41,11 +42,11 @@ pub fn resolve_symbol_at_position(
                     panic!("invalid item index {:?}", span.into_inner());
                 });
                 let name = item.name();
-                let path = build_item_path(module, name.as_str());
+                let path = SymbolPath::from_module_and_name(module, name.as_str());
                 ResolvedSymbol { path, name: token }
             }
             SymbolResolution::External(path) => {
-                let local_path = build_item_path(module, token.as_str());
+                let local_path = SymbolPath::from_module_and_name(module, token.as_str());
                 if has_local_name(module, token.as_str()) {
                     ResolvedSymbol {
                         path: local_path,
@@ -53,13 +54,13 @@ pub fn resolve_symbol_at_position(
                     }
                 } else {
                     ResolvedSymbol {
-                        path: path.into_inner().as_str().to_string(),
+                        path: SymbolPath::new(path.into_inner().as_str()),
                         name: token,
                     }
                 }
             }
             SymbolResolution::Module { path, .. } => {
-                let local_path = build_item_path(module, token.as_str());
+                let local_path = SymbolPath::from_module_and_name(module, token.as_str());
                 if has_local_name(module, token.as_str()) {
                     ResolvedSymbol {
                         path: local_path,
@@ -67,13 +68,13 @@ pub fn resolve_symbol_at_position(
                     }
                 } else {
                     ResolvedSymbol {
-                        path: path.as_str().to_string(),
+                        path: SymbolPath::new(path.as_str()),
                         name: token,
                     }
                 }
             }
             SymbolResolution::Exact { path, .. } => ResolvedSymbol {
-                path: path.into_inner().as_str().to_string(),
+                path: SymbolPath::new(path.into_inner().as_str()),
                 name: token,
             },
             SymbolResolution::MastRoot(_) => return Ok(None),
@@ -82,12 +83,6 @@ pub fn resolve_symbol_at_position(
     }
 
     Ok(None)
-}
-
-pub fn build_item_path(module: &Module, name: &str) -> String {
-    let mut buf = module.path().to_path_buf();
-    buf.push(name);
-    buf.to_string()
 }
 
 /// Resolve a symbol referenced by a span using the provided resolver.
@@ -99,7 +94,7 @@ pub fn resolve_symbol_at_span(
     // Attempt to resolve by comparing spans with item names
     for item in module.items() {
         if item.name().span() == target_span {
-            return Some(build_item_path(module, item.name().as_str()));
+            return Some(SymbolPath::from_module_and_name(module, item.name().as_str()).to_string());
         }
     }
 
@@ -110,7 +105,7 @@ pub fn resolve_symbol_at_span(
                 return match resolved {
                     SymbolResolution::Local(idx) => {
                         let item = module.get(idx.into_inner())?;
-                        Some(build_item_path(module, item.name().as_str()))
+                        Some(SymbolPath::from_module_and_name(module, item.name().as_str()).to_string())
                     }
                     SymbolResolution::External(path) => {
                         Some(path.into_inner().as_str().to_string())

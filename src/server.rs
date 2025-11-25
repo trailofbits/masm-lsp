@@ -6,7 +6,7 @@ use std::{
 };
 
 use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
-use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager, Uri};
+use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
 use miden_utils_diagnostics as diagnostics;
 use tokio::sync::RwLock;
 use tower_lsp::{
@@ -29,7 +29,7 @@ use crate::{
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
     inlay_hints::collect_inlay_hints,
     resolution::resolve_symbol_at_position,
-    util::{guess_module_kinds, lsp_range_to_selection},
+    util::{guess_module_kinds, lsp_range_to_selection, to_miden_uri},
     LibraryPath, ServerConfig,
 };
 
@@ -283,7 +283,7 @@ where
     }
 
     fn extract_path_hint(&self, uri: &Url, pos: lsp_types::Position) -> Option<String> {
-        let source = self.sources.get_by_uri(&Uri::new(uri.as_str()))?;
+        let source = self.sources.get_by_uri(&to_miden_uri(uri))?;
         let line = source.as_str().lines().nth(pos.line as usize)?;
         let mut start = usize::min(pos.character as usize, line.len());
         while start > 0 && is_path_char(line.as_bytes()[start - 1] as char) {
@@ -437,7 +437,7 @@ where
             // fallback: try lookup by token name
             if let Some(token) = self
                 .sources
-                .get_by_uri(&miden_debug_types::Uri::new(uri.as_str()))
+                .get_by_uri(&to_miden_uri(&uri))
                 .and_then(|src| crate::util::extract_token_at_position(&src, pos))
             {
                 let workspace = self.workspace.read().await;
@@ -450,7 +450,7 @@ where
 
         let workspace = self.workspace.read().await;
         if let Some(loc) = workspace
-            .definition(&symbol.path)
+            .definition(symbol.path.as_str())
             .or_else(|| workspace.definition_by_name(&symbol.name))
         {
             return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
@@ -502,15 +502,15 @@ where
 
         let workspace = self.workspace.read().await;
 
-        let mut results = workspace.references(&symbol.path);
+        let mut results = workspace.references(symbol.path.as_str());
         if results.is_empty() {
-            results.extend(workspace.references_by_suffix(&symbol.path));
+            results.extend(workspace.references_by_suffix(symbol.path.as_str()));
         }
 
         if params.context.include_declaration {
-            if let Some(def) = workspace.definition(&symbol.path) {
+            if let Some(def) = workspace.definition(symbol.path.as_str()) {
                 results.push(def);
-            } else if let Some(def) = workspace.definition_by_suffix(&symbol.path) {
+            } else if let Some(def) = workspace.definition_by_suffix(symbol.path.as_str()) {
                 results.push(def);
             }
         }
@@ -603,10 +603,6 @@ fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<LibraryPath
     } else {
         Some(out)
     }
-}
-
-fn to_miden_uri(uri: &Url) -> Uri {
-    Uri::new(uri.as_str())
 }
 
 fn enqueue_kind(

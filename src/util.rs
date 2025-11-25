@@ -1,9 +1,6 @@
-use miden_debug_types::{Position as MidenPosition, Selection};
-use tower_lsp::lsp_types::{Range, Url};
-
 use miden_assembly_syntax::ast::ModuleKind;
-use miden_debug_types::SourceFile;
-use tower_lsp::lsp_types::Position;
+use miden_debug_types::{Position as MidenPosition, Selection, SourceFile, Uri};
+use tower_lsp::lsp_types::{Position, Range, Url};
 
 /// Convert an LSP range to a Miden selection.
 pub fn lsp_range_to_selection(range: Range) -> Selection {
@@ -80,4 +77,9 @@ fn byte_offset_from_position(source: &SourceFile, pos: Position) -> Option<usize
         offset += line.len();
     }
     None
+}
+
+/// Convert an LSP URL to a Miden URI.
+pub fn to_miden_uri(uri: &Url) -> Uri {
+    Uri::new(uri.as_str())
 }
