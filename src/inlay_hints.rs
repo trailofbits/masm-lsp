@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
 use miden_assembly_syntax::ast::visit::{self, Visit};
 use miden_assembly_syntax::ast::{Instruction, Module};
 use miden_debug_types::{DefaultSourceManager, Span};
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range};
 
 use crate::diagnostics::span_to_range;
+
+// Include the compile-time generated instruction map
+include!(concat!(env!("OUT_DIR"), "/instruction_map.rs"));
 
 /// Collect inlay hints for all instructions in a module.
 pub fn collect_inlay_hints(
@@ -18,53 +18,27 @@ pub fn collect_inlay_hints(
     let mut collector = InstructionCollector::default();
     let _ = visit::visit_module(&mut collector, module);
 
-    let notes = instruction_note_map();
+    // Fixed padding (in columns) between instruction end and hint.
+    let padding = (tab_count.max(1)) as u32;
 
-    // First collect the instructions that are visible along with their ranges so we can align
-    // all hints on a line to the same column.
-    let mut entries = Vec::new();
-    for inst in collector.instructions.into_iter() {
-        let range = match span_to_range(sources, inst.span()) {
-            Some(range) => range,
-            None => continue,
-        };
-        if !position_in_range(&range.end, visible_range) {
-            continue;
-        }
-        entries.push((inst, range));
-    }
-
-    // Compute the maximum end column per line to align the hints.
-    let mut max_end_per_line: HashMap<u32, u32> = HashMap::new();
-    for (_, range) in entries.iter() {
-        let end_col = range.end.character;
-        max_end_per_line
-            .entry(range.end.line)
-            .and_modify(|m| *m = (*m).max(end_col))
-            .or_insert(end_col);
-    }
-
-    entries
+    collector
+        .instructions
         .into_iter()
-        .filter_map(|(inst, range)| {
-            let base_col = *max_end_per_line
-                .get(&range.end.line)
-                .unwrap_or(&range.end.character);
-            // Leave at least one column after the instruction and add configured padding.
-            let padding = (tab_count.max(1)) as u32;
-            let align_col = base_col.saturating_add(padding);
-            let label_text = render_note(&inst, &notes)?;
+        .filter_map(|inst| {
+            let range = span_to_range(sources, inst.span())?;
+            if !position_in_range(&range.end, visible_range) {
+                return None;
+            }
+            let label_text = render_note(&inst)?;
             Some(InlayHint {
                 position: Position {
                     line: range.end.line,
-                    character: align_col,
+                    character: range.end.character.saturating_add(padding),
                 },
                 label: InlayHintLabel::String(label_text),
                 kind: Some(InlayHintKind::TYPE),
                 text_edits: None,
                 tooltip: None,
-                padding_left: Some(true),
-                padding_right: None,
                 data: None,
             })
         })
@@ -83,13 +57,14 @@ fn is_after(a: &Position, b: &Position) -> bool {
     a.line > b.line || (a.line == b.line && a.character > b.character)
 }
 
-fn render_note(instruction: &Span<Instruction>, map: &HashMap<String, String>) -> Option<String> {
+fn render_note(instruction: &Span<Instruction>) -> Option<String> {
     let rendered = instruction.inner().to_string();
-    let note = if let Some(value) = map.get(&rendered) {
-        value.clone()
+    // Try exact match first, then base instruction name
+    let note = if let Some(value) = INSTRUCTION_MAP.get(&rendered) {
+        *value
     } else {
         let base = rendered.split('.').next().unwrap_or(rendered.as_str());
-        map.get(base).cloned()?
+        *INSTRUCTION_MAP.get(base)?
     };
     // Prefix with a comment marker; alignment is handled via the inlay position.
     Some(format!("# {note}"))
@@ -107,78 +82,97 @@ impl Visit for InstructionCollector {
     }
 }
 
-fn instruction_note_map() -> &'static HashMap<String, String> {
-    static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
-    MAP.get_or_init(parse_instruction_reference)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn parse_instruction_reference() -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let content = include_str!("../data/instruction_reference.md");
-    for line in content.lines() {
-        let line = line.trim();
-        if !line.starts_with('|') {
-            continue;
-        }
-        if line.starts_with("| ---") || line.starts_with("| --------") {
-            continue;
-        }
-        let columns: Vec<_> = line.split('|').map(str::trim).collect();
-        if columns.len() < 6 {
-            continue;
-        }
-        let inst_col = columns[1];
-        let note_col = columns.get(5).copied().unwrap_or_default();
-        if inst_col.eq_ignore_ascii_case("instruction") {
-            continue;
-        }
+    #[test]
+    fn position_comparison_before() {
+        let a = Position::new(0, 5);
+        let b = Position::new(0, 10);
+        assert!(is_before(&a, &b));
+        assert!(!is_before(&b, &a));
 
-        let note = first_sentence(clean_html(note_col));
-        if inst_col.is_empty() || note.is_empty() {
-            continue;
-        }
-
-        for name in inst_col
-            .split("<br />")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let cleaned = clean_instruction_name(name);
-            if cleaned.is_empty() || cleaned.starts_with('-') {
-                continue;
-            }
-            map.insert(cleaned.to_string(), note.clone());
-        }
+        let a = Position::new(0, 10);
+        let b = Position::new(1, 0);
+        assert!(is_before(&a, &b));
     }
-    map
-}
 
-fn first_sentence(note: String) -> String {
-    let trimmed = note.trim();
-    if trimmed.is_empty() {
-        return String::new();
+    #[test]
+    fn position_comparison_after() {
+        let a = Position::new(1, 5);
+        let b = Position::new(0, 10);
+        assert!(is_after(&a, &b));
+        assert!(!is_after(&b, &a));
+
+        let a = Position::new(0, 10);
+        let b = Position::new(0, 5);
+        assert!(is_after(&a, &b));
     }
-    if let Some(idx) = trimmed.find('.') {
-        return trimmed[..=idx].trim().to_string();
+
+    #[test]
+    fn position_comparison_equal() {
+        let a = Position::new(5, 10);
+        let b = Position::new(5, 10);
+        assert!(!is_before(&a, &b));
+        assert!(!is_after(&a, &b));
     }
-    trimmed.to_string()
-}
 
-fn clean_instruction_name(raw: &str) -> String {
-    raw.trim_matches('`')
-        .replace('*', "")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .trim()
-        .to_string()
-}
+    #[test]
+    fn position_in_range_inside() {
+        let pos = Position::new(5, 10);
+        let range = Range::new(Position::new(0, 0), Position::new(10, 0));
+        assert!(position_in_range(&pos, &range));
+    }
 
-fn clean_html(raw: &str) -> String {
-    raw.replace("<br />", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("$$", "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    #[test]
+    fn position_in_range_at_start() {
+        let pos = Position::new(0, 0);
+        let range = Range::new(Position::new(0, 0), Position::new(10, 0));
+        assert!(position_in_range(&pos, &range));
+    }
+
+    #[test]
+    fn position_in_range_at_end() {
+        let pos = Position::new(10, 0);
+        let range = Range::new(Position::new(0, 0), Position::new(10, 0));
+        assert!(position_in_range(&pos, &range));
+    }
+
+    #[test]
+    fn position_in_range_before() {
+        let pos = Position::new(0, 0);
+        let range = Range::new(Position::new(5, 0), Position::new(10, 0));
+        assert!(!position_in_range(&pos, &range));
+    }
+
+    #[test]
+    fn position_in_range_after() {
+        let pos = Position::new(15, 0);
+        let range = Range::new(Position::new(5, 0), Position::new(10, 0));
+        assert!(!position_in_range(&pos, &range));
+    }
+
+    #[test]
+    fn instruction_map_contains_common_instructions() {
+        // Test that common instructions are in the map
+        assert!(INSTRUCTION_MAP.contains_key("add"));
+        assert!(INSTRUCTION_MAP.contains_key("push"));
+        assert!(INSTRUCTION_MAP.contains_key("nop"));
+        assert!(INSTRUCTION_MAP.contains_key("dup"));
+    }
+
+    #[test]
+    fn instruction_map_lookup_returns_description() {
+        let desc = INSTRUCTION_MAP.get("add");
+        assert!(desc.is_some());
+        let desc_str = *desc.unwrap();
+        assert!(!desc_str.is_empty());
+    }
+
+    #[test]
+    fn instruction_collector_default() {
+        let collector = InstructionCollector::default();
+        assert!(collector.instructions.is_empty());
+    }
 }
