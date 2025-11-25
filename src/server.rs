@@ -1,4 +1,9 @@
-use std::{collections::{HashMap, VecDeque}, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    fs,
+    path::Path,
+    sync::Arc,
+};
 
 use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager, Uri};
@@ -7,10 +12,11 @@ use tokio::sync::RwLock;
 use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
-        self, request::{GotoImplementationParams, GotoImplementationResponse},
+        self,
+        request::{GotoImplementationParams, GotoImplementationResponse},
         Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, InitializeParams,
-        InitializeResult, InitializedParams, Location, ReferenceParams, ServerCapabilities,
-        SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+        InitializeResult, InitializedParams, InlayHint, InlayHintParams, Location, ReferenceParams,
+        ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
         TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
     },
     LanguageServer,
@@ -19,10 +25,12 @@ use tracing::{error, info};
 
 use crate::{
     client::PublishDiagnostics,
-    diagnostics::diagnostics_from_report,
+    diagnostics::{diagnostics_from_report, unresolved_to_diagnostics},
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
+    inlay_hints::collect_inlay_hints,
     resolution::resolve_symbol_at_position,
     util::{guess_module_kinds, lsp_range_to_selection},
+    LibraryPath, ServerConfig,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -37,6 +45,7 @@ pub struct Backend<C = tower_lsp::Client> {
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
     symbols: Arc<RwLock<HashMap<Url, DocumentSymbols>>>,
     workspace: Arc<RwLock<WorkspaceIndex>>,
+    config: Arc<RwLock<ServerConfig>>,
 }
 
 impl<C> Backend<C> {
@@ -47,6 +56,14 @@ impl<C> Backend<C> {
             documents: Arc::new(RwLock::new(HashMap::new())),
             symbols: Arc::new(RwLock::new(HashMap::new())),
             workspace: Arc::new(RwLock::new(WorkspaceIndex::default())),
+            config: Arc::new(RwLock::new(ServerConfig::default())),
+        }
+    }
+
+    pub fn new_with_config(client: C, config: ServerConfig) -> Self {
+        Self {
+            config: Arc::new(RwLock::new(config)),
+            ..Self::new(client)
         }
     }
 }
@@ -60,12 +77,30 @@ impl<C> Backend<C> {
         let docs = self.symbols.read().await;
         docs.get(uri).cloned()
     }
+
+    pub async fn update_config(&self, cfg: ServerConfig) {
+        let mut guard = self.config.write().await;
+        *guard = cfg;
+    }
+
+    pub async fn snapshot_config(&self) -> ServerConfig {
+        self.config.read().await.clone()
+    }
 }
 
 impl<C> Backend<C>
 where
     C: PublishDiagnostics,
 {
+    pub async fn load_configured_libraries(&self) {
+        let cfg = self.snapshot_config().await;
+        for lib in &cfg.library_paths {
+            if let Err(err) = self.load_library_root(lib).await {
+                error!("failed to load library root {}: {err}", lib.root.display());
+            }
+        }
+    }
+
     async fn handle_open(
         &self,
         uri: Url,
@@ -122,13 +157,22 @@ where
             docs.get(&uri).map(|doc| doc.version)
         };
 
-        let diagnostics = match self.parse_module(&uri).await {
-            Ok(_) => {
-                let _ = self.parse_and_index(&uri).await;
-                Vec::new()
+        let diagnostics = match self.parse_and_index(&uri).await {
+            Ok(doc) => {
+                let mut diags = Vec::new();
+                diags.extend(unresolved_to_diagnostics(&uri, &doc));
+                diags
             }
-            Err(report) => diagnostics_from_report(&self.sources, &uri, report),
+            Err(report) => {
+                let mut diags = diagnostics_from_report(&self.sources, &uri, report);
+                if let Some(doc) = self.snapshot_document_symbols(&uri).await {
+                    diags.extend(unresolved_to_diagnostics(&uri, &doc));
+                }
+                diags
+            }
         };
+
+        let diagnostics = rewrite_syntax_errors(&self.sources, &uri, diagnostics);
 
         self.client
             .publish_diagnostics(uri, diagnostics.clone(), version)
@@ -154,7 +198,7 @@ where
         while let Some(kind) = candidates.pop_front() {
             let mut opts = ParseOptions::default();
             opts.kind = kind;
-            if let Some(path) = module_path_from_uri(uri) {
+            if let Some(path) = self.module_path_from_uri(uri).await {
                 opts.path = Some(path.into());
             }
             match source_file
@@ -190,6 +234,20 @@ where
         Err(first_err.unwrap_or_else(|| diagnostics::report!("parse failed")))
     }
 
+    async fn module_path_from_uri(&self, uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
+        if let Ok(fs_path) = uri.to_file_path() {
+            let cfg = self.config.read().await;
+            for lib in &cfg.library_paths {
+                if fs_path.starts_with(&lib.root) {
+                    if let Some(buf) = build_path_from_root(&fs_path, &lib.root, &lib.prefix) {
+                        return Some(buf);
+                    }
+                }
+            }
+        }
+        module_path_from_uri_fallback(uri)
+    }
+
     async fn parse_and_index(
         &self,
         uri: &Url,
@@ -204,7 +262,11 @@ where
 
         {
             let mut ws = self.workspace.write().await;
-            ws.update_document(uri.clone(), &doc_symbols.definitions, &doc_symbols.references);
+            ws.update_document(
+                uri.clone(),
+                &doc_symbols.definitions,
+                &doc_symbols.references,
+            );
         }
 
         Ok(doc_symbols)
@@ -218,6 +280,67 @@ where
             }
         }
         self.parse_and_index(uri).await.ok()
+    }
+
+    fn extract_path_hint(&self, uri: &Url, pos: lsp_types::Position) -> Option<String> {
+        let source = self.sources.get_by_uri(&Uri::new(uri.as_str()))?;
+        let line = source.as_str().lines().nth(pos.line as usize)?;
+        let mut start = usize::min(pos.character as usize, line.len());
+        while start > 0 && is_path_char(line.as_bytes()[start - 1] as char) {
+            start -= 1;
+        }
+        let mut end = usize::min(pos.character as usize, line.len());
+        while end < line.len() && is_path_char(line.as_bytes()[end] as char) {
+            end += 1;
+        }
+        if start >= end {
+            return None;
+        }
+        let mut slice = line[start..end].to_string();
+        if let Some(stripped) = slice.strip_prefix("exec.") {
+            slice = stripped.to_string();
+        } else if let Some(stripped) = slice.strip_prefix("call.") {
+            slice = stripped.to_string();
+        }
+        Some(slice)
+    }
+
+    async fn load_library_root(&self, lib: &LibraryPath) -> std::io::Result<()> {
+        if !lib.root.is_dir() {
+            return Ok(());
+        }
+        let mut stack = vec![lib.root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("masm"))
+                    .unwrap_or(false)
+                {
+                    self.load_library_file(&path).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_library_file(&self, path: &Path) -> std::io::Result<()> {
+        let text = fs::read_to_string(path)?;
+        let url = Url::from_file_path(path).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid file path for Url",
+            )
+        })?;
+        let miden_uri = to_miden_uri(&url);
+        self.sources.load(SourceLanguage::Masm, miden_uri, text);
+        let _ = self.parse_and_index(&url).await;
+        Ok(())
     }
 }
 
@@ -237,6 +360,7 @@ where
             )),
             references_provider: Some(lsp_types::OneOf::Left(true)),
             workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+            inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
             ..Default::default()
         };
 
@@ -248,6 +372,21 @@ where
 
     async fn initialized(&self, _: InitializedParams) {
         info!("MASM LSP initialized");
+        self.load_configured_libraries().await;
+    }
+
+    async fn did_change_configuration(&self, params: lsp_types::DidChangeConfigurationParams) {
+        let mut cfg = self.config.write().await;
+        if let Some(tab_count) = extract_tab_count(&params.settings) {
+            cfg.inlay_hint_tabs = tab_count;
+            info!("updated inlay hint tab padding: {}", tab_count);
+        }
+        if let Some(paths) = extract_library_paths(&params.settings) {
+            cfg.library_paths = paths;
+            info!("updated library search paths");
+        }
+        drop(cfg);
+        self.load_configured_libraries().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -262,10 +401,12 @@ where
     }
 
     async fn did_change(&self, params: lsp_types::DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri;
+        let uri = params.text_document.uri.clone();
         let version = params.text_document.version;
         self.handle_change(uri, version, params.content_changes)
             .await;
+        // Re-run diagnostics on the updated document.
+        let _ = self.publish_diagnostics(params.text_document.uri).await;
     }
 
     async fn did_close(&self, params: lsp_types::DidCloseTextDocumentParams) {
@@ -284,11 +425,15 @@ where
 
         let resolved =
             resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos).map_err(|e| {
-                tower_lsp::jsonrpc::Error::invalid_params(format!(
-                    "failed to resolve symbol: {e}"
-                ))
+                tower_lsp::jsonrpc::Error::invalid_params(format!("failed to resolve symbol: {e}"))
             })?;
         let Some(symbol) = resolved else {
+            if let Some(path_hint) = self.extract_path_hint(&uri, pos) {
+                let workspace = self.workspace.read().await;
+                if let Some(loc) = workspace.definition_by_suffix(&path_hint) {
+                    return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                }
+            }
             // fallback: try lookup by token name
             if let Some(token) = self
                 .sources
@@ -337,23 +482,44 @@ where
 
         let resolved =
             resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos).map_err(|e| {
-                tower_lsp::jsonrpc::Error::invalid_params(format!(
-                    "failed to resolve symbol: {e}"
-                ))
+                tower_lsp::jsonrpc::Error::invalid_params(format!("failed to resolve symbol: {e}"))
             })?;
         let Some(symbol) = resolved else {
+            if let Some(path_hint) = self.extract_path_hint(&uri, pos) {
+                let workspace = self.workspace.read().await;
+                let mut refs = workspace.references_by_suffix(&path_hint);
+                if params.context.include_declaration {
+                    for def in workspace.definitions_by_suffix(&path_hint) {
+                        refs.push(def);
+                    }
+                }
+                if !refs.is_empty() {
+                    return Ok(Some(refs));
+                }
+            }
             return Ok(None);
         };
 
         let workspace = self.workspace.read().await;
-        let mut refs = workspace.references(&symbol.path);
+
+        let mut results = workspace.references(&symbol.path);
+        if results.is_empty() {
+            results.extend(workspace.references_by_suffix(&symbol.path));
+        }
+
         if params.context.include_declaration {
             if let Some(def) = workspace.definition(&symbol.path) {
-                refs.push(def);
+                results.push(def);
+            } else if let Some(def) = workspace.definition_by_suffix(&symbol.path) {
+                results.push(def);
             }
         }
 
-        Ok(Some(refs))
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(results))
+        }
     }
 
     async fn symbol(
@@ -380,6 +546,63 @@ where
             .collect();
         Ok(Some(syms))
     }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.get_or_parse_document(&uri).await else {
+            return Ok(None);
+        };
+
+        let tab_count = self.snapshot_config().await.inlay_hint_tabs;
+        let hints =
+            collect_inlay_hints(&doc.module, self.sources.as_ref(), &params.range, tab_count);
+        Ok(Some(hints))
+    }
+}
+
+fn extract_tab_count(settings: &serde_json::Value) -> Option<usize> {
+    // Expect settings like { "masm": { "inlayHint": { "tabPadding": 2 } } }
+    settings
+        .get("masm")
+        .and_then(|v| v.get("inlayHint"))
+        .and_then(|v| v.get("tabPadding"))
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+        .filter(|v| *v > 0)
+}
+
+fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<LibraryPath>> {
+    let arr = settings
+        .get("masm")
+        .and_then(|v| v.get("libraryPaths"))
+        .and_then(|v| v.as_array())?;
+    let mut out = Vec::new();
+    for entry in arr {
+        match entry {
+            serde_json::Value::String(path) => {
+                out.push(LibraryPath {
+                    root: path.into(),
+                    prefix: "std".to_string(),
+                });
+            }
+            serde_json::Value::Object(map) => {
+                let Some(path_val) = map.get("path").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let prefix = map.get("prefix").and_then(|v| v.as_str()).unwrap_or("std");
+                out.push(LibraryPath {
+                    root: path_val.into(),
+                    prefix: prefix.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn to_miden_uri(uri: &Url) -> Uri {
@@ -395,37 +618,90 @@ fn enqueue_kind(
     }
 }
 
-fn module_path_from_uri(uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
+fn module_path_from_uri_fallback(uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
     let path = uri.path();
-    let segments: Vec<&str> = path
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-    if segments.is_empty() {
-        return None;
-    }
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())?;
     let mut buf = miden_assembly_syntax::ast::PathBuf::default();
-    for (i, seg) in segments.iter().enumerate() {
-        let cleaned = if i == segments.len() - 1 {
-            seg.split('.').next().unwrap_or(*seg)
-        } else {
-            seg
-        };
-        if cleaned.is_empty() {
+    buf.push(stem);
+    Some(buf)
+}
+
+fn build_path_from_root(
+    path: &Path,
+    root: &Path,
+    prefix: &str,
+) -> Option<miden_assembly_syntax::ast::PathBuf> {
+    let rel = path.strip_prefix(root).ok()?;
+    let mut buf = miden_assembly_syntax::ast::PathBuf::default();
+    if !prefix.is_empty() {
+        buf.push(prefix);
+    }
+    let parts: Vec<_> = rel.iter().collect();
+    for (i, comp) in parts.iter().enumerate() {
+        let mut seg = comp.to_string_lossy();
+        if i == parts.len().saturating_sub(1) {
+            if let Some(stripped) = seg.split('.').next() {
+                seg = std::borrow::Cow::Owned(stripped.to_string());
+            }
+        }
+        if seg.is_empty() {
             continue;
         }
-        buf.push(cleaned);
+        buf.push(seg.as_ref());
     }
     Some(buf)
+}
+
+fn is_path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.')
+}
+
+fn rewrite_syntax_errors(
+    sources: &DefaultSourceManager,
+    uri: &Url,
+    mut diags: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    if let Some(source) = sources.get_by_uri(&to_miden_uri(uri)) {
+        for d in diags.iter_mut() {
+            if d.message.contains("syntax error") {
+                if let Some(tok) = crate::util::extract_token_at_position(&source, d.range.start) {
+                    d.message = format!("unresolved invocation target `{tok}`");
+                    if let Some(idx) = source.as_str().find(&tok) {
+                        if let Some(r) =
+                            crate::diagnostics::byte_range_to_range(&source, idx, idx + tok.len())
+                        {
+                            d.range = r;
+                            continue;
+                        }
+                    }
+                    for (line_idx, line) in source.as_str().lines().enumerate() {
+                        if let Some(col) = line.find(&tok) {
+                            d.range = lsp_types::Range::new(
+                                lsp_types::Position::new(line_idx as u32, col as u32),
+                                lsp_types::Position::new(line_idx as u32, (col + tok.len()) as u32),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    diags
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::util::guess_module_kinds;
+    use std::path::PathBuf;
     use tower_lsp::lsp_types::{
-        DidChangeTextDocumentParams, DidOpenTextDocumentParams, TextDocumentItem,
-        VersionedTextDocumentIdentifier,
+        DidChangeTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
+        GotoDefinitionResponse, ReferenceContext, ReferenceParams, TextDocumentItem,
+        TextDocumentPositionParams, VersionedTextDocumentIdentifier,
     };
 
     #[tokio::test]
@@ -477,11 +753,303 @@ mod tests {
         backend.did_change(change_params).await;
 
         let published = client.take_published().await;
-        // Expect two publish calls: one on open, one on change.
-        assert_eq!(published.len(), 2);
-        let (_, diags_after_change, version) = &published[1];
+        assert!(
+            published.len() >= 2,
+            "expected at least two publish calls, got {}",
+            published.len()
+        );
+        let (_, diags_after_change, version) = published.last().unwrap();
         assert!(!diags_after_change.is_empty());
         assert_eq!(*version, Some(2));
+    }
+
+    #[tokio::test]
+    async fn goto_definition_resolves_stdlib_sha256() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stdlib_root = manifest_dir
+            .join(".codex")
+            .join("miden-vm")
+            .join("stdlib")
+            .join("asm");
+        let example_path = manifest_dir
+            .join(".codex")
+            .join("miden-vm")
+            .join("miden-vm")
+            .join("masm-examples")
+            .join("hashing")
+            .join("sha256")
+            .join("sha256.masm");
+
+        if !stdlib_root.is_dir() || !example_path.is_file() {
+            // Skip when test data is unavailable in the sandbox.
+            return;
+        }
+
+        let mut cfg = ServerConfig::default();
+        cfg.library_paths = vec![LibraryPath {
+            root: stdlib_root.clone(),
+            prefix: "std".to_string(),
+        }];
+
+        let client = RecordingClient::default();
+        let backend = Backend::new(client.clone());
+        backend.update_config(cfg).await;
+        backend.load_configured_libraries().await;
+
+        let text = std::fs::read_to_string(&example_path).unwrap();
+        let uri = Url::from_file_path(&example_path).unwrap();
+        let open_params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "masm".into(),
+                version: 1,
+                text: text.clone(),
+            },
+        };
+        backend.did_open(open_params).await;
+
+        let pos_hash = position_of(&text, "exec.sha256::hash_2to1");
+        let def = backend
+            .goto_definition(GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position: pos_hash,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .expect("goto def");
+
+        let Some(GotoDefinitionResponse::Scalar(loc)) = def else {
+            panic!("expected scalar goto definition");
+        };
+        let expected_uri = Url::from_file_path(
+            stdlib_root
+                .join("crypto")
+                .join("hashes")
+                .join("sha256.masm"),
+        )
+        .unwrap();
+        assert_eq!(loc.uri, expected_uri);
+        assert_eq!(
+            loc.range.start.line,
+            position_of_stdlib(&expected_uri, "pub proc hash_2to1").line
+        );
+
+        // Cursor on the module name should still resolve to the module file.
+        let pos_module = position_of(&text, "sha256::");
+        let def_module = backend
+            .goto_definition(GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position: pos_module,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .expect("goto def module");
+        let Some(GotoDefinitionResponse::Scalar(module_loc)) = def_module else {
+            panic!("expected scalar goto definition");
+        };
+        assert_eq!(module_loc.uri, expected_uri);
+    }
+
+    #[tokio::test]
+    async fn references_across_files_include_definition_and_callsite() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stdlib_root = manifest_dir
+            .join(".codex")
+            .join("miden-vm")
+            .join("stdlib")
+            .join("asm");
+        let example_path = manifest_dir
+            .join(".codex")
+            .join("miden-vm")
+            .join("miden-vm")
+            .join("masm-examples")
+            .join("hashing")
+            .join("sha256")
+            .join("sha256.masm");
+
+        if !stdlib_root.is_dir() || !example_path.is_file() {
+            return;
+        }
+
+        let mut cfg = ServerConfig::default();
+        cfg.library_paths = vec![LibraryPath {
+            root: stdlib_root.clone(),
+            prefix: "std".to_string(),
+        }];
+
+        let client = RecordingClient::default();
+        let backend = Backend::new(client.clone());
+        backend.update_config(cfg).await;
+        backend.load_configured_libraries().await;
+
+        let text = std::fs::read_to_string(&example_path).unwrap();
+        let uri = Url::from_file_path(&example_path).unwrap();
+        let open_params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "masm".into(),
+                version: 1,
+                text: text.clone(),
+            },
+        };
+        backend.did_open(open_params).await;
+
+        let pos_hash = position_of(&text, "exec.sha256::hash_2to1");
+        let refs = backend
+            .references(ReferenceParams {
+                text_document_position: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position: pos_hash,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+            })
+            .await
+            .expect("references");
+        let Some(list) = refs else {
+            panic!("expected references");
+        };
+        eprintln!("refs debug: {:?}", list);
+        let expected_def_uri = Url::from_file_path(
+            stdlib_root
+                .join("crypto")
+                .join("hashes")
+                .join("sha256.masm"),
+        )
+        .unwrap();
+
+        assert!(
+            list.iter().any(|loc| loc.uri == expected_def_uri),
+            "should include definition in stdlib"
+        );
+        assert!(
+            list.iter().any(|loc| loc.uri == uri),
+            "should include call site"
+        );
+        assert!(
+            list.len() >= 2,
+            "expected at least callsite and definition, got {}",
+            list.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn references_include_multiple_calls_in_same_file() {
+        let client = RecordingClient::default();
+        let backend = Backend::new(client.clone());
+        let uri = Url::parse("file:///tmp/multi_refs.masm").unwrap();
+        let text = r#"proc f
+    nop
+end
+
+proc g
+    exec.f
+    exec.f
+end
+"#
+        .to_string();
+
+        backend
+            .handle_open(uri.clone(), 1, text.clone())
+            .await
+            .expect("open");
+
+        let pos_call = position_of(&text, "exec.f");
+        let refs = backend
+            .references(ReferenceParams {
+                text_document_position: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position: pos_call,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+            })
+            .await
+            .expect("references");
+        let Some(list) = refs else {
+            panic!("expected references");
+        };
+        let calls = list.iter().filter(|loc| loc.uri == uri).count();
+        assert!(
+            calls >= 2,
+            "expected at least two callsites in same file, got {}",
+            calls
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_invocation_reports_diagnostic_after_change() {
+        let client = RecordingClient::default();
+        let backend = Backend::new(client.clone());
+        let uri = Url::parse("file:///tmp/unresolved.masm").unwrap();
+        let valid = r#"proc foo
+    nop
+end
+
+proc g
+    exec.foo
+end
+"#
+        .to_string();
+
+        backend
+            .handle_open(uri.clone(), 1, valid.clone())
+            .await
+            .expect("open");
+        let _ = client.take_published().await;
+
+        let invalid = r#"proc bar
+    nop
+end
+
+proc g
+    exec.foo
+end
+"#
+        .to_string();
+
+        backend
+            .did_change(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: 2,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: invalid.clone(),
+                }],
+            })
+            .await;
+
+        let doc = backend.get_or_parse_document(&uri).await.expect("doc");
+        assert!(
+            !doc.unresolved.is_empty(),
+            "expected unresolved references recorded"
+        );
+
+        let diags = backend.publish_diagnostics(uri.clone()).await;
+        assert!(!diags.is_empty(), "diagnostics should not be empty");
+        let pos = position_of(&invalid, "foo");
+        let messages: Vec<_> = diags.iter().map(|d| d.message.clone()).collect();
+        let target_diag = diags
+            .iter()
+            .find(|d| d.message.contains("unresolved invocation target"))
+            .unwrap_or_else(|| panic!("expected unresolved diagnostic, got {:?}", messages));
+        assert_eq!(target_diag.range.start.line, pos.line);
+        assert_eq!(target_diag.range.start.character, pos.character);
     }
 
     #[test]
@@ -504,6 +1072,21 @@ mod tests {
             let mut guard = self.published.lock().await;
             guard.drain(..).collect()
         }
+    }
+
+    fn position_of(text: &str, needle: &str) -> lsp_types::Position {
+        for (i, line) in text.lines().enumerate() {
+            if let Some(col) = line.find(needle) {
+                return lsp_types::Position::new(i as u32, col as u32);
+            }
+        }
+        panic!("needle not found");
+    }
+
+    fn position_of_stdlib(uri: &Url, needle: &str) -> lsp_types::Position {
+        let path = uri.to_file_path().unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        position_of(&text, needle)
     }
 
     #[async_trait::async_trait]

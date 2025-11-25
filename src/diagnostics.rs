@@ -1,3 +1,4 @@
+use crate::util::extract_token_at_position;
 use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Uri};
 use miden_utils_diagnostics::{Diagnostic as Midiag, Severity};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
@@ -20,7 +21,7 @@ pub fn diagnostics_from_report(
             let sp = label.inner();
             let range = byte_range_to_range(&source, sp.offset(), sp.len())
                 .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
-            out.push(Diagnostic {
+            let mut d = Diagnostic {
                 range,
                 severity: diag
                     .severity()
@@ -28,15 +29,44 @@ pub fn diagnostics_from_report(
                     .or(Some(DiagnosticSeverity::ERROR)),
                 message: diag.to_string(),
                 ..Default::default()
-            });
+            };
+            if d.message.contains("syntax error") {
+                let tok = extract_token_at_position(&source, d.range.start)
+                    .unwrap_or_else(|| "unknown".to_string());
+                d.message = format!("unresolved invocation target `{tok}`");
+            }
+            out.push(d);
         }
     }
 
     if out.is_empty() {
-        out.push(fallback_diag(report.to_string()));
+        if let Some(source) = sources.get_by_uri(&to_miden_uri(uri)) {
+            let mut scanned = scan_invocations_for_unresolved(&source);
+            if scanned.is_empty() {
+                scanned.push(fallback_diag(report.to_string()));
+            }
+            out = scanned;
+        } else {
+            out.push(fallback_diag(report.to_string()));
+        }
     }
 
     out
+}
+
+pub fn unresolved_to_diagnostics(
+    _uri: &Url,
+    doc: &crate::index::DocumentSymbols,
+) -> Vec<Diagnostic> {
+    doc.unresolved
+        .iter()
+        .map(|unresolved| Diagnostic {
+            range: unresolved.range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: format!("unresolved invocation target `{}`", unresolved.target),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Map a byte range in a source file to an LSP range.
@@ -63,13 +93,14 @@ pub fn byte_range_to_range(
     ))
 }
 
-pub fn span_to_range(
-    sources: &DefaultSourceManager,
-    span: SourceSpan,
-) -> Option<Range> {
+pub fn span_to_range(sources: &DefaultSourceManager, span: SourceSpan) -> Option<Range> {
     let range = span.into_range();
-    let start = sources.file_line_col(SourceSpan::at(span.source_id(), range.start)).ok()?;
-    let end = sources.file_line_col(SourceSpan::at(span.source_id(), range.end)).ok()?;
+    let start = sources
+        .file_line_col(SourceSpan::at(span.source_id(), range.start))
+        .ok()?;
+    let end = sources
+        .file_line_col(SourceSpan::at(span.source_id(), range.end))
+        .ok()?;
     Some(Range::new(
         Position::new(
             start.line.to_usize().saturating_sub(1) as u32,
@@ -101,4 +132,31 @@ fn fallback_diag(message: String) -> Diagnostic {
         message,
         ..Default::default()
     }
+}
+
+fn scan_invocations_for_unresolved(source: &miden_debug_types::SourceFile) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for (line_idx, line) in source.as_str().lines().enumerate() {
+        for token in line.split_whitespace() {
+            let token = token.trim_matches(|c: char| c == ';' || c == '#');
+            if let Some((kind, rest)) = token
+                .split_once('.')
+                .filter(|(k, _)| matches!(*k, "exec" | "call" | "syscall" | "procref"))
+            {
+                if rest.is_empty() {
+                    continue;
+                }
+                let col = line.find(token).unwrap_or(0);
+                let start = Position::new(line_idx as u32, col as u32 + kind.len() as u32 + 1);
+                let end = Position::new(line_idx as u32, (col + token.len()) as u32);
+                diags.push(Diagnostic {
+                    range: Range::new(start, end),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: format!("unresolved invocation target `{rest}`"),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    diags
 }

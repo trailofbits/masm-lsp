@@ -1,7 +1,9 @@
-use miden_assembly_syntax::ast::{LocalSymbolResolutionError, LocalSymbolResolver, Module, SymbolResolution};
-use miden_debug_types::{DefaultSourceManager, Uri, SourceManager, Spanned};
-use tower_lsp::lsp_types::{Position, Url};
 use crate::util::extract_token_at_position;
+use miden_assembly_syntax::ast::{
+    LocalSymbolResolutionError, LocalSymbolResolver, Module, SymbolResolution,
+};
+use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned, Uri};
+use tower_lsp::lsp_types::{Position, Url};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedSymbol {
@@ -25,7 +27,10 @@ pub fn resolve_symbol_at_position(
     };
 
     if has_local_name(module, token.as_str()) {
-        return Ok(Some(ResolvedSymbol { path: build_item_path(module, token.as_str()), name: token }));
+        return Ok(Some(ResolvedSymbol {
+            path: build_item_path(module, token.as_str()),
+            name: token,
+        }));
     }
 
     let resolver = LocalSymbolResolver::from(module);
@@ -38,25 +43,38 @@ pub fn resolve_symbol_at_position(
                 let name = item.name();
                 let path = build_item_path(module, name.as_str());
                 ResolvedSymbol { path, name: token }
-            },
+            }
             SymbolResolution::External(path) => {
                 let local_path = build_item_path(module, token.as_str());
                 if has_local_name(module, token.as_str()) {
-                    ResolvedSymbol { path: local_path, name: token }
+                    ResolvedSymbol {
+                        path: local_path,
+                        name: token,
+                    }
                 } else {
-                    ResolvedSymbol { path: path.into_inner().as_str().to_string(), name: token }
+                    ResolvedSymbol {
+                        path: path.into_inner().as_str().to_string(),
+                        name: token,
+                    }
                 }
-            },
+            }
             SymbolResolution::Module { path, .. } => {
                 let local_path = build_item_path(module, token.as_str());
                 if has_local_name(module, token.as_str()) {
-                    ResolvedSymbol { path: local_path, name: token }
+                    ResolvedSymbol {
+                        path: local_path,
+                        name: token,
+                    }
                 } else {
-                    ResolvedSymbol { path: path.as_str().to_string(), name: token }
+                    ResolvedSymbol {
+                        path: path.as_str().to_string(),
+                        name: token,
+                    }
                 }
-            },
-            SymbolResolution::Exact { path, .. } => {
-                ResolvedSymbol { path: path.into_inner().as_str().to_string(), name: token }
+            }
+            SymbolResolution::Exact { path, .. } => ResolvedSymbol {
+                path: path.into_inner().as_str().to_string(),
+                name: token,
             },
             SymbolResolution::MastRoot(_) => return Ok(None),
         };
@@ -93,10 +111,14 @@ pub fn resolve_symbol_at_span(
                     SymbolResolution::Local(idx) => {
                         let item = module.get(idx.into_inner())?;
                         Some(build_item_path(module, item.name().as_str()))
-                    },
-                    SymbolResolution::External(path) => Some(path.into_inner().as_str().to_string()),
+                    }
+                    SymbolResolution::External(path) => {
+                        Some(path.into_inner().as_str().to_string())
+                    }
                     SymbolResolution::Module { path, .. } => Some(path.as_str().to_string()),
-                    SymbolResolution::Exact { path, .. } => Some(path.into_inner().as_str().to_string()),
+                    SymbolResolution::Exact { path, .. } => {
+                        Some(path.into_inner().as_str().to_string())
+                    }
                     SymbolResolution::MastRoot(_) => None,
                 };
             }

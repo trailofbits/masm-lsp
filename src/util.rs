@@ -17,7 +17,9 @@ pub fn lsp_range_to_selection(range: Range) -> Selection {
 pub fn guess_module_kinds(uri: &Url, text: &str) -> Vec<ModuleKind> {
     let mut kinds = Vec::new();
     let path = uri.path().to_ascii_lowercase();
-    let has_begin = text.lines().any(|line| line.trim_start().starts_with("begin"));
+    let has_begin = text
+        .lines()
+        .any(|line| line.trim_start().starts_with("begin"));
 
     if path.contains("kernel") {
         push_if_missing(&mut kinds, ModuleKind::Kernel);
