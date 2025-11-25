@@ -129,10 +129,13 @@ fn has_local_name(module: &Module, name: &str) -> bool {
     module.items().any(|item| item.name().as_str() == name)
 }
 
-/// Strip common instruction prefixes from a token.
-/// E.g., "exec.foo" → "foo", "call.bar::baz" → "bar::baz"
+/// Strip common instruction and definition prefixes from a token.
+/// E.g., "exec.foo" → "foo", "call.bar::baz" → "bar::baz", "proc.foo" → "foo"
 fn strip_instruction_prefix(token: &str) -> String {
-    const PREFIXES: &[&str] = &["exec.", "call.", "syscall.", "procref."];
+    const PREFIXES: &[&str] = &[
+        "exec.", "call.", "syscall.", "procref.", // invocation prefixes
+        "proc.", "export.", "const.",             // definition prefixes
+    ];
     for prefix in PREFIXES {
         if let Some(rest) = token.strip_prefix(prefix) {
             return rest.to_string();
@@ -327,6 +330,24 @@ mod tests {
     fn strip_instruction_prefix_procref() {
         assert_eq!(strip_instruction_prefix("procref.target"), "target");
         assert_eq!(strip_instruction_prefix("procref.::mod::target"), "::mod::target");
+    }
+
+    #[test]
+    fn strip_instruction_prefix_proc_definition() {
+        assert_eq!(strip_instruction_prefix("proc.foo"), "foo");
+        assert_eq!(strip_instruction_prefix("proc.my_procedure"), "my_procedure");
+    }
+
+    #[test]
+    fn strip_instruction_prefix_export_definition() {
+        assert_eq!(strip_instruction_prefix("export.bar"), "bar");
+        assert_eq!(strip_instruction_prefix("export.public_proc"), "public_proc");
+    }
+
+    #[test]
+    fn strip_instruction_prefix_const_definition() {
+        assert_eq!(strip_instruction_prefix("const.MY_CONST"), "MY_CONST");
+        assert_eq!(strip_instruction_prefix("const.VALUE"), "VALUE");
     }
 
     #[test]

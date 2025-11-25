@@ -39,6 +39,8 @@ pub fn collect_inlay_hints(
                 kind: Some(InlayHintKind::TYPE),
                 text_edits: None,
                 tooltip: None,
+                padding_left: None,
+                padding_right: None,
                 data: None,
             })
         })
