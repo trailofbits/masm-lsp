@@ -157,18 +157,28 @@ struct InvocationFinder {
 }
 
 impl InvocationFinder {
-    fn check_target(&mut self, target: &InvocationTarget) {
+    fn check_target(&mut self, target: &InvocationTarget, keyword_len: u32) {
         let span = target.span();
         let range = span.into_range();
+        // Check if offset is in the target itself
         if self.offset >= range.start && self.offset < range.end {
             self.found = Some(target.clone());
+            return;
+        }
+        // Also check if offset is in the instruction keyword before the target.
+        // The keyword length includes the trailing dot (e.g., "exec." = 5, "syscall." = 8).
+        if range.start >= keyword_len {
+            let keyword_start = range.start - keyword_len;
+            if self.offset >= keyword_start && self.offset < range.start {
+                self.found = Some(target.clone());
+            }
         }
     }
 }
 
 impl Visit for InvocationFinder {
     fn visit_exec(&mut self, target: &InvocationTarget) -> core::ops::ControlFlow<()> {
-        self.check_target(target);
+        self.check_target(target, 5); // "exec." = 5 chars
         if self.found.is_some() {
             core::ops::ControlFlow::Break(())
         } else {
@@ -177,7 +187,7 @@ impl Visit for InvocationFinder {
     }
 
     fn visit_call(&mut self, target: &InvocationTarget) -> core::ops::ControlFlow<()> {
-        self.check_target(target);
+        self.check_target(target, 5); // "call." = 5 chars
         if self.found.is_some() {
             core::ops::ControlFlow::Break(())
         } else {
@@ -186,7 +196,7 @@ impl Visit for InvocationFinder {
     }
 
     fn visit_syscall(&mut self, target: &InvocationTarget) -> core::ops::ControlFlow<()> {
-        self.check_target(target);
+        self.check_target(target, 8); // "syscall." = 8 chars
         if self.found.is_some() {
             core::ops::ControlFlow::Break(())
         } else {
@@ -195,7 +205,7 @@ impl Visit for InvocationFinder {
     }
 
     fn visit_procref(&mut self, target: &InvocationTarget) -> core::ops::ControlFlow<()> {
-        self.check_target(target);
+        self.check_target(target, 8); // "procref." = 8 chars
         if self.found.is_some() {
             core::ops::ControlFlow::Break(())
         } else {
