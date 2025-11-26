@@ -15,7 +15,7 @@ This document outlines improvements to the masm-lsp codebase to enhance type saf
 | 6 | Compile-time instruction ref | ✅ Done | phf map generated at compile time |
 | 5 | Parse-based module detection | ✅ Done | AST-based module kind detection |
 | 8 | Service traits for testing | ✅ Done | DocumentService, WorkspaceService traits |
-| 3 | Optimize workspace index | 🔲 Pending | Low priority until perf issue |
+| 3 | Optimize workspace index | ✅ Done | O(1) name-based lookups via def_by_name/refs_by_name |
 
 ---
 
@@ -405,15 +405,19 @@ In goto_definition, references, etc.:
 | 5 | Compile-time instruction ref (#6) | Low | Low | ✅ Done |
 | 6 | Parse-based module detection (#5) | Medium | Medium | ✅ Done |
 | 7 | Service traits for testing (#8) | Medium | Medium | ✅ Done |
-| 8 | Optimize workspace index (#3) | Low | Low | 🔲 **Next** |
+| 8 | Optimize workspace index (#3) | Low | Low | ✅ Done |
 
-### Recommended Next Step: #3 - Optimize Workspace Index
+### All Phase 1 Improvements Complete
 
-**Rationale:**
-- Low effort task that improves lookup performance
-- Currently O(n) suffix lookups could be optimized to O(1) average case
-- Only necessary if performance issues are observed with large codebases
-- All other improvements have been completed
+All improvements in Phase 1 have been implemented:
+- Typed symbol paths with SymbolPath newtype
+- Eliminated string-based fallbacks in favor of AST traversal
+- Optimized workspace index with O(1) name-based lookups
+- Consistent error handling with ResolutionError type
+- Compile-time instruction reference with phf maps
+- Parse-based module kind detection
+- Service traits for testable handlers
+- Consolidation of duplicated code
 
 ---
 

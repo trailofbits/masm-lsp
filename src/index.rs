@@ -44,38 +44,64 @@ impl DocumentSymbols {
 pub struct WorkspaceIndex {
     definitions: HashMap<SymbolPath, Location>,
     def_by_uri: HashMap<Url, Vec<SymbolPath>>,
+    /// Index definitions by their short name (last segment) for fast O(1) lookups.
+    def_by_name: HashMap<String, Vec<SymbolPath>>,
     references: HashMap<SymbolPath, Vec<Location>>,
     refs_by_uri: HashMap<Url, Vec<SymbolPath>>,
+    /// Index references by their short name for fast O(1) lookups.
+    refs_by_name: HashMap<String, Vec<SymbolPath>>,
 }
 
 impl WorkspaceIndex {
     pub fn update_document(&mut self, uri: Url, defs: &[Definition], refs: &[Reference]) {
+        // Remove old definitions for this URI
         if let Some(paths) = self.def_by_uri.remove(&uri) {
             for path in paths {
                 self.definitions.remove(&path);
+                // Remove from name index
+                let name = path.name().to_string();
+                if let Some(entries) = self.def_by_name.get_mut(&name) {
+                    entries.retain(|p| p != &path);
+                    if entries.is_empty() {
+                        self.def_by_name.remove(&name);
+                    }
+                }
             }
         }
+
+        // Remove old references for this URI
         if let Some(paths) = self.refs_by_uri.remove(&uri) {
             for path in paths {
                 if let Some(entries) = self.references.get_mut(&path) {
                     entries.retain(|loc| loc.uri != uri);
                 }
+                // Remove from name index
+                let name = path.name().to_string();
+                if let Some(entries) = self.refs_by_name.get_mut(&name) {
+                    entries.retain(|p| p != &path);
+                    if entries.is_empty() {
+                        self.refs_by_name.remove(&name);
+                    }
+                }
             }
         }
 
+        // Add new definitions
         let mut def_paths = Vec::with_capacity(defs.len());
         for def in defs {
             def_paths.push(def.path.clone());
             self.definitions
                 .insert(def.path.clone(), Location::new(uri.clone(), def.range));
-            // Also index by short name for quick lookups
-            let name = def.path.name();
-            self.definitions
-                .entry(SymbolPath::new(name))
-                .or_insert(Location::new(uri.clone(), def.range));
+            // Index by short name for fast lookups
+            let name = def.path.name().to_string();
+            self.def_by_name
+                .entry(name)
+                .or_default()
+                .push(def.path.clone());
         }
         self.def_by_uri.insert(uri.clone(), def_paths);
 
+        // Add new references
         let mut ref_paths: Vec<SymbolPath> = Vec::new();
         for r in refs {
             ref_paths.push(r.path.clone());
@@ -83,6 +109,14 @@ impl WorkspaceIndex {
                 .entry(r.path.clone())
                 .or_default()
                 .push(Location::new(uri.clone(), r.range));
+            // Index by short name for fast lookups
+            let name = r.path.name().to_string();
+            if !self.refs_by_name.get(&name).map_or(false, |v| v.contains(&r.path)) {
+                self.refs_by_name
+                    .entry(name)
+                    .or_default()
+                    .push(r.path.clone());
+            }
         }
         self.refs_by_uri.insert(uri, ref_paths);
     }
@@ -101,42 +135,64 @@ impl WorkspaceIndex {
     }
 
     /// Look up a definition by its short name (last segment).
+    /// Uses O(1) hash lookup + O(k) where k is the number of definitions with that name.
     pub fn definition_by_name(&self, name: &str) -> Option<Location> {
-        self.definitions.iter().find_map(|(path, loc)| {
-            if path.name_matches(name) {
-                Some(loc.clone())
-            } else {
-                None
-            }
-        })
+        let candidates = self.def_by_name.get(name)?;
+        // Return the first match (typically there's only one with a given name)
+        candidates
+            .first()
+            .and_then(|path| self.definitions.get(path).cloned())
     }
 
     /// Look up a definition by path suffix.
+    /// Uses O(1) hash lookup on the name + O(k) suffix matching where k is candidates with that name.
     pub fn definition_by_suffix(&self, suffix: &str) -> Option<Location> {
-        self.definitions.iter().find_map(|(path, loc)| {
-            if path.ends_with(suffix) {
-                Some(loc.clone())
-            } else {
-                None
-            }
-        })
+        // Extract the short name from the suffix for fast index lookup
+        let name = suffix.rsplit("::").next()?;
+        let candidates = self.def_by_name.get(name)?;
+        candidates
+            .iter()
+            .find(|p| p.ends_with(suffix))
+            .and_then(|p| self.definitions.get(p).cloned())
     }
 
     /// Look up references by path suffix.
+    /// Uses O(1) hash lookup on the name + O(k) suffix matching where k is candidates with that name.
     pub fn references_by_suffix(&self, suffix: &str) -> Vec<Location> {
-        self.references
+        // Extract the short name from the suffix for fast index lookup
+        let name = match suffix.rsplit("::").next() {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+        let candidates = match self.refs_by_name.get(name) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        candidates
             .iter()
-            .filter(|(path, _)| path.ends_with(suffix))
-            .flat_map(|(_, locs)| locs.clone())
+            .filter(|p| p.ends_with(suffix))
+            .filter_map(|p| self.references.get(p))
+            .flatten()
+            .cloned()
             .collect()
     }
 
     /// Look up definitions by path suffix.
+    /// Uses O(1) hash lookup on the name + O(k) suffix matching where k is candidates with that name.
     pub fn definitions_by_suffix(&self, suffix: &str) -> Vec<Location> {
-        self.definitions
+        // Extract the short name from the suffix for fast index lookup
+        let name = match suffix.rsplit("::").next() {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+        let candidates = match self.def_by_name.get(name) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        candidates
             .iter()
-            .filter(|(path, _)| path.ends_with(suffix))
-            .map(|(_, loc)| loc.clone())
+            .filter(|p| p.ends_with(suffix))
+            .filter_map(|p| self.definitions.get(p).cloned())
             .collect()
     }
 
