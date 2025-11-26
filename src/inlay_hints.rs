@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use miden_assembly_syntax::ast::visit::{self, Visit};
-use miden_assembly_syntax::ast::{Instruction, Module};
-use miden_debug_types::{DefaultSourceManager, Span};
+use miden_assembly_syntax::ast::{Instruction, InvocationTarget, Module};
+use miden_debug_types::{DefaultSourceManager, Span, Spanned};
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range};
 
 use crate::diagnostics::span_to_range;
@@ -11,9 +11,26 @@ use crate::instruction_hints::{format_push_immediate, ToInlayHint};
 // Include the compile-time generated instruction map
 include!(concat!(env!("OUT_DIR"), "/instruction_map.rs"));
 
-/// Data collected for each line: all instructions and the rightmost column position.
+/// The kind of invocation instruction.
+#[derive(Clone, Copy)]
+enum InvocationKind {
+    Exec,
+    Call,
+    Syscall,
+    Procref,
+}
+
+/// An invocation with its kind and target.
+#[derive(Clone)]
+struct Invocation {
+    kind: InvocationKind,
+    target: InvocationTarget,
+}
+
+/// Data collected for each line: all instructions/invocations and the rightmost column position.
 struct LineData {
     instructions: Vec<Span<Instruction>>,
+    invocations: Vec<Invocation>,
     rightmost_col: u32,
 }
 
@@ -37,8 +54,9 @@ pub fn collect_inlay_hints(
         .map(|line| line.trim_end().len() as u32)
         .collect();
 
-    // Group instructions by line. For each line, we keep:
+    // Group instructions and invocations by line. For each line, we keep:
     // - All instructions on that line (needed to aggregate push values like `push.0.0.0.0`)
+    // - All invocations on that line (exec, call, syscall, procref)
     // - The rightmost end column (for hint positioning)
     let mut line_hints: HashMap<u32, LineData> = HashMap::new();
 
@@ -62,6 +80,33 @@ pub fn collect_inlay_hints(
             })
             .or_insert(LineData {
                 instructions: vec![inst],
+                invocations: vec![],
+                rightmost_col: end_col,
+            });
+    }
+
+    // Process invocations
+    for invocation in collector.invocations {
+        let Some(range) = span_to_range(sources, invocation.target.span()) else {
+            continue;
+        };
+        if !position_in_range(&range.end, visible_range) {
+            continue;
+        }
+        let line = range.start.line;
+        let end_col = range.end.character;
+
+        line_hints
+            .entry(line)
+            .and_modify(|data| {
+                data.invocations.push(invocation.clone());
+                if end_col > data.rightmost_col {
+                    data.rightmost_col = end_col;
+                }
+            })
+            .or_insert(LineData {
+                instructions: vec![],
+                invocations: vec![invocation],
                 rightmost_col: end_col,
             });
     }
@@ -71,8 +116,20 @@ pub fn collect_inlay_hints(
         .flat_map(|(line_num, data)| {
             // Position hints at the end of the line (after any comments)
             let line_end = line_lengths.get(line_num as usize).copied().unwrap_or(0);
-            render_line_hints(&data.instructions)
+
+            // Generate hints for instructions
+            let inst_hints = render_line_hints(&data.instructions);
+
+            // Generate hints for invocations
+            let invoc_hints: Vec<String> = data
+                .invocations
+                .iter()
+                .map(|inv| render_invocation_hint(inv))
+                .collect();
+
+            inst_hints
                 .into_iter()
+                .chain(invoc_hints)
                 .map(move |label_text| InlayHint {
                     position: Position {
                         line: line_num,
@@ -98,6 +155,22 @@ pub fn collect_inlay_hints(
     });
 
     hints
+}
+
+/// Generate a hint for an invocation (exec, call, syscall, procref).
+fn render_invocation_hint(invocation: &Invocation) -> String {
+    let target_name = match &invocation.target {
+        InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
+        InvocationTarget::Path(path) => path.inner().as_str().to_string(),
+        InvocationTarget::MastRoot(root) => format!("0x{}", root.inner()),
+    };
+
+    match invocation.kind {
+        InvocationKind::Exec => format!("Executes {target_name}."),
+        InvocationKind::Call => format!("Calls {target_name}."),
+        InvocationKind::Syscall => format!("Syscall to {target_name}."),
+        InvocationKind::Procref => format!("Reference to {target_name}."),
+    }
 }
 
 fn position_in_range(pos: &Position, range: &Range) -> bool {
@@ -211,11 +284,45 @@ fn render_note(instruction: &Span<Instruction>) -> Option<String> {
 #[derive(Default)]
 struct InstructionCollector {
     instructions: Vec<Span<Instruction>>,
+    invocations: Vec<Invocation>,
 }
 
 impl Visit for InstructionCollector {
     fn visit_inst(&mut self, inst: &Span<Instruction>) -> core::ops::ControlFlow<()> {
         self.instructions.push(inst.clone());
+        // Continue default traversal to visit exec/call/syscall/procref targets
+        visit::visit_inst(self, inst)
+    }
+
+    fn visit_exec(&mut self, target: &InvocationTarget) -> core::ops::ControlFlow<()> {
+        self.invocations.push(Invocation {
+            kind: InvocationKind::Exec,
+            target: target.clone(),
+        });
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_call(&mut self, target: &InvocationTarget) -> core::ops::ControlFlow<()> {
+        self.invocations.push(Invocation {
+            kind: InvocationKind::Call,
+            target: target.clone(),
+        });
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_syscall(&mut self, target: &InvocationTarget) -> core::ops::ControlFlow<()> {
+        self.invocations.push(Invocation {
+            kind: InvocationKind::Syscall,
+            target: target.clone(),
+        });
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_procref(&mut self, target: &InvocationTarget) -> core::ops::ControlFlow<()> {
+        self.invocations.push(Invocation {
+            kind: InvocationKind::Procref,
+            target: target.clone(),
+        });
         core::ops::ControlFlow::Continue(())
     }
 }
@@ -500,5 +607,57 @@ mod tests {
             hint,
             Some("Pushes the field elements [1, 2] onto the stack.".into())
         );
+    }
+
+    #[test]
+    fn render_invocation_hint_exec() {
+        use miden_assembly_syntax::ast::Ident;
+
+        let target = InvocationTarget::Symbol(Ident::new("helper").unwrap());
+        let invocation = Invocation {
+            kind: InvocationKind::Exec,
+            target,
+        };
+        let hint = render_invocation_hint(&invocation);
+        assert_eq!(hint, "Executes helper.");
+    }
+
+    #[test]
+    fn render_invocation_hint_call() {
+        use miden_assembly_syntax::ast::Ident;
+
+        let target = InvocationTarget::Symbol(Ident::new("foo").unwrap());
+        let invocation = Invocation {
+            kind: InvocationKind::Call,
+            target,
+        };
+        let hint = render_invocation_hint(&invocation);
+        assert_eq!(hint, "Calls foo.");
+    }
+
+    #[test]
+    fn render_invocation_hint_syscall() {
+        use miden_assembly_syntax::ast::Ident;
+
+        let target = InvocationTarget::Symbol(Ident::new("kernel_func").unwrap());
+        let invocation = Invocation {
+            kind: InvocationKind::Syscall,
+            target,
+        };
+        let hint = render_invocation_hint(&invocation);
+        assert_eq!(hint, "Syscall to kernel_func.");
+    }
+
+    #[test]
+    fn render_invocation_hint_procref() {
+        use miden_assembly_syntax::ast::Ident;
+
+        let target = InvocationTarget::Symbol(Ident::new("my_proc").unwrap());
+        let invocation = Invocation {
+            kind: InvocationKind::Procref,
+            target,
+        };
+        let hint = render_invocation_hint(&invocation);
+        assert_eq!(hint, "Reference to my_proc.");
     }
 }
