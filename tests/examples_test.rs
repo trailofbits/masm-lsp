@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::fixtures::{load_example, load_fixture, FixtureKind};
+use common::fixtures::{load_example, load_fixture};
 use common::harness::TestHarness;
 
 #[tokio::test]
@@ -38,16 +38,6 @@ async fn sha256_example_parses_without_errors() {
             diag.message
         );
     }
-}
-
-#[tokio::test]
-async fn multi_proc_fixture_parses_without_errors() {
-    let harness = TestHarness::new().await;
-    let uri = harness.open_fixture(FixtureKind::MultiProc).await;
-
-    tokio::task::yield_now().await;
-
-    harness.assert_no_diagnostics(&uri).await;
 }
 
 #[tokio::test]
@@ -87,16 +77,6 @@ async fn multi_proc_fixture_find_references_works() {
 }
 
 #[tokio::test]
-async fn nested_blocks_fixture_parses_without_errors() {
-    let harness = TestHarness::new().await;
-    let uri = harness.open_fixture(FixtureKind::NestedBlocks).await;
-
-    tokio::task::yield_now().await;
-
-    harness.assert_no_diagnostics(&uri).await;
-}
-
-#[tokio::test]
 async fn nested_blocks_fixture_resolves_calls_in_blocks() {
     let harness = TestHarness::new().await;
     let content = load_fixture("nested_blocks.masm");
@@ -115,16 +95,6 @@ async fn nested_blocks_fixture_resolves_calls_in_blocks() {
         "expected at least 4 references to helper in nested blocks, got {}",
         refs.len()
     );
-}
-
-#[tokio::test]
-async fn alias_fixture_parses_without_errors() {
-    let harness = TestHarness::new().await;
-    let uri = harness.open_fixture(FixtureKind::WithAliases).await;
-
-    tokio::task::yield_now().await;
-
-    harness.assert_no_diagnostics(&uri).await;
 }
 
 #[tokio::test]

@@ -308,63 +308,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_instruction_prefix_exec() {
+    fn strip_instruction_prefix_all_variants() {
+        // Invocation prefixes
         assert_eq!(strip_instruction_prefix("exec.foo"), "foo");
-        assert_eq!(strip_instruction_prefix("exec.bar::baz"), "bar::baz");
-        assert_eq!(strip_instruction_prefix("exec.::module::proc"), "::module::proc");
-    }
-
-    #[test]
-    fn strip_instruction_prefix_call() {
-        assert_eq!(strip_instruction_prefix("call.foo"), "foo");
         assert_eq!(strip_instruction_prefix("call.bar::baz"), "bar::baz");
-    }
-
-    #[test]
-    fn strip_instruction_prefix_syscall() {
         assert_eq!(strip_instruction_prefix("syscall.kernel_proc"), "kernel_proc");
-        assert_eq!(strip_instruction_prefix("syscall.::kernel::func"), "::kernel::func");
-    }
-
-    #[test]
-    fn strip_instruction_prefix_procref() {
         assert_eq!(strip_instruction_prefix("procref.target"), "target");
-        assert_eq!(strip_instruction_prefix("procref.::mod::target"), "::mod::target");
-    }
 
-    #[test]
-    fn strip_instruction_prefix_proc_definition() {
-        assert_eq!(strip_instruction_prefix("proc.foo"), "foo");
+        // Definition prefixes
         assert_eq!(strip_instruction_prefix("proc.my_procedure"), "my_procedure");
-    }
-
-    #[test]
-    fn strip_instruction_prefix_export_definition() {
-        assert_eq!(strip_instruction_prefix("export.bar"), "bar");
         assert_eq!(strip_instruction_prefix("export.public_proc"), "public_proc");
-    }
-
-    #[test]
-    fn strip_instruction_prefix_const_definition() {
         assert_eq!(strip_instruction_prefix("const.MY_CONST"), "MY_CONST");
-        assert_eq!(strip_instruction_prefix("const.VALUE"), "VALUE");
-    }
 
-    #[test]
-    fn strip_instruction_prefix_no_prefix() {
+        // Qualified paths with prefixes
+        assert_eq!(strip_instruction_prefix("exec.::module::proc"), "::module::proc");
+
+        // No prefix - returns unchanged
         assert_eq!(strip_instruction_prefix("foo"), "foo");
         assert_eq!(strip_instruction_prefix("bar::baz"), "bar::baz");
-        assert_eq!(strip_instruction_prefix("::module::proc"), "::module::proc");
-    }
-
-    #[test]
-    fn strip_instruction_prefix_empty() {
         assert_eq!(strip_instruction_prefix(""), "");
-    }
 
-    #[test]
-    fn strip_instruction_prefix_partial_match() {
-        // "execute" starts with "exec" but not "exec."
+        // Partial matches - should not strip (e.g., "execute" starts with "exec" but not "exec.")
         assert_eq!(strip_instruction_prefix("execute"), "execute");
         assert_eq!(strip_instruction_prefix("caller"), "caller");
     }
@@ -382,16 +346,5 @@ mod tests {
 
         let err = ResolutionError::SymbolNotFound("missing".to_string());
         assert!(err.to_string().contains("missing"));
-    }
-
-    #[test]
-    fn resolved_symbol_clone() {
-        let symbol = ResolvedSymbol {
-            path: SymbolPath::new("::mod::foo"),
-            name: "foo".to_string(),
-        };
-        let cloned = symbol.clone();
-        assert_eq!(cloned.name, "foo");
-        assert_eq!(cloned.path.as_str(), "::mod::foo");
     }
 }

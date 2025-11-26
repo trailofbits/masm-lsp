@@ -269,12 +269,6 @@ mod tests {
         assert!(!desc_str.is_empty());
     }
 
-    #[test]
-    fn instruction_collector_default() {
-        let collector = InstructionCollector::default();
-        assert!(collector.instructions.is_empty());
-    }
-
     // === Tests for push aggregation ===
 
     #[test]

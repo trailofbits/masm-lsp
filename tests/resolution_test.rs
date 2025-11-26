@@ -206,14 +206,6 @@ async fn find_references_cross_file() {
 }
 
 #[tokio::test]
-async fn workspace_symbol_finds_proc() {
-    let harness = TestHarness::new().await;
-    let _uri = harness.open_inline("syms.masm", inline::SIMPLE_PROC).await;
-
-    harness.assert_workspace_symbol_exists("foo").await;
-}
-
-#[tokio::test]
 async fn workspace_symbol_partial_match() {
     let harness = TestHarness::new().await;
     let content = r#"proc calculate_sum

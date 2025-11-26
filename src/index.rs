@@ -472,26 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn definition_struct() {
-        let def = Definition {
-            path: SymbolPath::new("::mod::proc"),
-            range: Range::new(Position::new(0, 0), Position::new(0, 10)),
-        };
-        let cloned = def.clone();
-        assert_eq!(cloned.path.as_str(), "::mod::proc");
-    }
-
-    #[test]
-    fn reference_struct() {
-        let r = Reference {
-            path: SymbolPath::new("::mod::target"),
-            range: Range::new(Position::new(5, 0), Position::new(5, 10)),
-        };
-        let cloned = r.clone();
-        assert_eq!(cloned.path.as_str(), "::mod::target");
-    }
-
-    #[test]
     fn definitions_by_suffix() {
         let mut index = WorkspaceIndex::default();
         let uri = test_uri();

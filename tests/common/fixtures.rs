@@ -1,5 +1,7 @@
 //! Test fixture loading and management.
 
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 use tower_lsp::lsp_types::Url;
 
@@ -118,16 +120,6 @@ end
     /// Unresolved reference.
     pub const UNRESOLVED_REF: &str = r#"proc foo
     exec.nonexistent
-end
-"#;
-
-    /// Nested control flow.
-    pub const NESTED_CONTROL_FLOW: &str = r#"proc nested
-    if.true
-        push.1
-    else
-        push.2
-    end
 end
 "#;
 

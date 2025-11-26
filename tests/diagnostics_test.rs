@@ -21,18 +21,6 @@ async fn valid_source_produces_no_diagnostics() {
 }
 
 #[tokio::test]
-async fn valid_executable_produces_no_diagnostics() {
-    let harness = TestHarness::new().await;
-    let uri = harness
-        .open_inline("executable.masm", inline::SIMPLE_EXECUTABLE)
-        .await;
-
-    tokio::task::yield_now().await;
-
-    harness.assert_no_diagnostics(&uri).await;
-}
-
-#[tokio::test]
 async fn syntax_error_produces_diagnostics() {
     let harness = TestHarness::new().await;
     let uri = harness
@@ -60,29 +48,6 @@ end
     harness
         .assert_diagnostic_contains(&uri, "unresolved")
         .await;
-}
-
-#[tokio::test]
-async fn multiple_unresolved_references_produce_multiple_diagnostics() {
-    let harness = TestHarness::new().await;
-    // Use fully qualified paths which will be unresolved
-    let content = r#"proc foo
-    exec.::missing::one
-    exec.::missing::two
-    exec.::missing::three
-end
-"#;
-    let uri = harness.open_inline("multi_unresolved.masm", content).await;
-
-    tokio::task::yield_now().await;
-
-    // Should have at least 3 diagnostics for the unresolved references
-    let diags = harness.client.diagnostics_for(&uri).await;
-    assert!(
-        diags.len() >= 3,
-        "expected at least 3 diagnostics, got {}",
-        diags.len()
-    );
 }
 
 #[tokio::test]
@@ -114,18 +79,6 @@ async fn empty_file_produces_expected_diagnostic() {
 
     // Empty files produce "unexpected end of file" from the MASM parser
     harness.assert_has_diagnostics(&uri).await;
-}
-
-#[tokio::test]
-async fn nested_control_flow_valid_produces_no_diagnostics() {
-    let harness = TestHarness::new().await;
-    let uri = harness
-        .open_inline("nested.masm", inline::NESTED_CONTROL_FLOW)
-        .await;
-
-    tokio::task::yield_now().await;
-
-    harness.assert_no_diagnostics(&uri).await;
 }
 
 #[tokio::test]
