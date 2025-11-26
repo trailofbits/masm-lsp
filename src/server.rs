@@ -550,6 +550,9 @@ where
             return Ok(None);
         };
 
+        // Check if instruction hovers are enabled
+        let instruction_hovers_enabled = self.config.read().await.instruction_hovers_enabled;
+
         // Extract tokens at position for hover checks
         let source = self.sources.get_by_uri(&to_miden_uri(&uri));
         let token = source.as_ref().and_then(|s| extract_token_at_position(s, pos));
@@ -557,16 +560,18 @@ where
 
         // Check if cursor is directly on an invocation instruction keyword (exec, call, syscall, procref)
         // Only show instruction hover when cursor is on the keyword itself, not the target name
-        if let Some(ref w) = word {
-            if matches!(w.as_str(), "exec" | "call" | "syscall" | "procref") {
-                if let Some(hover_text) = get_instruction_hover(w) {
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: hover_text,
-                        }),
-                        range: None,
-                    }));
+        if instruction_hovers_enabled {
+            if let Some(ref w) = word {
+                if matches!(w.as_str(), "exec" | "call" | "syscall" | "procref") {
+                    if let Some(hover_text) = get_instruction_hover(w) {
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: hover_text,
+                            }),
+                            range: None,
+                        }));
+                    }
                 }
             }
         }
@@ -617,16 +622,18 @@ where
             }
         }
 
-        // Fall back to instruction hover for other instructions
-        if let Some(t) = token {
-            if let Some(hover_text) = get_instruction_hover(&t) {
-                return Ok(Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: hover_text,
-                    }),
-                    range: None,
-                }));
+        // Fall back to instruction hover for other instructions (if enabled)
+        if instruction_hovers_enabled {
+            if let Some(t) = token {
+                if let Some(hover_text) = get_instruction_hover(&t) {
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: hover_text,
+                        }),
+                        range: None,
+                    }));
+                }
             }
         }
 

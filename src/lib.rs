@@ -19,6 +19,8 @@ pub struct ServerConfig {
     pub inlay_hint_tabs: usize,
     /// Library roots to preload and use for module path derivation.
     pub library_paths: Vec<LibraryPath>,
+    /// Whether to show hover information for built-in instructions.
+    pub instruction_hovers_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,8 @@ impl Default for ServerConfig {
             // Use two tabs by default to give hints breathing room.
             inlay_hint_tabs: 2,
             library_paths: default_library_paths(),
+            // Instruction hovers are disabled by default.
+            instruction_hovers_enabled: false,
         }
     }
 }

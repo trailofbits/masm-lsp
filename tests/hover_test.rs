@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::HoverContents;
 /// Test that hovering over exec instruction shows instruction hover, not target proc hover.
 #[tokio::test]
 async fn hover_exec_shows_instruction_not_proc() {
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::with_instruction_hovers().await;
 
     let content = r#"#! This is a helper procedure.
 proc helper
@@ -53,7 +53,7 @@ end
 /// Test that hovering over an instruction shows instruction reference.
 #[tokio::test]
 async fn hover_instruction_shows_reference() {
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::with_instruction_hovers().await;
 
     let content = r#"proc main
     push.1

@@ -73,6 +73,15 @@ impl TestHarness {
         Self { backend, client }
     }
 
+    /// Create a new test harness with instruction hovers enabled.
+    pub async fn with_instruction_hovers() -> Self {
+        let harness = Self::new().await;
+        let mut config = harness.backend.snapshot_config().await;
+        config.instruction_hovers_enabled = true;
+        harness.backend.update_config(config).await;
+        harness
+    }
+
     /// Open a document in the backend.
     pub async fn open_doc(&self, uri: Url, text: String) {
         let params = DidOpenTextDocumentParams {
