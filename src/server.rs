@@ -576,22 +576,27 @@ where
             return Ok(None);
         };
 
-        // Extract comments above the definition
+        // Extract signature and comments above the definition
         let content = source.as_str();
         let def_line = loc.range.start.line as usize;
+        let signature = extract_procedure_signature(content, def_line);
         let comment = extract_doc_comment(content, def_line);
 
-        if let Some(comment_text) = comment {
-            Ok(Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: comment_text,
-                }),
-                range: None,
-            }))
-        } else {
-            Ok(None)
-        }
+        // Build hover content: signature code block + separator + doc comment
+        let hover_text = match (signature, comment) {
+            (Some(sig), Some(doc)) => format!("```masm\n{sig}\n```\n\n---\n\n{doc}"),
+            (Some(sig), None) => format!("```masm\n{sig}\n```"),
+            (None, Some(doc)) => doc,
+            (None, None) => return Ok(None),
+        };
+
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: hover_text,
+            }),
+            range: None,
+        }))
     }
 
     async fn goto_implementation(
@@ -794,6 +799,52 @@ fn build_path_from_root(
         buf.push(seg.as_ref());
     }
     Some(buf)
+}
+
+/// Extract the procedure signature (attributes + definition line) at the given line.
+/// Returns lines like "@locals(48)" and "export.double" as a multi-line string.
+fn extract_procedure_signature(source: &str, def_line: usize) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let def = lines.get(def_line)?.trim();
+
+    // The definition line should be the procedure declaration
+    if !def.starts_with("proc")
+        && !def.starts_with("pub")
+        && !def.starts_with("export.")
+        && !def.starts_with("begin")
+        && !def.starts_with("const.")
+    {
+        return None;
+    }
+
+    let mut signature_lines = Vec::new();
+
+    // Collect attribute lines above the definition (walking backwards)
+    let mut line_idx = def_line.saturating_sub(1);
+    while line_idx < lines.len() {
+        let line = lines.get(line_idx).map(|l| l.trim()).unwrap_or("");
+        if line.starts_with('@') {
+            signature_lines.push(line.to_string());
+        } else if line.is_empty() || line.starts_with("#!") || line.starts_with('#') {
+            // Skip blank lines and comments, keep looking for attributes
+            if !signature_lines.is_empty() {
+                break; // Found attributes, stop at non-attribute
+            }
+        } else {
+            break;
+        }
+        if line_idx == 0 {
+            break;
+        }
+        line_idx -= 1;
+    }
+
+    // Reverse attributes since we collected bottom-up
+    signature_lines.reverse();
+    // Add the definition line
+    signature_lines.push(def.to_string());
+
+    Some(signature_lines.join("\n"))
 }
 
 /// Extract doc comments above a definition at the given line.
@@ -1328,6 +1379,55 @@ end
         let source = "#! Multi-line\n#! doc comment\n@locals(16)\n@extern(foo)\nproc bar\nend\n";
         let comment = extract_doc_comment(source, 4);
         assert_eq!(comment, Some("Multi-line\ndoc comment".to_string()));
+    }
+
+    #[test]
+    fn extract_signature_simple_proc() {
+        let source = "proc foo\n  nop\nend\n";
+        let sig = extract_procedure_signature(source, 0);
+        assert_eq!(sig, Some("proc foo".to_string()));
+    }
+
+    #[test]
+    fn extract_signature_export() {
+        let source = "export.double\n  nop\nend\n";
+        let sig = extract_procedure_signature(source, 0);
+        assert_eq!(sig, Some("export.double".to_string()));
+    }
+
+    #[test]
+    fn extract_signature_with_locals() {
+        let source = "@locals(48)\nexport.double\n  nop\nend\n";
+        let sig = extract_procedure_signature(source, 1);
+        assert_eq!(sig, Some("@locals(48)\nexport.double".to_string()));
+    }
+
+    #[test]
+    fn extract_signature_with_multiple_attributes() {
+        let source = "@locals(16)\n@extern(foo)\nproc bar\nend\n";
+        let sig = extract_procedure_signature(source, 2);
+        assert_eq!(sig, Some("@locals(16)\n@extern(foo)\nproc bar".to_string()));
+    }
+
+    #[test]
+    fn extract_signature_with_comment_above() {
+        let source = "#! Doc comment\n@locals(48)\nexport.double\n";
+        let sig = extract_procedure_signature(source, 2);
+        assert_eq!(sig, Some("@locals(48)\nexport.double".to_string()));
+    }
+
+    #[test]
+    fn extract_signature_pub_proc() {
+        let source = "pub proc foo\n  nop\nend\n";
+        let sig = extract_procedure_signature(source, 0);
+        assert_eq!(sig, Some("pub proc foo".to_string()));
+    }
+
+    #[test]
+    fn extract_signature_pub_proc_with_locals() {
+        let source = "@locals(16)\npub proc bar\nend\n";
+        let sig = extract_procedure_signature(source, 1);
+        assert_eq!(sig, Some("@locals(16)\npub proc bar".to_string()));
     }
 
     #[async_trait::async_trait]
