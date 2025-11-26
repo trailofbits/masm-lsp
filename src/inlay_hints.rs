@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use miden_assembly_syntax::ast::visit::{self, Visit};
 use miden_assembly_syntax::ast::{Instruction, Module};
 use miden_debug_types::{DefaultSourceManager, Span};
@@ -14,6 +16,7 @@ pub fn collect_inlay_hints(
     sources: &DefaultSourceManager,
     visible_range: &Range,
     tab_count: usize,
+    source_text: &str,
 ) -> Vec<InlayHint> {
     let mut collector = InstructionCollector::default();
     let _ = visit::visit_module(&mut collector, module);
@@ -21,19 +24,53 @@ pub fn collect_inlay_hints(
     // Fixed padding (in columns) between instruction end and hint.
     let padding = (tab_count.max(1)) as u32;
 
-    collector
-        .instructions
-        .into_iter()
-        .filter_map(|inst| {
-            let range = span_to_range(sources, inst.span())?;
-            if !position_in_range(&range.end, visible_range) {
-                return None;
-            }
+    // Pre-compute line lengths (trimmed of trailing whitespace) for positioning hints
+    let line_lengths: Vec<u32> = source_text
+        .lines()
+        .map(|line| line.trim_end().len() as u32)
+        .collect();
+
+    // Group instructions by line. For each line, we keep:
+    // - The first instruction (for the hint text)
+    // - The rightmost end column (for hint positioning, since `push.0.0` expands
+    //   to multiple instructions and we want the hint after all of them)
+    let mut line_hints: HashMap<u32, (Span<Instruction>, u32)> = HashMap::new();
+
+    for inst in collector.instructions {
+        let Some(range) = span_to_range(sources, inst.span()) else {
+            continue;
+        };
+        if !position_in_range(&range.end, visible_range) {
+            continue;
+        }
+        let line = range.start.line;
+        let end_col = range.end.character;
+
+        line_hints
+            .entry(line)
+            .and_modify(|(_, rightmost)| {
+                if end_col > *rightmost {
+                    *rightmost = end_col;
+                }
+            })
+            .or_insert((inst, end_col));
+    }
+
+    line_hints
+        .into_values()
+        .filter_map(|(inst, _rightmost_col)| {
             let label_text = render_note(&inst)?;
+            let range = span_to_range(sources, inst.span())?;
+            let line_num = range.start.line;
+            // Position hint at the end of the line (after any comments)
+            let line_end = line_lengths
+                .get(line_num as usize)
+                .copied()
+                .unwrap_or(0);
             Some(InlayHint {
                 position: Position {
-                    line: range.end.line,
-                    character: range.end.character.saturating_add(padding),
+                    line: line_num,
+                    character: line_end.saturating_add(padding),
                 },
                 label: InlayHintLabel::String(label_text),
                 kind: Some(InlayHintKind::TYPE),

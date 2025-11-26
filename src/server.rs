@@ -677,9 +677,19 @@ where
             return Ok(None);
         };
 
+        let miden_uri = to_miden_uri(&uri);
+        let Some(source) = self.sources.get_by_uri(&miden_uri) else {
+            return Ok(None);
+        };
+
         let tab_count = self.snapshot_config().await.inlay_hint_tabs;
-        let hints =
-            collect_inlay_hints(&doc.module, self.sources.as_ref(), &params.range, tab_count);
+        let hints = collect_inlay_hints(
+            &doc.module,
+            self.sources.as_ref(),
+            &params.range,
+            tab_count,
+            source.as_str(),
+        );
         Ok(Some(hints))
     }
 }
