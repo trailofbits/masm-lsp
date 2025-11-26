@@ -788,6 +788,7 @@ fn build_path_from_root(
 
 /// Extract doc comments above a definition at the given line.
 /// Doc comments are lines starting with "#!" immediately before the definition.
+/// Skips over attributes (lines starting with "@") between comments and definition.
 /// Returns the comment text with "#!" prefixes stripped.
 fn extract_doc_comment(source: &str, def_line: usize) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
@@ -812,8 +813,11 @@ fn extract_doc_comment(source: &str, def_line: usize) -> Option<String> {
             if !comment_lines.is_empty() {
                 break;
             }
+        } else if trimmed.starts_with('@') {
+            // Skip attribute lines (e.g., @locals(48), @extern(foo))
+            // Continue looking for doc comments above the attribute
         } else {
-            // Non-comment, non-empty line - stop
+            // Non-comment, non-empty, non-attribute line - stop
             break;
         }
 
@@ -1298,6 +1302,22 @@ end
         let source = "# Regular comment\nproc foo\n  nop\nend\n";
         let comment = extract_doc_comment(source, 1);
         assert_eq!(comment, None);
+    }
+
+    #[test]
+    fn extract_doc_comment_skips_attributes() {
+        // Doc comments should be found even with attributes between comment and definition
+        let source = "#! Comment here!\n@locals(48)\nexport.double\n";
+        let comment = extract_doc_comment(source, 2);
+        assert_eq!(comment, Some("Comment here!".to_string()));
+    }
+
+    #[test]
+    fn extract_doc_comment_skips_multiple_attributes() {
+        // Multiple attributes should all be skipped
+        let source = "#! Multi-line\n#! doc comment\n@locals(16)\n@extern(foo)\nproc bar\nend\n";
+        let comment = extract_doc_comment(source, 4);
+        assert_eq!(comment, Some("Multi-line\ndoc comment".to_string()));
     }
 
     #[async_trait::async_trait]
