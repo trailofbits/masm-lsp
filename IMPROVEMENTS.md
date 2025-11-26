@@ -511,7 +511,7 @@ impl ServerConfig {
 
 ### 11. Extract Module Path Resolution
 
-**Status:** 🔲 Pending
+**Status:** ✅ Done
 **Effort:** Medium
 **Risk:** Low
 
@@ -734,7 +734,7 @@ async fn concurrent_document_updates_no_panic() {
 | 8 | Optimize workspace index (#3) | Low | Low | 🔲 Pending |
 | 9 | Replace panics with Result (#9) | Small | Medium | ✅ Done |
 | 10 | ServerConfig builder (#10) | Small | Low | ✅ Done |
-| 11 | Extract module path resolution (#11) | Medium | Medium | 🔲 Pending |
+| 11 | Extract module path resolution (#11) | Medium | Medium | ✅ Done |
 | 12 | Extract DocumentCache (#12) | Medium | Medium | 🔲 Pending |
 | 13 | Split server.rs (#13) | Large | High | 🔲 Pending |
 | 14 | Property tests for SymbolPath (#14) | Small | Low | ✅ Done |

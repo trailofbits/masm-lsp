@@ -29,6 +29,7 @@ use crate::{
     diagnostics::{diagnostics_from_report, unresolved_to_diagnostics},
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
     inlay_hints::{collect_inlay_hints, get_instruction_hover},
+    module_path::ModulePathResolver,
     resolution::{resolve_symbol_at_position, ResolvedSymbol, ResolutionError},
     service::{DocumentService, WorkspaceService},
     symbol_path::SymbolPath,
@@ -283,17 +284,9 @@ where
     }
 
     async fn module_path_from_uri(&self, uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
-        if let Ok(fs_path) = uri.to_file_path() {
-            let cfg = self.config.read().await;
-            for lib in &cfg.library_paths {
-                if fs_path.starts_with(&lib.root) {
-                    if let Some(buf) = build_path_from_root(&fs_path, &lib.root, &lib.prefix) {
-                        return Some(buf);
-                    }
-                }
-            }
-        }
-        module_path_from_uri_fallback(uri)
+        let cfg = self.config.read().await;
+        let resolver = ModulePathResolver::new(&cfg.library_paths);
+        resolver.resolve(uri)
     }
 
     async fn parse_and_index(
@@ -830,43 +823,6 @@ fn determine_module_kind_from_ast(
     } else {
         ModuleKind::Library
     }
-}
-
-fn module_path_from_uri_fallback(uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
-    let path = uri.path();
-    let stem = Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())?;
-    let mut buf = miden_assembly_syntax::ast::PathBuf::default();
-    buf.push(stem);
-    Some(buf)
-}
-
-fn build_path_from_root(
-    path: &Path,
-    root: &Path,
-    prefix: &str,
-) -> Option<miden_assembly_syntax::ast::PathBuf> {
-    let rel = path.strip_prefix(root).ok()?;
-    let mut buf = miden_assembly_syntax::ast::PathBuf::default();
-    if !prefix.is_empty() {
-        buf.push(prefix);
-    }
-    let parts: Vec<_> = rel.iter().collect();
-    for (i, comp) in parts.iter().enumerate() {
-        let mut seg = comp.to_string_lossy();
-        if i == parts.len().saturating_sub(1) {
-            if let Some(stripped) = seg.split('.').next() {
-                seg = std::borrow::Cow::Owned(stripped.to_string());
-            }
-        }
-        if seg.is_empty() {
-            continue;
-        }
-        buf.push(seg.as_ref());
-    }
-    Some(buf)
 }
 
 /// Check if the cursor position is on a `use` statement line.
