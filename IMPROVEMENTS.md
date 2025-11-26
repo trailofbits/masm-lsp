@@ -605,7 +605,7 @@ pub struct Backend<C> {
 
 ### 13. Split server.rs into Focused Modules
 
-**Status:** 🔲 Pending
+**Status:** ✅ Done
 **Effort:** Large
 **Risk:** Medium
 **Dependencies:** #11, #12
@@ -736,7 +736,7 @@ async fn concurrent_document_updates_no_panic() {
 | 10 | ServerConfig builder (#10) | Small | Low | ✅ Done |
 | 11 | Extract module path resolution (#11) | Medium | Medium | ✅ Done |
 | 12 | Extract DocumentCache (#12) | Medium | Medium | ✅ Done |
-| 13 | Split server.rs (#13) | Large | High | 🔲 Pending |
+| 13 | Split server.rs (#13) | Large | High | ✅ Done |
 | 14 | Property tests for SymbolPath (#14) | Small | Low | ✅ Done |
 | 15 | Concurrent access tests (#15) | Medium | Medium | 🔲 Pending |
 

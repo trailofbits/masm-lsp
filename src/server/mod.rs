@@ -1,9 +1,12 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-    sync::Arc,
-};
+//! LSP server implementation for MASM.
+//!
+//! This module implements the Language Server Protocol for Miden Assembly,
+//! providing features like go-to-definition, hover, references, and more.
+
+mod config;
+mod helpers;
+
+use std::{collections::HashMap, fs, path::Path, sync::Arc};
 
 use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
@@ -33,8 +36,17 @@ use crate::{
     resolution::{resolve_symbol_at_position, ResolvedSymbol, ResolutionError},
     service::{DocumentService, WorkspaceService},
     symbol_path::SymbolPath,
-    util::{extract_token_at_position, extract_word_at_position, lsp_range_to_selection, to_miden_uri},
+    util::{
+        extract_token_at_position, extract_word_at_position, lsp_range_to_selection, to_miden_uri,
+    },
     LibraryPath, ServerConfig,
+};
+
+// Re-export submodule items used externally
+pub use config::{extract_library_paths, extract_tab_count};
+pub use helpers::{
+    determine_module_kind_from_ast, extract_doc_comment, extract_procedure_signature,
+    is_on_use_statement,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -799,177 +811,6 @@ where
     }
 }
 
-fn extract_tab_count(settings: &serde_json::Value) -> Option<usize> {
-    // Expect settings like { "masm": { "inlayHint": { "tabPadding": 2 } } }
-    settings
-        .get("masm")
-        .and_then(|v| v.get("inlayHint"))
-        .and_then(|v| v.get("tabPadding"))
-        .and_then(|v| v.as_u64())
-        .and_then(|v| usize::try_from(v).ok())
-        .filter(|v| *v > 0)
-}
-
-fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<LibraryPath>> {
-    let arr = settings
-        .get("masm")
-        .and_then(|v| v.get("libraryPaths"))
-        .and_then(|v| v.as_array())?;
-    let mut out = Vec::new();
-    for entry in arr {
-        match entry {
-            serde_json::Value::String(path) => {
-                out.push(LibraryPath {
-                    root: path.into(),
-                    prefix: "std".to_string(),
-                });
-            }
-            serde_json::Value::Object(map) => {
-                let Some(path_val) = map.get("path").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let prefix = map.get("prefix").and_then(|v| v.as_str()).unwrap_or("std");
-                out.push(LibraryPath {
-                    root: path_val.into(),
-                    prefix: prefix.to_string(),
-                });
-            }
-            _ => {}
-        }
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-/// Determine the appropriate module kind from the parsed AST.
-///
-/// This examines the module's structure to determine whether it should be:
-/// - `Executable`: if it has an entrypoint (`begin..end` block)
-/// - `Library`: otherwise (the default for modules without entrypoints)
-///
-/// Note: Kernel modules are not auto-detected since they require explicit
-/// namespace configuration during parsing.
-fn determine_module_kind_from_ast(
-    module: &miden_assembly_syntax::ast::Module,
-) -> miden_assembly_syntax::ast::ModuleKind {
-    use miden_assembly_syntax::ast::ModuleKind;
-
-    if module.has_entrypoint() {
-        ModuleKind::Executable
-    } else {
-        ModuleKind::Library
-    }
-}
-
-/// Check if the cursor position is on a `use` statement line.
-fn is_on_use_statement(source: &str, pos: lsp_types::Position) -> bool {
-    if let Some(line) = source.lines().nth(pos.line as usize) {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("use ")
-    } else {
-        false
-    }
-}
-
-/// Extract the procedure signature (attributes + definition line) at the given line.
-/// Returns lines like "@locals(48)" and "export.double" as a multi-line string.
-fn extract_procedure_signature(source: &str, def_line: usize) -> Option<String> {
-    let lines: Vec<&str> = source.lines().collect();
-    let def = lines.get(def_line)?.trim();
-
-    // The definition line should be the procedure declaration
-    if !def.starts_with("proc")
-        && !def.starts_with("pub")
-        && !def.starts_with("export.")
-        && !def.starts_with("begin")
-        && !def.starts_with("const.")
-    {
-        return None;
-    }
-
-    let mut signature_lines = Vec::new();
-
-    // Collect attribute lines above the definition (walking backwards)
-    let mut line_idx = def_line.saturating_sub(1);
-    while line_idx < lines.len() {
-        let line = lines.get(line_idx).map(|l| l.trim()).unwrap_or("");
-        if line.starts_with('@') {
-            signature_lines.push(line.to_string());
-        } else if line.is_empty() || line.starts_with("#!") || line.starts_with('#') {
-            // Skip blank lines and comments, keep looking for attributes
-            if !signature_lines.is_empty() {
-                break; // Found attributes, stop at non-attribute
-            }
-        } else {
-            break;
-        }
-        if line_idx == 0 {
-            break;
-        }
-        line_idx -= 1;
-    }
-
-    // Reverse attributes since we collected bottom-up
-    signature_lines.reverse();
-    // Add the definition line
-    signature_lines.push(def.to_string());
-
-    Some(signature_lines.join("\n"))
-}
-
-/// Extract doc comments above a definition at the given line.
-/// Doc comments are lines starting with "#!" immediately before the definition.
-/// Skips over attributes (lines starting with "@") between comments and definition.
-/// Returns the comment text with "#!" prefixes stripped.
-fn extract_doc_comment(source: &str, def_line: usize) -> Option<String> {
-    let lines: Vec<&str> = source.lines().collect();
-    if def_line == 0 || def_line > lines.len() {
-        return None;
-    }
-
-    let mut comment_lines = Vec::new();
-    let mut line_idx = def_line.saturating_sub(1);
-
-    // Walk backwards collecting comment lines
-    loop {
-        let line = lines.get(line_idx)?;
-        let trimmed = line.trim();
-        if trimmed.starts_with("#!") {
-            // Strip the "#!" and optional space
-            let comment_text = trimmed.strip_prefix("#!").unwrap_or(trimmed);
-            let comment_text = comment_text.strip_prefix(' ').unwrap_or(comment_text);
-            comment_lines.push(comment_text.to_string());
-        } else if trimmed.is_empty() {
-            // Skip blank lines between comments and definition
-            if !comment_lines.is_empty() {
-                break;
-            }
-        } else if trimmed.starts_with('@') {
-            // Skip attribute lines (e.g., @locals(48), @extern(foo))
-            // Continue looking for doc comments above the attribute
-        } else {
-            // Non-comment, non-empty, non-attribute line - stop
-            break;
-        }
-
-        if line_idx == 0 {
-            break;
-        }
-        line_idx -= 1;
-    }
-
-    if comment_lines.is_empty() {
-        return None;
-    }
-
-    // Reverse since we collected bottom-up
-    comment_lines.reverse();
-    Some(comment_lines.join("\n"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1400,107 +1241,6 @@ end
         let path = uri.to_file_path().unwrap();
         let text = std::fs::read_to_string(path).unwrap();
         position_of(&text, needle)
-    }
-
-    #[test]
-    fn extract_doc_comment_single_line() {
-        let source = "#! This is a comment\nproc foo\n  nop\nend\n";
-        let comment = extract_doc_comment(source, 1);
-        assert_eq!(comment, Some("This is a comment".to_string()));
-    }
-
-    #[test]
-    fn extract_doc_comment_multi_line() {
-        let source = "#! Line one\n#! Line two\nproc foo\n  nop\nend\n";
-        let comment = extract_doc_comment(source, 2);
-        assert_eq!(comment, Some("Line one\nLine two".to_string()));
-    }
-
-    #[test]
-    fn extract_doc_comment_no_comment() {
-        let source = "proc foo\n  nop\nend\n";
-        let comment = extract_doc_comment(source, 0);
-        assert_eq!(comment, None);
-    }
-
-    #[test]
-    fn extract_doc_comment_with_blank_line() {
-        let source = "#! Comment\n\nproc foo\n  nop\nend\n";
-        let comment = extract_doc_comment(source, 2);
-        assert_eq!(comment, Some("Comment".to_string()));
-    }
-
-    #[test]
-    fn extract_doc_comment_ignores_regular_comments() {
-        // Regular comments starting with just "#" should be ignored
-        let source = "# Regular comment\nproc foo\n  nop\nend\n";
-        let comment = extract_doc_comment(source, 1);
-        assert_eq!(comment, None);
-    }
-
-    #[test]
-    fn extract_doc_comment_skips_attributes() {
-        // Doc comments should be found even with attributes between comment and definition
-        let source = "#! Comment here!\n@locals(48)\nexport.double\n";
-        let comment = extract_doc_comment(source, 2);
-        assert_eq!(comment, Some("Comment here!".to_string()));
-    }
-
-    #[test]
-    fn extract_doc_comment_skips_multiple_attributes() {
-        // Multiple attributes should all be skipped
-        let source = "#! Multi-line\n#! doc comment\n@locals(16)\n@extern(foo)\nproc bar\nend\n";
-        let comment = extract_doc_comment(source, 4);
-        assert_eq!(comment, Some("Multi-line\ndoc comment".to_string()));
-    }
-
-    #[test]
-    fn extract_signature_simple_proc() {
-        let source = "proc foo\n  nop\nend\n";
-        let sig = extract_procedure_signature(source, 0);
-        assert_eq!(sig, Some("proc foo".to_string()));
-    }
-
-    #[test]
-    fn extract_signature_export() {
-        let source = "export.double\n  nop\nend\n";
-        let sig = extract_procedure_signature(source, 0);
-        assert_eq!(sig, Some("export.double".to_string()));
-    }
-
-    #[test]
-    fn extract_signature_with_locals() {
-        let source = "@locals(48)\nexport.double\n  nop\nend\n";
-        let sig = extract_procedure_signature(source, 1);
-        assert_eq!(sig, Some("@locals(48)\nexport.double".to_string()));
-    }
-
-    #[test]
-    fn extract_signature_with_multiple_attributes() {
-        let source = "@locals(16)\n@extern(foo)\nproc bar\nend\n";
-        let sig = extract_procedure_signature(source, 2);
-        assert_eq!(sig, Some("@locals(16)\n@extern(foo)\nproc bar".to_string()));
-    }
-
-    #[test]
-    fn extract_signature_with_comment_above() {
-        let source = "#! Doc comment\n@locals(48)\nexport.double\n";
-        let sig = extract_procedure_signature(source, 2);
-        assert_eq!(sig, Some("@locals(48)\nexport.double".to_string()));
-    }
-
-    #[test]
-    fn extract_signature_pub_proc() {
-        let source = "pub proc foo\n  nop\nend\n";
-        let sig = extract_procedure_signature(source, 0);
-        assert_eq!(sig, Some("pub proc foo".to_string()));
-    }
-
-    #[test]
-    fn extract_signature_pub_proc_with_locals() {
-        let source = "@locals(16)\npub proc bar\nend\n";
-        let sig = extract_procedure_signature(source, 1);
-        assert_eq!(sig, Some("@locals(16)\npub proc bar".to_string()));
     }
 
     #[async_trait::async_trait]
