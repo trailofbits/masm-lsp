@@ -42,12 +42,62 @@ struct DocumentState {
     version: i32,
 }
 
+/// Cache for document state and parsed symbols.
+///
+/// This type encapsulates the management of open documents and their parsed
+/// symbol information, providing a clean interface for document lifecycle
+/// operations.
+#[derive(Debug, Default, Clone)]
+pub struct DocumentCache {
+    /// Tracks the version of each open document.
+    state: Arc<RwLock<HashMap<Url, DocumentState>>>,
+    /// Caches parsed symbols for each document.
+    symbols: Arc<RwLock<HashMap<Url, DocumentSymbols>>>,
+}
+
+impl DocumentCache {
+    /// Create a new empty document cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get the version of a document.
+    pub async fn get_version(&self, uri: &Url) -> Option<i32> {
+        let state = self.state.read().await;
+        state.get(uri).map(|doc| doc.version)
+    }
+
+    /// Set the version of a document.
+    pub async fn set_version(&self, uri: Url, version: i32) {
+        let mut state = self.state.write().await;
+        state.insert(uri, DocumentState { version });
+    }
+
+    /// Remove a document from the cache.
+    pub async fn remove(&self, uri: &Url) {
+        let mut state = self.state.write().await;
+        state.remove(uri);
+        // Note: symbols are kept for potential fallback during re-parsing
+    }
+
+    /// Get parsed symbols for a document.
+    pub async fn get_symbols(&self, uri: &Url) -> Option<DocumentSymbols> {
+        let symbols = self.symbols.read().await;
+        symbols.get(uri).cloned()
+    }
+
+    /// Store parsed symbols for a document.
+    pub async fn set_symbols(&self, uri: Url, doc_symbols: DocumentSymbols) {
+        let mut symbols = self.symbols.write().await;
+        symbols.insert(uri, doc_symbols);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Backend<C = tower_lsp::Client> {
     client: C,
     sources: Arc<DefaultSourceManager>,
-    documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
-    symbols: Arc<RwLock<HashMap<Url, DocumentSymbols>>>,
+    documents: DocumentCache,
     workspace: Arc<RwLock<WorkspaceIndex>>,
     config: Arc<RwLock<ServerConfig>>,
 }
@@ -57,8 +107,7 @@ impl<C> Backend<C> {
         Self {
             client,
             sources: Arc::new(DefaultSourceManager::default()),
-            documents: Arc::new(RwLock::new(HashMap::new())),
-            symbols: Arc::new(RwLock::new(HashMap::new())),
+            documents: DocumentCache::new(),
             workspace: Arc::new(RwLock::new(WorkspaceIndex::default())),
             config: Arc::new(RwLock::new(ServerConfig::default())),
         }
@@ -78,8 +127,7 @@ impl<C> Backend<C> {
     }
 
     pub async fn snapshot_document_symbols(&self, uri: &Url) -> Option<DocumentSymbols> {
-        let docs = self.symbols.read().await;
-        docs.get(uri).cloned()
+        self.documents.get_symbols(uri).await
     }
 
     pub async fn update_config(&self, cfg: ServerConfig) {
@@ -145,28 +193,23 @@ where
     }
 
     async fn handle_close(&self, uri: Url) {
-        let mut docs = self.documents.write().await;
-        docs.remove(&uri);
+        self.documents.remove(&uri).await;
         self.client.publish_diagnostics(uri, vec![], None).await;
     }
 
     async fn set_document_version(&self, uri: Url, version: i32) {
-        let mut docs = self.documents.write().await;
-        docs.insert(uri, DocumentState { version });
+        self.documents.set_version(uri, version).await;
     }
 
     async fn publish_diagnostics(&self, uri: Url) -> Vec<Diagnostic> {
-        let version = {
-            let docs = self.documents.read().await;
-            docs.get(&uri).map(|doc| doc.version)
-        };
+        let version = self.documents.get_version(&uri).await;
 
         // Parse and index first (this may update the workspace)
         let parse_result = self.parse_and_index(&uri).await;
 
         // Get document symbols if parse failed (need this before acquiring workspace lock)
         let fallback_doc = if parse_result.is_err() {
-            self.symbols.read().await.get(&uri).cloned()
+            self.documents.get_symbols(&uri).await
         } else {
             None
         };
@@ -296,10 +339,9 @@ where
         let module = self.parse_module(uri).await?;
         let doc_symbols = build_document_symbols(module, self.sources.as_ref());
 
-        {
-            let mut docs = self.symbols.write().await;
-            docs.insert(uri.clone(), doc_symbols.clone());
-        }
+        self.documents
+            .set_symbols(uri.clone(), doc_symbols.clone())
+            .await;
 
         {
             let mut ws = self.workspace.write().await;
@@ -314,11 +356,8 @@ where
     }
 
     async fn get_or_parse_document(&self, uri: &Url) -> Option<DocumentSymbols> {
-        {
-            let docs = self.symbols.read().await;
-            if let Some(doc) = docs.get(uri) {
-                return Some(doc.clone());
-            }
+        if let Some(doc) = self.documents.get_symbols(uri).await {
+            return Some(doc);
         }
         self.parse_and_index(uri).await.ok()
     }
