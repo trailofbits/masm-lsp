@@ -2,6 +2,7 @@ pub mod client;
 pub mod diagnostics;
 pub mod index;
 pub mod inlay_hints;
+pub mod instruction_hints;
 pub mod resolution;
 pub mod server;
 pub mod service;
