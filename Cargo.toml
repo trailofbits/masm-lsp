@@ -23,3 +23,6 @@ dirs = "5.0"
 # Miden toolchain
 miden-assembly-syntax = { git = "https://github.com/0xMiden/miden-vm", package = "miden-assembly-syntax", default-features = true }
 miden-debug-types = { git = "https://github.com/0xMiden/miden-vm", package = "miden-debug-types", default-features = true }
+
+[dev-dependencies]
+proptest = "1.4"

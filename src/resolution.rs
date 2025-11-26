@@ -25,6 +25,9 @@ pub enum ResolutionError {
 
     #[error("symbol not found: {0}")]
     SymbolNotFound(String),
+
+    #[error("invalid item index in module")]
+    InvalidItemIndex,
 }
 
 #[derive(Debug, Clone)]
@@ -76,9 +79,9 @@ pub fn resolve_symbol_at_position(
     if let Some(resolution) = resolver.resolve(token.as_str())? {
         let resolved = match resolution {
             SymbolResolution::Local(span) => {
-                let item = module.get(span.into_inner()).unwrap_or_else(|| {
-                    panic!("invalid item index {:?}", span.into_inner());
-                });
+                let item = module
+                    .get(span.into_inner())
+                    .ok_or(ResolutionError::InvalidItemIndex)?;
                 let name = item.name();
                 let path = SymbolPath::from_module_and_name(module, name.as_str());
                 ResolvedSymbol { path, name: token }
@@ -243,9 +246,9 @@ pub fn resolve_invocation_target(
     if let Some(resolution) = resolver.resolve(&target_str)? {
         let resolved = match resolution {
             SymbolResolution::Local(span) => {
-                let item = module.get(span.into_inner()).unwrap_or_else(|| {
-                    panic!("invalid item index {:?}", span.into_inner());
-                });
+                let item = module
+                    .get(span.into_inner())
+                    .ok_or(ResolutionError::InvalidItemIndex)?;
                 let name = item.name();
                 let path = SymbolPath::from_module_and_name(module, name.as_str());
                 ResolvedSymbol {

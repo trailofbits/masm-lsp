@@ -148,3 +148,92 @@ mod tests {
         assert_eq!(format!("{}", path), "::std::crypto::hash");
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Strategy to generate valid path segments (lowercase alphanumeric + underscore)
+    fn segment_strategy() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9_]{0,15}".prop_map(|s| s.to_string())
+    }
+
+    // Strategy to generate multi-segment paths like "foo::bar::baz"
+    fn path_segments_strategy() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(segment_strategy(), 1..=5)
+    }
+
+    proptest! {
+        /// The name() method should always return the last segment of the path.
+        #[test]
+        fn name_is_last_segment(segments in path_segments_strategy()) {
+            let path_str = format!("::{}", segments.join("::"));
+            let sp = SymbolPath::new(&path_str);
+            let expected_name = segments.last().unwrap();
+            prop_assert_eq!(sp.name(), expected_name.as_str());
+        }
+
+        /// Display should return the same string used to construct the path.
+        #[test]
+        fn roundtrip_display(segments in path_segments_strategy()) {
+            let path_str = format!("::{}", segments.join("::"));
+            let sp = SymbolPath::new(&path_str);
+            prop_assert_eq!(sp.to_string(), path_str);
+        }
+
+        /// A path should always end with itself.
+        #[test]
+        fn ends_with_self(segments in path_segments_strategy()) {
+            let path_str = format!("::{}", segments.join("::"));
+            let sp = SymbolPath::new(&path_str);
+            prop_assert!(sp.ends_with(&path_str));
+        }
+
+        /// A path should end with its name (last segment).
+        #[test]
+        fn ends_with_name(segments in path_segments_strategy()) {
+            let path_str = format!("::{}", segments.join("::"));
+            let sp = SymbolPath::new(&path_str);
+            let name = segments.last().unwrap();
+            prop_assert!(sp.ends_with(name));
+        }
+
+        /// The segments iterator should return all segments in order.
+        #[test]
+        fn segments_match_input(segments in path_segments_strategy()) {
+            let path_str = format!("::{}", segments.join("::"));
+            let sp = SymbolPath::new(&path_str);
+            let collected: Vec<_> = sp.segments().map(String::from).collect();
+            prop_assert_eq!(collected, segments);
+        }
+
+        /// module_path() should return everything except the last segment.
+        #[test]
+        fn module_path_excludes_name(segments in path_segments_strategy()) {
+            prop_assume!(segments.len() > 1);
+            let path_str = format!("::{}", segments.join("::"));
+            let sp = SymbolPath::new(&path_str);
+
+            let expected_module = format!("::{}", segments[..segments.len() - 1].join("::"));
+            prop_assert_eq!(sp.module_path(), Some(expected_module.as_str()));
+        }
+
+        /// name_matches should return true for the exact name.
+        #[test]
+        fn name_matches_exact(segments in path_segments_strategy()) {
+            let path_str = format!("::{}", segments.join("::"));
+            let sp = SymbolPath::new(&path_str);
+            let name = segments.last().unwrap();
+            prop_assert!(sp.name_matches(name));
+        }
+
+        /// as_str and as_ref should return the same string.
+        #[test]
+        fn as_str_equals_as_ref(segments in path_segments_strategy()) {
+            let path_str = format!("::{}", segments.join("::"));
+            let sp = SymbolPath::new(&path_str);
+            prop_assert_eq!(sp.as_str(), sp.as_ref());
+        }
+    }
+}

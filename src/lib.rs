@@ -41,6 +41,52 @@ impl Default for ServerConfig {
     }
 }
 
+impl ServerConfig {
+    /// Create a new builder for `ServerConfig`.
+    pub fn builder() -> ServerConfigBuilder {
+        ServerConfigBuilder::default()
+    }
+}
+
+/// Builder for `ServerConfig` with fluent API.
+#[derive(Default)]
+pub struct ServerConfigBuilder {
+    inlay_hint_tabs: Option<usize>,
+    library_paths: Option<Vec<LibraryPath>>,
+    instruction_hovers_enabled: Option<bool>,
+}
+
+impl ServerConfigBuilder {
+    /// Set the number of tab characters to insert before an inlay hint label.
+    pub fn inlay_hint_tabs(mut self, tabs: usize) -> Self {
+        self.inlay_hint_tabs = Some(tabs);
+        self
+    }
+
+    /// Set the library roots to preload and use for module path derivation.
+    pub fn library_paths(mut self, paths: Vec<LibraryPath>) -> Self {
+        self.library_paths = Some(paths);
+        self
+    }
+
+    /// Set whether to show hover information for built-in instructions.
+    pub fn instruction_hovers_enabled(mut self, enabled: bool) -> Self {
+        self.instruction_hovers_enabled = Some(enabled);
+        self
+    }
+
+    /// Build the `ServerConfig` with the configured values.
+    ///
+    /// Uses defaults for any values not explicitly set.
+    pub fn build(self) -> ServerConfig {
+        ServerConfig {
+            inlay_hint_tabs: self.inlay_hint_tabs.unwrap_or(2),
+            library_paths: self.library_paths.unwrap_or_else(default_library_paths),
+            instruction_hovers_enabled: self.instruction_hovers_enabled.unwrap_or(false),
+        }
+    }
+}
+
 fn default_library_paths() -> Vec<LibraryPath> {
     let mut paths = Vec::new();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
