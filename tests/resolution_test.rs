@@ -413,3 +413,44 @@ end
         "references should include qualified call site"
     );
 }
+
+#[tokio::test]
+async fn goto_definition_on_use_statement_navigates_to_module() {
+    let harness = TestHarness::new().await;
+
+    // Create a module that will be imported
+    // The module path for "utils.masm" will be ::utils (fallback uses file stem)
+    let lib_text = r#"proc helper
+    push.42
+end
+"#;
+
+    // Create a module that references the library module path in a use statement.
+    // The use statement references the actual module path that gets indexed.
+    let caller_text = r#"use ::utils
+
+proc main
+    exec.helper
+end
+"#;
+
+    // Open the library module (path will be ::utils based on file stem)
+    let lib_uri = harness.open_inline("utils.masm", lib_text).await;
+    let caller_uri = harness.open_inline("caller.masm", caller_text).await;
+
+    tokio::task::yield_now().await;
+
+    // Position cursor on "::utils" in the use statement
+    let pos = find_position(caller_text, "::utils");
+    let def = harness.goto_definition(&caller_uri, pos).await;
+
+    assert!(
+        def.is_some(),
+        "expected to find module definition from use statement"
+    );
+    let loc = def.unwrap();
+    assert_eq!(
+        loc.uri, lib_uri,
+        "use statement should navigate to the module file"
+    );
+}

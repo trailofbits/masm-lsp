@@ -519,6 +519,33 @@ where
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
+        let miden_uri = to_miden_uri(&uri);
+
+        // Check if cursor is on a `use` statement - resolve as module path lookup
+        if let Some(source) = self.sources.get_by_uri(&miden_uri) {
+            if is_on_use_statement(source.as_str(), pos) {
+                if let Some(token) = extract_token_at_position(&source, pos) {
+                    let normalized = token.trim_start_matches(':');
+                    let workspace = self.workspace.read().await;
+
+                    if let Some(loc) = workspace
+                        .definition(&format!("::{}", normalized))
+                        .or_else(|| workspace.definition_by_suffix(normalized))
+                        .or_else(|| {
+                            // Try matching by the last component (module name)
+                            normalized
+                                .rsplit("::")
+                                .next()
+                                .and_then(|name| workspace.definition_by_name(name))
+                        })
+                    {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                    }
+                }
+            }
+        }
+
+        // Standard symbol resolution for procedure calls, etc.
         let Some(doc) = self.get_or_parse_document(&uri).await else {
             return Ok(None);
         };
@@ -840,6 +867,16 @@ fn build_path_from_root(
         buf.push(seg.as_ref());
     }
     Some(buf)
+}
+
+/// Check if the cursor position is on a `use` statement line.
+fn is_on_use_statement(source: &str, pos: lsp_types::Position) -> bool {
+    if let Some(line) = source.lines().nth(pos.line as usize) {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("use ")
+    } else {
+        false
+    }
 }
 
 /// Extract the procedure signature (attributes + definition line) at the given line.
