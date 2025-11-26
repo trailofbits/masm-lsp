@@ -1,7 +1,7 @@
 //! Build script to generate compile-time instruction reference map.
 //!
 //! This script reads `data/instructions.toml` and generates a static phf::Map
-//! that provides O(1) lookup for instruction descriptions without runtime parsing.
+//! that maps instruction names to InstructionInfo structs.
 
 use std::env;
 use std::fs::File;
@@ -23,22 +23,74 @@ fn main() {
         .parse()
         .expect("Failed to parse data/instructions.toml");
 
-    // Build the phf map
+    // Write the struct definition
+    writeln!(
+        &mut file,
+        "/// Information about a Miden assembly instruction.\n\
+         #[derive(Debug, Clone, Copy)]\n\
+         pub struct InstructionInfo {{\n\
+         \x20   pub description: &'static str,\n\
+         \x20   pub stack_input: &'static str,\n\
+         \x20   pub stack_output: &'static str,\n\
+         \x20   pub cycles: &'static str,\n\
+         }}\n"
+    )
+    .unwrap();
+
+    // Build the map
     let mut builder = phf_codegen::Map::new();
+
     for (key, value) in &table {
-        if let toml::Value::String(desc) = value {
-            builder.entry(key.as_str(), &format!("\"{}\"", escape_string(desc)));
+        if let toml::Value::Table(instruction) = value {
+            let description = instruction
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let stack_input = instruction
+                .get("stack_input")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let stack_output = instruction
+                .get("stack_output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let cycles = instruction
+                .get("cycles")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let struct_literal = format!(
+                "InstructionInfo {{ description: \"{}\", stack_input: \"{}\", stack_output: \"{}\", cycles: \"{}\" }}",
+                escape_string(&sanitize_text(description)),
+                escape_string(stack_input),
+                escape_string(stack_output),
+                escape_string(cycles)
+            );
+            builder.entry(key.as_str(), &struct_literal);
         }
     }
 
     writeln!(
         &mut file,
         "/// Compile-time generated instruction reference map.\n\
-         /// Maps instruction names to their short descriptions.\n\
-         static INSTRUCTION_MAP: phf::Map<&'static str, &'static str> = {};",
+         /// Maps instruction names to their info.\n\
+         static INSTRUCTION_MAP: phf::Map<&'static str, InstructionInfo> = {};",
         builder.build()
     )
     .unwrap();
+}
+
+/// Sanitize text for display: remove LaTeX delimiters and replace braces with parentheses.
+fn sanitize_text(s: &str) -> String {
+    s.replace('$', "")
+        .replace('{', "(")
+        .replace('}', ")")
+        .replace("\\leftarrow", "←")
+        .replace("\\rightarrow", "→")
+        .replace("\\mod", "mod")
+        .replace("\\neq", "≠")
+        .replace("\\cdot", "·")
+        .replace("\\times", "×")
 }
 
 /// Escape special characters in a string for use in Rust string literals.

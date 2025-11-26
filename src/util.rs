@@ -30,8 +30,37 @@ pub fn extract_token_at_position(source: &SourceFile, pos: Position) -> Option<S
     }
 }
 
+/// Extract just the word at position (stopping at dots).
+/// For "exec.helper" with cursor on "exec", returns "exec".
+/// For "exec.helper" with cursor on "helper", returns "helper".
+pub fn extract_word_at_position(source: &SourceFile, pos: Position) -> Option<String> {
+    let bytes = source.as_bytes();
+    let offset = byte_offset_from_position(source, pos)?;
+    let mut start = offset;
+    let mut end = offset;
+
+    // Expand backwards until we hit a non-word char (dot stops expansion)
+    while start > 0 && is_word_char(bytes[start - 1] as char) {
+        start -= 1;
+    }
+    // Expand forwards
+    while end < bytes.len() && is_word_char(bytes[end] as char) {
+        end += 1;
+    }
+    let slice = std::str::from_utf8(&bytes[start..end]).ok()?;
+    if slice.is_empty() {
+        None
+    } else {
+        Some(slice.to_string())
+    }
+}
+
 fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '$' | '.')
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 fn byte_offset_from_position(source: &SourceFile, pos: Position) -> Option<usize> {

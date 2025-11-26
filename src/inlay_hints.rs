@@ -11,6 +11,38 @@ use crate::instruction_hints::{format_push_immediate, ToInlayHint};
 // Include the compile-time generated instruction map
 include!(concat!(env!("OUT_DIR"), "/instruction_map.rs"));
 
+/// Look up instruction info by name.
+///
+/// Handles both exact matches (e.g., "add") and parameterized instructions
+/// (e.g., "push.1" falling back to "push").
+fn get_instruction_info(name: &str) -> Option<&'static InstructionInfo> {
+    // First try exact match
+    if let Some(info) = INSTRUCTION_MAP.get(name) {
+        return Some(info);
+    }
+    // Try base instruction (strip after first dot)
+    let base = name.split('.').next()?;
+    INSTRUCTION_MAP.get(base)
+}
+
+/// Look up hover text for an instruction by name.
+///
+/// Returns formatted markdown hover text if the instruction is found.
+pub fn get_instruction_hover(name: &str) -> Option<String> {
+    let info = get_instruction_info(name)?;
+    Some(format_hover_text(name, info))
+}
+
+/// Format instruction info into markdown hover text.
+fn format_hover_text(name: &str, info: &InstructionInfo) -> String {
+    // Use just the base instruction name for the code block
+    let base_name = name.split('.').next().unwrap_or(name);
+    format!(
+        "```masm\n{}\n```\n\n---\n\n{}\n\n**Stack Input**\n\n`{}`\n\n**Stack Output**\n\n`{}`\n\n**Cycles**\n\n{}",
+        base_name, info.description, info.stack_input, info.stack_output, info.cycles
+    )
+}
+
 /// The kind of invocation instruction.
 #[derive(Clone, Copy)]
 enum InvocationKind {
@@ -270,15 +302,10 @@ fn render_note(instruction: &Span<Instruction>) -> Option<String> {
         return Some(hint);
     }
 
-    // Fall back to static lookup
+    // Fall back to static lookup - use description for inlay hints
     let rendered = instruction.inner().to_string();
-    let note = if let Some(value) = INSTRUCTION_MAP.get(&rendered) {
-        *value
-    } else {
-        let base = rendered.split('.').next().unwrap_or(rendered.as_str());
-        *INSTRUCTION_MAP.get(base)?
-    };
-    Some(note.to_string())
+    let info = get_instruction_info(&rendered)?;
+    Some(info.description.to_string())
 }
 
 #[derive(Default)]
@@ -411,11 +438,14 @@ mod tests {
     }
 
     #[test]
-    fn instruction_map_lookup_returns_description() {
-        let desc = INSTRUCTION_MAP.get("add");
-        assert!(desc.is_some());
-        let desc_str = *desc.unwrap();
-        assert!(!desc_str.is_empty());
+    fn instruction_map_lookup_returns_info() {
+        let info = INSTRUCTION_MAP.get("add");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert!(!info.description.is_empty());
+        assert!(!info.stack_input.is_empty());
+        assert!(!info.stack_output.is_empty());
+        assert!(!info.cycles.is_empty());
     }
 
     // === Tests for push aggregation ===

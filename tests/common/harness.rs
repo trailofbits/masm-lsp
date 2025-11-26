@@ -9,9 +9,9 @@ use masm_lsp::client::PublishDiagnostics;
 use masm_lsp::server::Backend;
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::{
-    DidOpenTextDocumentParams, Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, Location,
-    Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, Url, WorkspaceSymbolParams,
+    DidOpenTextDocumentParams, Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverParams, Location, Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, Url, WorkspaceSymbolParams,
 };
 use tower_lsp::LanguageServer;
 
@@ -223,5 +223,23 @@ impl TestHarness {
             name,
             symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    /// Get hover information at a position.
+    pub async fn hover(&self, uri: &Url, position: Position) -> Option<Hover> {
+        let params = HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+        };
+        self.backend.hover(params).await.ok().flatten()
+    }
+
+    /// Get hover information at a text needle.
+    pub async fn hover_at(&self, uri: &Url, text: &str, needle: &str) -> Option<Hover> {
+        let position = find_position(text, needle);
+        self.hover(uri, position).await
     }
 }

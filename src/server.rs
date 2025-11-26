@@ -28,11 +28,11 @@ use crate::{
     client::PublishDiagnostics,
     diagnostics::{diagnostics_from_report, unresolved_to_diagnostics},
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
-    inlay_hints::collect_inlay_hints,
+    inlay_hints::{collect_inlay_hints, get_instruction_hover},
     resolution::{resolve_symbol_at_position, ResolvedSymbol, ResolutionError},
     service::{DocumentService, WorkspaceService},
     symbol_path::SymbolPath,
-    util::{lsp_range_to_selection, to_miden_uri},
+    util::{extract_token_at_position, extract_word_at_position, lsp_range_to_selection, to_miden_uri},
     LibraryPath, ServerConfig,
 };
 
@@ -550,53 +550,87 @@ where
             return Ok(None);
         };
 
-        let symbol = match resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos) {
-            Ok(s) => s,
-            Err(e) => {
-                debug!("hover: {e}");
-                return Ok(None);
+        // Extract tokens at position for hover checks
+        let source = self.sources.get_by_uri(&to_miden_uri(&uri));
+        let token = source.as_ref().and_then(|s| extract_token_at_position(s, pos));
+        let word = source.as_ref().and_then(|s| extract_word_at_position(s, pos));
+
+        // Check if cursor is directly on an invocation instruction keyword (exec, call, syscall, procref)
+        // Only show instruction hover when cursor is on the keyword itself, not the target name
+        if let Some(ref w) = word {
+            if matches!(w.as_str(), "exec" | "call" | "syscall" | "procref") {
+                if let Some(hover_text) = get_instruction_hover(w) {
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: hover_text,
+                        }),
+                        range: None,
+                    }));
+                }
             }
-        };
+        }
 
-        // Find the definition location
-        let workspace = self.workspace.read().await;
-        let def_loc = workspace
-            .definition(symbol.path.as_str())
-            .or_else(|| workspace.definition_by_suffix(symbol.path.as_str()))
-            .or_else(|| workspace.definition_by_name(&symbol.name));
-        drop(workspace);
+        // Try to resolve as a symbol (procedure, constant, etc.)
+        match resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos) {
+            Ok(symbol) => {
+                // Find the definition location
+                let workspace = self.workspace.read().await;
+                let def_loc = workspace
+                    .definition(symbol.path.as_str())
+                    .or_else(|| workspace.definition_by_suffix(symbol.path.as_str()))
+                    .or_else(|| workspace.definition_by_name(&symbol.name));
+                drop(workspace);
 
-        let Some(loc) = def_loc else {
-            return Ok(None);
-        };
+                if let Some(loc) = def_loc {
+                    // Get the source file for the definition
+                    let def_uri = to_miden_uri(&loc.uri);
+                    if let Some(source) = self.sources.get_by_uri(&def_uri) {
+                        // Extract signature and comments above the definition
+                        let content = source.as_str();
+                        let def_line = loc.range.start.line as usize;
+                        let signature = extract_procedure_signature(content, def_line);
+                        let comment = extract_doc_comment(content, def_line);
 
-        // Get the source file for the definition
-        let def_uri = to_miden_uri(&loc.uri);
-        let Some(source) = self.sources.get_by_uri(&def_uri) else {
-            return Ok(None);
-        };
+                        // Build hover content: signature code block + separator + doc comment
+                        let hover_text = match (signature, comment) {
+                            (Some(sig), Some(doc)) => {
+                                format!("```masm\n{sig}\n```\n\n---\n\n{doc}")
+                            }
+                            (Some(sig), None) => format!("```masm\n{sig}\n```"),
+                            (None, Some(doc)) => doc,
+                            (None, None) => return Ok(None),
+                        };
 
-        // Extract signature and comments above the definition
-        let content = source.as_str();
-        let def_line = loc.range.start.line as usize;
-        let signature = extract_procedure_signature(content, def_line);
-        let comment = extract_doc_comment(content, def_line);
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: hover_text,
+                            }),
+                            range: None,
+                        }));
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("hover: symbol resolution failed: {e}");
+            }
+        }
 
-        // Build hover content: signature code block + separator + doc comment
-        let hover_text = match (signature, comment) {
-            (Some(sig), Some(doc)) => format!("```masm\n{sig}\n```\n\n---\n\n{doc}"),
-            (Some(sig), None) => format!("```masm\n{sig}\n```"),
-            (None, Some(doc)) => doc,
-            (None, None) => return Ok(None),
-        };
+        // Fall back to instruction hover for other instructions
+        if let Some(t) = token {
+            if let Some(hover_text) = get_instruction_hover(&t) {
+                return Ok(Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: hover_text,
+                    }),
+                    range: None,
+                }));
+            }
+        }
 
-        Ok(Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: hover_text,
-            }),
-            range: None,
-        }))
+        Ok(None)
     }
 
     async fn goto_implementation(
