@@ -26,3 +26,4 @@ miden-debug-types = { git = "https://github.com/0xMiden/miden-vm", package = "mi
 
 [dev-dependencies]
 proptest = "1.4"
+tokio = { version = "1", features = ["time"] }

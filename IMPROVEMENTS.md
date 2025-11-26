@@ -684,7 +684,7 @@ mod proptests {
 
 ### 15. Add Concurrent Access Tests
 
-**Status:** 🔲 Pending
+**Status:** ✅ Done
 **Effort:** Medium
 **Risk:** None (additive)
 
@@ -738,7 +738,7 @@ async fn concurrent_document_updates_no_panic() {
 | 12 | Extract DocumentCache (#12) | Medium | Medium | ✅ Done |
 | 13 | Split server.rs (#13) | Large | High | ✅ Done |
 | 14 | Property tests for SymbolPath (#14) | Small | Low | ✅ Done |
-| 15 | Concurrent access tests (#15) | Medium | Medium | 🔲 Pending |
+| 15 | Concurrent access tests (#15) | Medium | Medium | ✅ Done |
 
 ### Recommended Implementation Order
 
