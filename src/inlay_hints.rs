@@ -66,27 +66,38 @@ pub fn collect_inlay_hints(
             });
     }
 
-    line_hints
+    let mut hints: Vec<InlayHint> = line_hints
         .into_iter()
-        .filter_map(|(line_num, data)| {
-            let label_text = render_line_hint(&data.instructions)?;
-            // Position hint at the end of the line (after any comments)
+        .flat_map(|(line_num, data)| {
+            // Position hints at the end of the line (after any comments)
             let line_end = line_lengths.get(line_num as usize).copied().unwrap_or(0);
-            Some(InlayHint {
-                position: Position {
-                    line: line_num,
-                    character: line_end.saturating_add(padding),
-                },
-                label: InlayHintLabel::String(label_text),
-                kind: Some(InlayHintKind::TYPE),
-                text_edits: None,
-                tooltip: None,
-                padding_left: None,
-                padding_right: None,
-                data: None,
-            })
+            render_line_hints(&data.instructions)
+                .into_iter()
+                .map(move |label_text| InlayHint {
+                    position: Position {
+                        line: line_num,
+                        character: line_end.saturating_add(padding),
+                    },
+                    label: InlayHintLabel::String(label_text),
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: None,
+                    padding_right: None,
+                    data: None,
+                })
         })
-        .collect()
+        .collect();
+
+    // Sort hints by position (line, then character) to ensure correct display order
+    hints.sort_by(|a, b| {
+        a.position
+            .line
+            .cmp(&b.position.line)
+            .then_with(|| a.position.character.cmp(&b.position.character))
+    });
+
+    hints
 }
 
 fn position_in_range(pos: &Position, range: &Range) -> bool {
@@ -101,21 +112,52 @@ fn is_after(a: &Position, b: &Position) -> bool {
     a.line > b.line || (a.line == b.line && a.character > b.character)
 }
 
-/// Generate a hint for all instructions on a line.
-/// Aggregates push values when multiple push instructions appear on the same line
-/// (e.g., `push.0.0.0.0` is parsed as multiple `push.0` instructions).
-fn render_line_hint(instructions: &[Span<Instruction>]) -> Option<String> {
+/// Generate hints for all instructions on a line.
+/// Aggregates consecutive push instructions (e.g., `push.1.2` parsed as multiple pushes).
+/// For non-push instructions (e.g., `add swap`), returns a hint for each.
+fn render_line_hints(instructions: &[Span<Instruction>]) -> Vec<String> {
     if instructions.is_empty() {
-        return None;
+        return vec![];
     }
 
-    // Check if all instructions are push instructions that can be aggregated
-    if let Some(hint) = try_aggregate_push_hint(instructions) {
-        return Some(format!("# {hint}"));
+    let mut hints = Vec::new();
+    let mut i = 0;
+
+    while i < instructions.len() {
+        if is_push_instruction(instructions[i].inner()) {
+            // Collect consecutive push instructions
+            let start = i;
+            while i < instructions.len() && is_push_instruction(instructions[i].inner()) {
+                i += 1;
+            }
+            let push_group = &instructions[start..i];
+
+            if push_group.len() >= 2 {
+                // Aggregate multiple consecutive pushes
+                if let Some(hint) = try_aggregate_push_hint(push_group) {
+                    hints.push(hint);
+                }
+            } else {
+                // Single push - render individually
+                if let Some(hint) = render_note(&push_group[0]) {
+                    hints.push(hint);
+                }
+            }
+        } else {
+            // Non-push instruction - render individually
+            if let Some(hint) = render_note(&instructions[i]) {
+                hints.push(hint);
+            }
+            i += 1;
+        }
     }
 
-    // Fall back to rendering hint for the first instruction
-    render_note(&instructions[0])
+    hints
+}
+
+/// Check if an instruction is a push instruction (Push or PushFeltList).
+fn is_push_instruction(inst: &Instruction) -> bool {
+    matches!(inst, Instruction::Push(_) | Instruction::PushFeltList(_))
 }
 
 /// Try to aggregate multiple push instructions into a single hint.
@@ -152,7 +194,7 @@ fn try_aggregate_push_hint(instructions: &[Span<Instruction>]) -> Option<String>
 fn render_note(instruction: &Span<Instruction>) -> Option<String> {
     // Try dynamic hint first using the ToInlayHint trait
     if let Some(hint) = instruction.inner().to_inlay_hint() {
-        return Some(format!("# {hint}"));
+        return Some(hint);
     }
 
     // Fall back to static lookup
@@ -163,7 +205,7 @@ fn render_note(instruction: &Span<Instruction>) -> Option<String> {
         let base = rendered.split('.').next().unwrap_or(rendered.as_str());
         *INSTRUCTION_MAP.get(base)?
     };
-    Some(format!("# {note}"))
+    Some(note.to_string())
 }
 
 #[derive(Default)]
@@ -341,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn render_line_hint_aggregates_pushes() {
+    fn render_line_hints_aggregates_pushes() {
         let instructions: Vec<Span<Instruction>> = vec![
             Span::unknown(Instruction::Push(Immediate::from(Span::unknown(
                 PushValue::Int(IntValue::U8(1)),
@@ -354,33 +396,90 @@ mod tests {
             )))),
         ];
 
-        let hint = render_line_hint(&instructions);
+        let hints = render_line_hints(&instructions);
         assert_eq!(
-            hint,
-            Some("# Pushes the field elements [1, 2, 3] onto the stack.".into())
+            hints,
+            vec!["Pushes the field elements [1, 2, 3] onto the stack."]
         );
     }
 
     #[test]
-    fn render_line_hint_single_instruction_uses_trait() {
+    fn render_line_hints_single_instruction_uses_trait() {
         let instructions: Vec<Span<Instruction>> = vec![Span::unknown(Instruction::MovUp5)];
 
-        let hint = render_line_hint(&instructions);
-        assert_eq!(hint, Some("# Moves the 5th stack item to the top.".into()));
+        let hints = render_line_hints(&instructions);
+        assert_eq!(hints, vec!["Moves the 5th stack item to the top."]);
     }
 
     #[test]
-    fn render_line_hint_empty_returns_none() {
+    fn render_line_hints_empty_returns_empty() {
         let instructions: Vec<Span<Instruction>> = vec![];
-        let hint = render_line_hint(&instructions);
-        assert_eq!(hint, None);
+        let hints = render_line_hints(&instructions);
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn render_line_hints_multiple_non_push_instructions() {
+        // Test multiple instructions on the same line like "add swap"
+        let instructions: Vec<Span<Instruction>> = vec![
+            Span::unknown(Instruction::Add),
+            Span::unknown(Instruction::Swap1),
+        ];
+
+        let hints = render_line_hints(&instructions);
+        assert_eq!(hints.len(), 2);
+        // First hint is for Add: "c = (a + b) mod p."
+        assert!(hints[0].contains("mod p"));
+        // Second hint is for Swap: "Swaps the top two stack items."
+        assert!(hints[1].contains("Swaps"));
+    }
+
+    #[test]
+    fn render_line_hints_single_push_and_non_push() {
+        // Test "push.1 add" - single push followed by non-push, should generate individual hints
+        let instructions: Vec<Span<Instruction>> = vec![
+            Span::unknown(Instruction::Push(Immediate::from(Span::unknown(
+                PushValue::Int(IntValue::U8(1)),
+            )))),
+            Span::unknown(Instruction::Add),
+        ];
+
+        let hints = render_line_hints(&instructions);
+        assert_eq!(hints.len(), 2);
+        // First hint is for Push: "Pushes 1 onto the stack."
+        assert!(hints[0].contains("Pushes"));
+        // Second hint is for Add: "c = (a + b) mod p."
+        assert!(hints[1].contains("mod p"));
+    }
+
+    #[test]
+    fn render_line_hints_multi_push_then_non_push() {
+        // Test "push.1.2 add" - multiple pushes (from push.1.2) followed by add
+        // The consecutive pushes should be aggregated, add gets its own hint
+        let instructions: Vec<Span<Instruction>> = vec![
+            Span::unknown(Instruction::Push(Immediate::from(Span::unknown(
+                PushValue::Int(IntValue::U8(1)),
+            )))),
+            Span::unknown(Instruction::Push(Immediate::from(Span::unknown(
+                PushValue::Int(IntValue::U8(2)),
+            )))),
+            Span::unknown(Instruction::Add),
+        ];
+
+        let hints = render_line_hints(&instructions);
+        assert_eq!(hints.len(), 2);
+        // First hint is aggregated push: "Pushes the field elements [1, 2] onto the stack."
+        assert!(hints[0].contains("field elements"));
+        assert!(hints[0].contains("[1, 2]"));
+        // Second hint is for Add: "c = (a + b) mod p."
+        assert!(hints[1].contains("mod p"));
     }
 
     #[test]
     fn render_note_uses_trait_for_dynamic_hints() {
         let inst = Span::unknown(Instruction::Dup5);
         let hint = render_note(&inst);
-        assert_eq!(hint, Some("# Pushes a copy of the 5th stack item.".into()));
+        assert_eq!(hint, Some("Pushes a copy of the 5th stack item.".into()));
     }
 
     #[test]
@@ -389,7 +488,7 @@ mod tests {
         let hint = render_note(&inst);
         // Should get the static hint from INSTRUCTION_MAP
         assert!(hint.is_some());
-        assert!(hint.unwrap().starts_with("# "));
+        assert!(!hint.unwrap().is_empty());
     }
 
     #[test]
@@ -399,7 +498,7 @@ mod tests {
         let hint = render_note(&inst);
         assert_eq!(
             hint,
-            Some("# Pushes the field elements [1, 2] onto the stack.".into())
+            Some("Pushes the field elements [1, 2] onto the stack.".into())
         );
     }
 }
