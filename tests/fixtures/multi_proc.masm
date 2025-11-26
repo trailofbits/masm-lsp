@@ -1,0 +1,17 @@
+proc helper
+    push.42
+end
+
+proc compute
+    exec.helper
+    add
+end
+
+proc main_logic
+    exec.compute
+    exec.helper
+end
+
+begin
+    exec.main_logic
+end

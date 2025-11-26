@@ -4,9 +4,11 @@ pub mod index;
 pub mod inlay_hints;
 pub mod resolution;
 pub mod server;
+pub mod service;
 pub mod symbol_path;
 pub mod util;
 
+pub use resolution::ResolutionError;
 pub use symbol_path::SymbolPath;
 
 /// Configuration shared across handlers.

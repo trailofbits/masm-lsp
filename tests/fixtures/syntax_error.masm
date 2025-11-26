@@ -1,0 +1,3 @@
+proc broken
+    push.1
+    # missing 'end' keyword

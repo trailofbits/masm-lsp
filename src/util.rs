@@ -1,4 +1,3 @@
-use miden_assembly_syntax::ast::ModuleKind;
 use miden_debug_types::{Position as MidenPosition, Selection, SourceFile, Uri};
 use tower_lsp::lsp_types::{Position, Range, Url};
 
@@ -8,34 +7,6 @@ pub fn lsp_range_to_selection(range: Range) -> Selection {
         MidenPosition::new(range.start.line, range.start.character),
         MidenPosition::new(range.end.line, range.end.character),
     )
-}
-
-/// Heuristic module kind detection based on filename and presence of `begin`.
-pub fn guess_module_kinds(uri: &Url, text: &str) -> Vec<ModuleKind> {
-    let mut kinds = Vec::new();
-    let path = uri.path().to_ascii_lowercase();
-    let has_begin = text
-        .lines()
-        .any(|line| line.trim_start().starts_with("begin"));
-
-    if path.contains("kernel") {
-        push_if_missing(&mut kinds, ModuleKind::Kernel);
-    }
-    if has_begin {
-        push_if_missing(&mut kinds, ModuleKind::Executable);
-    }
-    push_if_missing(&mut kinds, ModuleKind::Library);
-    if !has_begin {
-        push_if_missing(&mut kinds, ModuleKind::Executable);
-    }
-
-    kinds
-}
-
-fn push_if_missing(kinds: &mut Vec<ModuleKind>, kind: ModuleKind) {
-    if !kinds.contains(&kind) {
-        kinds.push(kind);
-    }
 }
 
 /// Extract a MASM identifier-like token at the given LSP position.
@@ -60,7 +31,7 @@ pub fn extract_token_at_position(source: &SourceFile, pos: Position) -> Option<S
 }
 
 fn is_ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '$')
+    c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '$' | '.')
 }
 
 fn byte_offset_from_position(source: &SourceFile, pos: Position) -> Option<usize> {

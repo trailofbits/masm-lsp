@@ -1,0 +1,7 @@
+proc foo
+    exec.::missing::nonexistent_proc
+end
+
+proc bar
+    call.::missing::another_missing
+end

@@ -1,0 +1,35 @@
+proc helper
+    nop
+end
+
+proc nested_if
+    if.true
+        exec.helper
+    else
+        push.0
+    end
+end
+
+proc nested_repeat
+    repeat.5
+        exec.helper
+    end
+end
+
+proc nested_while
+    while.true
+        exec.helper
+    end
+end
+
+proc deeply_nested
+    if.true
+        repeat.3
+            while.true
+                exec.helper
+            end
+        end
+    else
+        push.0
+    end
+end
