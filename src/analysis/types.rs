@@ -66,29 +66,194 @@ impl Bounds {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Arithmetic operations for constant propagation
+    // Arithmetic operations for constant/range propagation
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// Add two bounds, propagating constants where possible.
+    /// Helper to get (lo, hi) bounds for any Bounds variant
+    fn as_range(&self) -> Option<(u64, u64)> {
+        match self {
+            Bounds::Const(v) => Some((*v, *v)),
+            Bounds::Range { lo, hi } => Some((*lo, *hi)),
+            Bounds::Bool => Some((0, 1)),
+            Bounds::Field => None,
+        }
+    }
+
+    /// Add two bounds, propagating constants and ranges where possible.
     pub fn add(&self, other: &Bounds) -> Bounds {
         match (self, other) {
+            // Const + Const = Const
             (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(a.wrapping_add(*b)),
+
+            // Const + Range or Range + Const = shifted Range
+            (Bounds::Const(c), Bounds::Range { lo, hi })
+            | (Bounds::Range { lo, hi }, Bounds::Const(c)) => {
+                let new_lo = lo.saturating_add(*c);
+                let new_hi = hi.saturating_add(*c);
+                if new_lo == new_hi {
+                    Bounds::Const(new_lo)
+                } else {
+                    Bounds::Range {
+                        lo: new_lo,
+                        hi: new_hi,
+                    }
+                }
+            }
+
+            // Range + Range = widened Range
+            (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 }) => {
+                let new_lo = l1.saturating_add(*l2);
+                let new_hi = h1.saturating_add(*h2);
+                Bounds::Range {
+                    lo: new_lo,
+                    hi: new_hi,
+                }
+            }
+
+            // Bool operations
+            (Bounds::Bool, Bounds::Bool) => Bounds::Range { lo: 0, hi: 2 },
+            (Bounds::Bool, Bounds::Const(c)) | (Bounds::Const(c), Bounds::Bool) => {
+                Bounds::Range {
+                    lo: *c,
+                    hi: c.saturating_add(1),
+                }
+            }
+
             _ => Bounds::Field,
         }
     }
 
-    /// Subtract: self - other, propagating constants where possible.
+    /// Subtract: self - other, propagating constants and ranges where possible.
     pub fn sub(&self, other: &Bounds) -> Bounds {
         match (self, other) {
+            // Const - Const = Const
             (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(a.wrapping_sub(*b)),
+
+            // Range - Const = shifted Range
+            (Bounds::Range { lo, hi }, Bounds::Const(c)) => {
+                let new_lo = lo.saturating_sub(*c);
+                let new_hi = hi.saturating_sub(*c);
+                if new_lo == new_hi {
+                    Bounds::Const(new_lo)
+                } else {
+                    Bounds::Range {
+                        lo: new_lo,
+                        hi: new_hi,
+                    }
+                }
+            }
+
+            // Const - Range: result can be negative in field arithmetic, be conservative
+            // But for u64, we can compute bounds: [c - hi, c - lo] (may wrap)
+            (Bounds::Const(c), Bounds::Range { lo, hi }) => {
+                if *c >= *hi {
+                    // No underflow possible
+                    Bounds::Range {
+                        lo: c.saturating_sub(*hi),
+                        hi: c.saturating_sub(*lo),
+                    }
+                } else {
+                    // May underflow, be conservative
+                    Bounds::Field
+                }
+            }
+
+            // Range - Range: complex, be conservative for now
+            (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 }) => {
+                if *l1 >= *h2 {
+                    // No underflow: [l1-h2, h1-l2]
+                    Bounds::Range {
+                        lo: l1.saturating_sub(*h2),
+                        hi: h1.saturating_sub(*l2),
+                    }
+                } else {
+                    Bounds::Field
+                }
+            }
+
             _ => Bounds::Field,
         }
     }
 
-    /// Multiply two bounds, propagating constants where possible.
+    /// Multiply two bounds, propagating constants and ranges where possible.
     pub fn mul(&self, other: &Bounds) -> Bounds {
         match (self, other) {
+            // Const * Const = Const
             (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(a.wrapping_mul(*b)),
+
+            // Const(0) * anything = 0, anything * Const(0) = 0
+            (Bounds::Const(0), _) | (_, Bounds::Const(0)) => Bounds::Const(0),
+
+            // Const(1) * x = x, x * Const(1) = x
+            (Bounds::Const(1), other) | (other, Bounds::Const(1)) => other.clone(),
+
+            // Const * Range or Range * Const = scaled Range
+            (Bounds::Const(c), Bounds::Range { lo, hi })
+            | (Bounds::Range { lo, hi }, Bounds::Const(c)) => {
+                let new_lo = lo.saturating_mul(*c);
+                let new_hi = hi.saturating_mul(*c);
+                if new_lo == new_hi {
+                    Bounds::Const(new_lo)
+                } else {
+                    Bounds::Range {
+                        lo: new_lo,
+                        hi: new_hi,
+                    }
+                }
+            }
+
+            // Bool * anything: result is in [0, max_other]
+            (Bounds::Bool, other) | (other, Bounds::Bool) => {
+                if let Some((_, hi)) = other.as_range() {
+                    Bounds::Range { lo: 0, hi }
+                } else {
+                    Bounds::Field
+                }
+            }
+
+            // Range * Range: complex, use [lo1*lo2, hi1*hi2] as approximation
+            (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 }) => {
+                let new_lo = l1.saturating_mul(*l2);
+                let new_hi = h1.saturating_mul(*h2);
+                Bounds::Range {
+                    lo: new_lo,
+                    hi: new_hi,
+                }
+            }
+
+            _ => Bounds::Field,
+        }
+    }
+
+    /// Division: self / other (integer division)
+    pub fn div(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) if *b != 0 => Bounds::Const(a / b),
+            (Bounds::Range { lo, hi }, Bounds::Const(c)) if *c != 0 => {
+                let new_lo = lo / c;
+                let new_hi = hi / c;
+                if new_lo == new_hi {
+                    Bounds::Const(new_lo)
+                } else {
+                    Bounds::Range {
+                        lo: new_lo,
+                        hi: new_hi,
+                    }
+                }
+            }
+            _ => Bounds::Field,
+        }
+    }
+
+    /// Modulo: self % other
+    pub fn modulo(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) if *b != 0 => Bounds::Const(a % b),
+            // x % c is always in [0, c-1]
+            (_, Bounds::Const(c)) if *c != 0 => Bounds::Range {
+                lo: 0,
+                hi: c.saturating_sub(1),
+            },
             _ => Bounds::Field,
         }
     }
@@ -96,8 +261,18 @@ impl Bounds {
     /// Equality comparison: returns Bool or Const(0/1) if determinable.
     pub fn eq(&self, other: &Bounds) -> Bounds {
         match (self, other) {
-            (Bounds::Const(a), Bounds::Const(b)) => {
-                Bounds::Const(if a == b { 1 } else { 0 })
+            (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(if a == b { 1 } else { 0 }),
+            // Disjoint ranges: definitely not equal
+            (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 })
+                if *h1 < *l2 || *h2 < *l1 =>
+            {
+                Bounds::Const(0)
+            }
+            (Bounds::Range { lo, hi }, Bounds::Const(c))
+            | (Bounds::Const(c), Bounds::Range { lo, hi })
+                if *c < *lo || *c > *hi =>
+            {
+                Bounds::Const(0)
             }
             _ => Bounds::Bool,
         }
@@ -106,8 +281,18 @@ impl Bounds {
     /// Inequality comparison: returns Bool or Const(0/1) if determinable.
     pub fn neq(&self, other: &Bounds) -> Bounds {
         match (self, other) {
-            (Bounds::Const(a), Bounds::Const(b)) => {
-                Bounds::Const(if a != b { 1 } else { 0 })
+            (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(if a != b { 1 } else { 0 }),
+            // Disjoint ranges: definitely not equal → result is 1
+            (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 })
+                if *h1 < *l2 || *h2 < *l1 =>
+            {
+                Bounds::Const(1)
+            }
+            (Bounds::Range { lo, hi }, Bounds::Const(c))
+            | (Bounds::Const(c), Bounds::Range { lo, hi })
+                if *c < *lo || *c > *hi =>
+            {
+                Bounds::Const(1)
             }
             _ => Bounds::Bool,
         }
@@ -116,20 +301,86 @@ impl Bounds {
     /// Less than comparison.
     pub fn lt(&self, other: &Bounds) -> Bounds {
         match (self, other) {
-            (Bounds::Const(a), Bounds::Const(b)) => {
-                Bounds::Const(if a < b { 1 } else { 0 })
+            (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(if a < b { 1 } else { 0 }),
+            // If self.hi < other.lo, definitely less than
+            (Bounds::Range { hi: h1, .. }, Bounds::Range { lo: l2, .. }) if *h1 < *l2 => {
+                Bounds::Const(1)
             }
+            (Bounds::Range { hi, .. }, Bounds::Const(c)) if *hi < *c => Bounds::Const(1),
+            (Bounds::Const(c), Bounds::Range { lo, .. }) if *c < *lo => Bounds::Const(1),
+            // If self.lo >= other.hi, definitely not less than
+            (Bounds::Range { lo: l1, .. }, Bounds::Range { hi: h2, .. }) if *l1 >= *h2 => {
+                Bounds::Const(0)
+            }
+            (Bounds::Range { lo, .. }, Bounds::Const(c)) if *lo >= *c => Bounds::Const(0),
+            (Bounds::Const(c), Bounds::Range { hi, .. }) if *c >= *hi => Bounds::Const(0),
             _ => Bounds::Bool,
         }
     }
 
     /// Greater than comparison.
     pub fn gt(&self, other: &Bounds) -> Bounds {
+        // gt(a, b) = lt(b, a)
+        other.lt(self)
+    }
+
+    /// Less than or equal comparison.
+    pub fn lte(&self, other: &Bounds) -> Bounds {
         match (self, other) {
-            (Bounds::Const(a), Bounds::Const(b)) => {
-                Bounds::Const(if a > b { 1 } else { 0 })
+            (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(if a <= b { 1 } else { 0 }),
+            // If self.hi <= other.lo, definitely <=
+            (Bounds::Range { hi: h1, .. }, Bounds::Range { lo: l2, .. }) if *h1 <= *l2 => {
+                Bounds::Const(1)
+            }
+            // If self.lo > other.hi, definitely not <=
+            (Bounds::Range { lo: l1, .. }, Bounds::Range { hi: h2, .. }) if *l1 > *h2 => {
+                Bounds::Const(0)
             }
             _ => Bounds::Bool,
+        }
+    }
+
+    /// Greater than or equal comparison.
+    pub fn gte(&self, other: &Bounds) -> Bounds {
+        other.lte(self)
+    }
+
+    /// Increment by 1
+    pub fn incr(&self) -> Bounds {
+        self.add(&Bounds::Const(1))
+    }
+
+    /// Decrement by 1
+    pub fn decr(&self) -> Bounds {
+        self.sub(&Bounds::Const(1))
+    }
+
+    /// Bitwise AND - result is bounded by smaller operand
+    pub fn bitand(&self, other: &Bounds) -> Bounds {
+        match (self.as_range(), other.as_range()) {
+            (Some((_, h1)), Some((_, h2))) => {
+                // Result is at most min(h1, h2)
+                Bounds::Range {
+                    lo: 0,
+                    hi: h1.min(h2),
+                }
+            }
+            _ => Bounds::Field,
+        }
+    }
+
+    /// Bitwise OR - result is bounded by larger operand (approximately)
+    pub fn bitor(&self, other: &Bounds) -> Bounds {
+        match (self.as_range(), other.as_range()) {
+            (Some((l1, h1)), Some((l2, h2))) => {
+                // Result is at least max(l1, l2), at most can be larger
+                // Conservative: assume result could be up to max of both
+                Bounds::Range {
+                    lo: l1.max(l2),
+                    hi: h1.max(h2),
+                }
+            }
+            _ => Bounds::Field,
         }
     }
 }
@@ -523,5 +774,156 @@ mod tests {
 
         assert!(taint.is_validated());
         assert!(taint.bounds.is_u32());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // P1: Bounds arithmetic propagation tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_bounds_add_const_const() {
+        let a = Bounds::Const(10);
+        let b = Bounds::Const(5);
+        assert_eq!(a.add(&b), Bounds::Const(15));
+    }
+
+    #[test]
+    fn test_bounds_add_const_range() {
+        let c = Bounds::Const(10);
+        let r = Bounds::Range { lo: 0, hi: 100 };
+        // 10 + [0, 100] = [10, 110]
+        assert_eq!(c.add(&r), Bounds::Range { lo: 10, hi: 110 });
+        assert_eq!(r.add(&c), Bounds::Range { lo: 10, hi: 110 });
+    }
+
+    #[test]
+    fn test_bounds_add_range_range() {
+        let r1 = Bounds::Range { lo: 0, hi: 10 };
+        let r2 = Bounds::Range { lo: 5, hi: 15 };
+        // [0, 10] + [5, 15] = [5, 25]
+        assert_eq!(r1.add(&r2), Bounds::Range { lo: 5, hi: 25 });
+    }
+
+    #[test]
+    fn test_bounds_sub_const_const() {
+        let a = Bounds::Const(10);
+        let b = Bounds::Const(3);
+        assert_eq!(a.sub(&b), Bounds::Const(7));
+    }
+
+    #[test]
+    fn test_bounds_sub_range_const() {
+        let r = Bounds::Range { lo: 10, hi: 100 };
+        let c = Bounds::Const(5);
+        // [10, 100] - 5 = [5, 95]
+        assert_eq!(r.sub(&c), Bounds::Range { lo: 5, hi: 95 });
+    }
+
+    #[test]
+    fn test_bounds_sub_const_range_no_underflow() {
+        let c = Bounds::Const(100);
+        let r = Bounds::Range { lo: 10, hi: 50 };
+        // 100 - [10, 50] = [50, 90] (when c >= hi)
+        assert_eq!(c.sub(&r), Bounds::Range { lo: 50, hi: 90 });
+    }
+
+    #[test]
+    fn test_bounds_mul_const_const() {
+        let a = Bounds::Const(7);
+        let b = Bounds::Const(6);
+        assert_eq!(a.mul(&b), Bounds::Const(42));
+    }
+
+    #[test]
+    fn test_bounds_mul_const_range() {
+        let c = Bounds::Const(3);
+        let r = Bounds::Range { lo: 0, hi: 10 };
+        // 3 * [0, 10] = [0, 30]
+        assert_eq!(c.mul(&r), Bounds::Range { lo: 0, hi: 30 });
+    }
+
+    #[test]
+    fn test_bounds_mul_by_zero() {
+        let zero = Bounds::Const(0);
+        let r = Bounds::Range { lo: 100, hi: 200 };
+        assert_eq!(zero.mul(&r), Bounds::Const(0));
+        assert_eq!(r.mul(&zero), Bounds::Const(0));
+    }
+
+    #[test]
+    fn test_bounds_mul_by_one() {
+        let one = Bounds::Const(1);
+        let r = Bounds::Range { lo: 10, hi: 20 };
+        assert_eq!(one.mul(&r), Bounds::Range { lo: 10, hi: 20 });
+        assert_eq!(r.mul(&one), Bounds::Range { lo: 10, hi: 20 });
+    }
+
+    #[test]
+    fn test_bounds_div_const_const() {
+        let a = Bounds::Const(42);
+        let b = Bounds::Const(6);
+        assert_eq!(a.div(&b), Bounds::Const(7));
+    }
+
+    #[test]
+    fn test_bounds_div_range_const() {
+        let r = Bounds::Range { lo: 10, hi: 100 };
+        let c = Bounds::Const(10);
+        // [10, 100] / 10 = [1, 10]
+        assert_eq!(r.div(&c), Bounds::Range { lo: 1, hi: 10 });
+    }
+
+    #[test]
+    fn test_bounds_modulo_range() {
+        let r = Bounds::Range { lo: 0, hi: 1000 };
+        let c = Bounds::Const(100);
+        // [0, 1000] % 100 = [0, 99]
+        assert_eq!(r.modulo(&c), Bounds::Range { lo: 0, hi: 99 });
+    }
+
+    #[test]
+    fn test_bounds_lt_disjoint_ranges() {
+        let r1 = Bounds::Range { lo: 0, hi: 10 };
+        let r2 = Bounds::Range { lo: 20, hi: 30 };
+        // [0, 10] < [20, 30] is always true
+        assert_eq!(r1.lt(&r2), Bounds::Const(1));
+        // [20, 30] < [0, 10] is always false
+        assert_eq!(r2.lt(&r1), Bounds::Const(0));
+    }
+
+    #[test]
+    fn test_bounds_neq_disjoint_ranges() {
+        let r1 = Bounds::Range { lo: 0, hi: 10 };
+        let r2 = Bounds::Range { lo: 20, hi: 30 };
+        // Disjoint ranges: always not equal
+        assert_eq!(r1.neq(&r2), Bounds::Const(1));
+    }
+
+    #[test]
+    fn test_bounds_eq_overlapping_ranges() {
+        let r1 = Bounds::Range { lo: 0, hi: 20 };
+        let r2 = Bounds::Range { lo: 10, hi: 30 };
+        // Overlapping ranges: could be equal or not
+        assert_eq!(r1.eq(&r2), Bounds::Bool);
+    }
+
+    #[test]
+    fn test_bounds_incr_decr() {
+        let c = Bounds::Const(10);
+        assert_eq!(c.incr(), Bounds::Const(11));
+        assert_eq!(c.decr(), Bounds::Const(9));
+
+        let r = Bounds::Range { lo: 5, hi: 15 };
+        assert_eq!(r.incr(), Bounds::Range { lo: 6, hi: 16 });
+        assert_eq!(r.decr(), Bounds::Range { lo: 4, hi: 14 });
+    }
+
+    #[test]
+    fn test_bounds_bitand() {
+        let r1 = Bounds::Range { lo: 0, hi: 255 };
+        let r2 = Bounds::Range { lo: 0, hi: 15 };
+        // AND is bounded by smaller operand
+        let result = r1.bitand(&r2);
+        assert!(matches!(result, Bounds::Range { lo: 0, hi: 15 }));
     }
 }

@@ -147,6 +147,10 @@ pub struct WhileLoopAnalyzer {
     unknown_ops: bool,
     /// Detected decrement pattern: (position, decrement_amount)
     decrement_pattern: Option<(usize, u64)>,
+    /// Detected increment pattern: (position, increment_amount)
+    increment_pattern: Option<(usize, u64)>,
+    /// Detected upper limit from lt.N comparison
+    upper_limit: Option<u64>,
     /// Initial counter value (if pushed before loop)
     initial_counter: Option<u64>,
 }
@@ -163,6 +167,8 @@ impl WhileLoopAnalyzer {
             stack,
             unknown_ops: false,
             decrement_pattern: None,
+            increment_pattern: None,
+            upper_limit: None,
             initial_counter,
         }
     }
@@ -184,6 +190,18 @@ impl WhileLoopAnalyzer {
             if decrement > 0 && initial > 0 {
                 // Countdown loop: runs initial/decrement times (rounded up)
                 let iterations = (initial + decrement - 1) / decrement;
+                return LoopBound::Exactly(iterations);
+            }
+        }
+
+        // Check for countup pattern: counter incremented, condition is counter < limit
+        if let (Some(initial), Some((_, increment)), Some(limit)) =
+            (self.initial_counter, self.increment_pattern, self.upper_limit)
+        {
+            if increment > 0 && limit > initial {
+                // Countup loop: runs (limit - initial) / increment times (rounded up)
+                let range = limit - initial;
+                let iterations = (range + increment - 1) / increment;
                 return LoopBound::Exactly(iterations);
             }
         }
@@ -280,18 +298,42 @@ impl WhileLoopAnalyzer {
                 self.stack.push(result);
             }
 
-            // Other arithmetic
+            // Other arithmetic - track increment patterns for countup loops
+            Instruction::Incr => {
+                // Incr is add.1 - increment by 1
+                let a = self.stack.pop();
+                let result = a.incr();
+
+                // Detect increment pattern: incr is increment by 1
+                self.increment_pattern = Some((self.stack.depth(), 1));
+
+                self.stack.push(result);
+            }
             Instruction::Add => {
                 let b = self.stack.pop();
                 let a = self.stack.pop();
-                self.stack.push(a.add(&b));
+                let result = a.add(&b);
+
+                // Detect increment pattern
+                if let (Bounds::Const(inc_amount), Some(_)) = (&b, self.initial_counter) {
+                    self.increment_pattern = Some((self.stack.depth(), *inc_amount));
+                }
+
+                self.stack.push(result);
             }
             Instruction::AddImm(imm) => {
                 let a = self.stack.pop();
                 let b = felt_imm_to_u64(imm)
                     .map(Bounds::Const)
                     .unwrap_or(Bounds::Field);
-                self.stack.push(a.add(&b));
+                let result = a.add(&b);
+
+                // Detect increment pattern: add.N where N is the increment
+                if let Bounds::Const(inc_amount) = &b {
+                    self.increment_pattern = Some((self.stack.depth(), *inc_amount));
+                }
+
+                self.stack.push(result);
             }
             Instruction::Mul => {
                 let b = self.stack.pop();
@@ -334,6 +376,12 @@ impl WhileLoopAnalyzer {
             Instruction::Lt => {
                 let b = self.stack.pop();
                 let a = self.stack.pop();
+
+                // Detect upper limit pattern: counter < limit (push.N lt)
+                if let Bounds::Const(limit) = &b {
+                    self.upper_limit = Some(*limit);
+                }
+
                 self.stack.push(a.lt(&b));
             }
             Instruction::Gt => {
@@ -535,5 +583,53 @@ end
         let body = parse_body("adv_push.1 add sub.1 dup.0 neq.0");
         let bound = infer_while_bound(&body, Some(10));
         assert_eq!(bound, LoopBound::Unknown);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Countup loop tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_countup_loop_simple() {
+        // Pattern: counter starts at 0, add.1 increments, push.10 lt is condition
+        // Should run 10 times (0, 1, 2, ..., 9)
+        let body = parse_body("add.1 dup.0 push.10 lt");
+        let bound = infer_while_bound(&body, Some(0));
+        assert_eq!(bound, LoopBound::Exactly(10));
+    }
+
+    #[test]
+    fn test_countup_loop_increment_by_2() {
+        // Counter starts at 0, increment by 2 each iteration, until < 10
+        // Iterations: 0, 2, 4, 6, 8 = 5 times
+        let body = parse_body("add.2 dup.0 push.10 lt");
+        let bound = infer_while_bound(&body, Some(0));
+        assert_eq!(bound, LoopBound::Exactly(5));
+    }
+
+    #[test]
+    fn test_countup_loop_non_zero_start() {
+        // Counter starts at 5, increment by 1, until < 15
+        // Should run 10 times (5, 6, 7, ..., 14)
+        let body = parse_body("add.1 dup.0 push.15 lt");
+        let bound = infer_while_bound(&body, Some(5));
+        assert_eq!(bound, LoopBound::Exactly(10));
+    }
+
+    #[test]
+    fn test_countup_loop_no_initial() {
+        // No initial counter known - should be unknown
+        let body = parse_body("add.1 dup.0 push.10 lt");
+        let bound = infer_while_bound(&body, None);
+        assert_eq!(bound, LoopBound::Unknown);
+    }
+
+    #[test]
+    fn test_countup_loop_odd_increment() {
+        // Counter starts at 0, increment by 3 each iteration, until < 10
+        // Iterations: 0, 3, 6, 9 = 4 times (ceiling of 10/3)
+        let body = parse_body("add.3 dup.0 push.10 lt");
+        let bound = infer_while_bound(&body, Some(0));
+        assert_eq!(bound, LoopBound::Exactly(4));
     }
 }
