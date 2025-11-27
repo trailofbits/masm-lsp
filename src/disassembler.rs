@@ -436,15 +436,15 @@ fn generate_pseudocode(
         // ─────────────────────────────────────────────────────────────────────
         // Comparison operations
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::Eq => binary_op_pseudocode(state, "=="),
-        Instruction::Neq => binary_op_pseudocode(state, "!="),
-        Instruction::Lt => binary_op_pseudocode(state, "<"),
-        Instruction::Lte => binary_op_pseudocode(state, "<="),
-        Instruction::Gt => binary_op_pseudocode(state, ">"),
-        Instruction::Gte => binary_op_pseudocode(state, ">="),
+        Instruction::Eq => comparison_pseudocode(state, "=="),
+        Instruction::Neq => comparison_pseudocode(state, "!="),
+        Instruction::Lt => comparison_pseudocode(state, "<"),
+        Instruction::Lte => comparison_pseudocode(state, "<="),
+        Instruction::Gt => comparison_pseudocode(state, ">"),
+        Instruction::Gte => comparison_pseudocode(state, ">="),
 
-        Instruction::EqImm(imm) => binary_imm_op_pseudocode(state, "==", format_felt_immediate(imm)),
-        Instruction::NeqImm(imm) => binary_imm_op_pseudocode(state, "!=", format_felt_immediate(imm)),
+        Instruction::EqImm(imm) => comparison_imm_pseudocode(state, "==", format_felt_immediate(imm)),
+        Instruction::NeqImm(imm) => comparison_imm_pseudocode(state, "!=", format_felt_immediate(imm)),
 
         // ─────────────────────────────────────────────────────────────────────
         // Boolean operations
@@ -484,10 +484,10 @@ fn generate_pseudocode(
         Instruction::U32RotlImm(imm) => binary_imm_op_pseudocode(state, "rotl", format_u8_immediate(imm)),
         Instruction::U32RotrImm(imm) => binary_imm_op_pseudocode(state, "rotr", format_u8_immediate(imm)),
 
-        Instruction::U32Lt => binary_op_pseudocode(state, "<"),
-        Instruction::U32Lte => binary_op_pseudocode(state, "<="),
-        Instruction::U32Gt => binary_op_pseudocode(state, ">"),
-        Instruction::U32Gte => binary_op_pseudocode(state, ">="),
+        Instruction::U32Lt => comparison_pseudocode(state, "<"),
+        Instruction::U32Lte => comparison_pseudocode(state, "<="),
+        Instruction::U32Gt => comparison_pseudocode(state, ">"),
+        Instruction::U32Gte => comparison_pseudocode(state, ">="),
         Instruction::U32Min => binary_op_pseudocode(state, "min"),
         Instruction::U32Max => binary_op_pseudocode(state, "max"),
 
@@ -1174,6 +1174,23 @@ fn binary_imm_op_pseudocode(state: &mut DisassemblerState, op: &str, imm: String
     let var = state.new_var();
     state.push(var.clone());
     Some(format!("{} = {} {} {}", var, a, op, imm))
+}
+
+/// Like binary_op_pseudocode but wraps the expression in parentheses for boolean comparisons.
+fn comparison_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
+    let b = state.pop();
+    let a = state.pop();
+    let var = state.new_var();
+    state.push(var.clone());
+    Some(format!("{} = ({} {} {})", var, a, op, b))
+}
+
+/// Like binary_imm_op_pseudocode but wraps the expression in parentheses for boolean comparisons.
+fn comparison_imm_pseudocode(state: &mut DisassemblerState, op: &str, imm: String) -> Option<String> {
+    let a = state.pop();
+    let var = state.new_var();
+    state.push(var.clone());
+    Some(format!("{} = ({} {} {})", var, a, op, imm))
 }
 
 fn unary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
