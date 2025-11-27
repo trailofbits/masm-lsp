@@ -1098,11 +1098,14 @@ fn generate_pseudocode(
 
         // Pad with zeros
         Instruction::PadW => {
+            let mut vars = Vec::new();
             for _ in 0..4 {
                 let var = state.new_var();
-                state.push(var);
+                state.push(var.clone());
+                vars.push(var);
             }
-            None // Just stack manipulation
+            vars.reverse();
+            Some(format!("({}) = (0, 0, 0, 0)", vars.join(", ")))
         }
 
         // Push slice
