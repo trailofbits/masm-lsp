@@ -1150,15 +1150,25 @@ fn dupw_pseudocode(state: &mut DisassemblerState, word_idx: usize) -> Option<Str
     // DupW duplicates a word (4 elements) at word position word_idx
     // Word 0 = positions 0-3, Word 1 = positions 4-7, etc.
     let base = word_idx * 4;
-    let mut vars = Vec::new();
+
+    // Collect the source values before duplicating
+    let sources: Vec<String> = (0..4).map(|i| state.peek(base + i)).collect();
+
+    // Perform the duplication
+    let mut new_vars = Vec::new();
     for i in 0..4 {
-        let src = state.dup(base + 3 - i); // Dup in reverse order to maintain stack order
+        let _ = state.dup(base + 3 - i); // Dup in reverse order to maintain stack order
         let var = state.new_var();
         state.push(var.clone());
-        vars.push((var, src));
+        new_vars.push(var);
     }
-    // No pseudocode output for pure stack manipulation
-    None
+    new_vars.reverse();
+
+    Some(format!(
+        "({}) = ({})",
+        new_vars.join(", "),
+        sources.join(", ")
+    ))
 }
 
 fn binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
