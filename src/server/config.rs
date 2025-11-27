@@ -69,34 +69,27 @@ pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<Library
 
 /// Extract the inlay hint type from LSP settings.
 ///
-/// The type is determined by checking which option is enabled:
-/// - If `masm.inlayHints.disassembly` is true or unset, returns `Disassembly` (default)
-/// - Else if `masm.inlayHints.description` is true, returns `Description`
-/// - If both are explicitly false, returns `None`
-///
 /// Expects settings in the format:
 /// ```json
-/// { "masm": { "inlayHints": { "description": true, "disassembly": false } } }
+/// { "masm": { "inlayHints": { "type": "disassembly" } } }
 /// ```
+///
+/// Valid values for `type`:
+/// - `"disassembly"` - Show pseudocode disassembly (default)
+/// - `"description"` - Show instruction descriptions
+/// - `"none"` - Disable inlay hints
 pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHintType> {
-    let hints = settings.get("masm").and_then(|v| v.get("inlayHints"))?;
+    let hint_type = settings
+        .get("masm")
+        .and_then(|v| v.get("inlayHints"))
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())?;
 
-    let description = hints
-        .get("description")
-        .and_then(|v| v.as_bool());
-    let disassembly = hints
-        .get("disassembly")
-        .and_then(|v| v.as_bool());
-
-    match (description, disassembly) {
-        // Disassembly takes priority if enabled (or default if nothing set)
-        (_, Some(true)) | (None, None) => Some(InlayHintType::Disassembly),
-        // Description enabled, disassembly not set or disabled
-        (Some(true), _) => Some(InlayHintType::Description),
-        // Both explicitly disabled
-        (Some(false), Some(false)) | (Some(false), None) => Some(InlayHintType::None),
-        // Disassembly explicitly disabled but description not set - use description
-        (None, Some(false)) => Some(InlayHintType::Description),
+    match hint_type.to_lowercase().as_str() {
+        "disassembly" => Some(InlayHintType::Disassembly),
+        "description" => Some(InlayHintType::Description),
+        "none" | "disabled" | "off" => Some(InlayHintType::None),
+        _ => None,
     }
 }
 
@@ -191,11 +184,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_inlay_hint_type_disassembly_enabled() {
+    fn extract_inlay_hint_type_disassembly() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
-                    "disassembly": true
+                    "type": "disassembly"
                 }
             }
         });
@@ -206,11 +199,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_inlay_hint_type_description_enabled() {
+    fn extract_inlay_hint_type_description() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
-                    "description": true
+                    "type": "description"
                 }
             }
         });
@@ -221,49 +214,47 @@ mod tests {
     }
 
     #[test]
-    fn extract_inlay_hint_type_disassembly_takes_priority() {
+    fn extract_inlay_hint_type_none() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
-                    "description": true,
-                    "disassembly": true
+                    "type": "none"
+                }
+            }
+        });
+        assert_eq!(
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::None)
+        );
+    }
+
+    #[test]
+    fn extract_inlay_hint_type_disabled_alias() {
+        let settings = json!({
+            "masm": {
+                "inlayHints": {
+                    "type": "disabled"
+                }
+            }
+        });
+        assert_eq!(
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::None)
+        );
+    }
+
+    #[test]
+    fn extract_inlay_hint_type_case_insensitive() {
+        let settings = json!({
+            "masm": {
+                "inlayHints": {
+                    "type": "DISASSEMBLY"
                 }
             }
         });
         assert_eq!(
             extract_inlay_hint_type(&settings),
             Some(InlayHintType::Disassembly)
-        );
-    }
-
-    #[test]
-    fn extract_inlay_hint_type_both_disabled() {
-        let settings = json!({
-            "masm": {
-                "inlayHints": {
-                    "description": false,
-                    "disassembly": false
-                }
-            }
-        });
-        assert_eq!(
-            extract_inlay_hint_type(&settings),
-            Some(InlayHintType::None)
-        );
-    }
-
-    #[test]
-    fn extract_inlay_hint_type_description_disabled_only() {
-        let settings = json!({
-            "masm": {
-                "inlayHints": {
-                    "description": false
-                }
-            }
-        });
-        assert_eq!(
-            extract_inlay_hint_type(&settings),
-            Some(InlayHintType::None)
         );
     }
 
@@ -274,15 +265,24 @@ mod tests {
     }
 
     #[test]
-    fn extract_inlay_hint_type_empty_hints_defaults_disassembly() {
+    fn extract_inlay_hint_type_invalid_value_returns_none() {
+        let settings = json!({
+            "masm": {
+                "inlayHints": {
+                    "type": "invalid"
+                }
+            }
+        });
+        assert_eq!(extract_inlay_hint_type(&settings), None);
+    }
+
+    #[test]
+    fn extract_inlay_hint_type_empty_hints_returns_none() {
         let settings = json!({
             "masm": {
                 "inlayHints": {}
             }
         });
-        assert_eq!(
-            extract_inlay_hint_type(&settings),
-            Some(InlayHintType::Disassembly)
-        );
+        assert_eq!(extract_inlay_hint_type(&settings), None);
     }
 }
