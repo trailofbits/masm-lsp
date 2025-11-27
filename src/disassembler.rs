@@ -307,14 +307,16 @@ fn generate_pseudocode(
         // Stack manipulation - Drop
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Drop => {
-            state.pop();
-            None
+            let dropped = state.pop();
+            Some(format!("drop({})", dropped))
         }
         Instruction::DropW => {
+            let mut dropped = Vec::new();
             for _ in 0..4 {
-                state.pop();
+                dropped.push(state.pop());
             }
-            None
+            dropped.reverse();
+            Some(format!("drop({})", dropped.join(", ")))
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -337,9 +339,9 @@ fn generate_pseudocode(
         Instruction::Swap15 => { state.swap(0, 15); None }
 
         // Word swap (swap 4-element words)
-        Instruction::SwapW1 => { state.swapw(0, 1); None }
-        Instruction::SwapW2 => { state.swapw(0, 2); None }
-        Instruction::SwapW3 => { state.swapw(0, 3); None }
+        Instruction::SwapW1 => swapw_pseudocode(state, 0, 1),
+        Instruction::SwapW2 => swapw_pseudocode(state, 0, 2),
+        Instruction::SwapW3 => swapw_pseudocode(state, 0, 3),
         Instruction::SwapDw => {
             // Swap double words (positions 0-7 with 8-15)
             for i in 0..4 {
@@ -1159,6 +1161,21 @@ fn dupw_pseudocode(state: &mut DisassemblerState, word_idx: usize) -> Option<Str
     }
     // No pseudocode output for pure stack manipulation
     None
+}
+
+fn swapw_pseudocode(state: &mut DisassemblerState, a: usize, b: usize) -> Option<String> {
+    // Collect the values in each word before swapping
+    let word_a: Vec<String> = (0..4).map(|i| state.peek(a * 4 + i)).collect();
+    let word_b: Vec<String> = (0..4).map(|i| state.peek(b * 4 + i)).collect();
+
+    // Perform the swap
+    state.swapw(a, b);
+
+    Some(format!(
+        "swap ({}) <-> ({})",
+        word_a.join(", "),
+        word_b.join(", ")
+    ))
 }
 
 fn binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
