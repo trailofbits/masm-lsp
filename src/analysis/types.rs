@@ -56,6 +56,82 @@ impl Bounds {
             || matches!(self, Bounds::Const(v) if *v <= 1)
             || matches!(self, Bounds::Range { lo: 0, hi } if *hi <= 1)
     }
+
+    /// Returns the known constant value, if any.
+    pub fn as_const(&self) -> Option<u64> {
+        match self {
+            Bounds::Const(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Arithmetic operations for constant propagation
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Add two bounds, propagating constants where possible.
+    pub fn add(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(a.wrapping_add(*b)),
+            _ => Bounds::Field,
+        }
+    }
+
+    /// Subtract: self - other, propagating constants where possible.
+    pub fn sub(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(a.wrapping_sub(*b)),
+            _ => Bounds::Field,
+        }
+    }
+
+    /// Multiply two bounds, propagating constants where possible.
+    pub fn mul(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) => Bounds::Const(a.wrapping_mul(*b)),
+            _ => Bounds::Field,
+        }
+    }
+
+    /// Equality comparison: returns Bool or Const(0/1) if determinable.
+    pub fn eq(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) => {
+                Bounds::Const(if a == b { 1 } else { 0 })
+            }
+            _ => Bounds::Bool,
+        }
+    }
+
+    /// Inequality comparison: returns Bool or Const(0/1) if determinable.
+    pub fn neq(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) => {
+                Bounds::Const(if a != b { 1 } else { 0 })
+            }
+            _ => Bounds::Bool,
+        }
+    }
+
+    /// Less than comparison.
+    pub fn lt(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) => {
+                Bounds::Const(if a < b { 1 } else { 0 })
+            }
+            _ => Bounds::Bool,
+        }
+    }
+
+    /// Greater than comparison.
+    pub fn gt(&self, other: &Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Const(a), Bounds::Const(b)) => {
+                Bounds::Const(if a > b { 1 } else { 0 })
+            }
+            _ => Bounds::Bool,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

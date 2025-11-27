@@ -12,6 +12,7 @@
 //! - `stack_effects`: How instructions affect the symbolic stack
 //! - `analyzer`: Main analyzer composing checkers with stack simulation
 //! - `contracts`: Workspace-wide procedure contract inference
+//! - `while_loops`: Loop bound inference for while loops with counter patterns
 
 pub mod analyzer;
 pub mod checker;
@@ -19,6 +20,7 @@ pub mod checkers;
 pub mod contracts;
 pub mod stack_effects;
 pub mod types;
+pub mod while_loops;
 
 // Re-export the main entry point
 pub use analyzer::analyze_module;
