@@ -144,6 +144,14 @@ impl<'a> Analyzer<'a> {
                     state.stack.push(taint);
                 }
             }
+            Some(StackEffect::KnownInputs { inputs }) => {
+                // We know inputs but not outputs - pop inputs, then clear tracking
+                for _ in 0..*inputs {
+                    state.stack.pop();
+                }
+                // Unknown outputs - clear tracking to avoid false positives
+                state.stack.clear();
+            }
             Some(StackEffect::Unknown) | None => {
                 // Unknown stack effect - clear tracking to avoid false positives
                 state.stack.clear();

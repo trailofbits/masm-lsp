@@ -45,6 +45,102 @@ fn push_imm_to_u64(imm: &Immediate<miden_assembly_syntax::parser::PushValue>) ->
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Signature Parsing
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parsed stack effect from an explicit procedure signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSignature {
+    /// Number of input stack elements
+    pub inputs: usize,
+    /// Number of output stack elements
+    pub outputs: usize,
+}
+
+/// Get the number of stack elements for a type name.
+///
+/// Returns the number of field elements that the type occupies on the stack:
+/// - `u64` = 2 elements
+/// - `u128` = 4 elements
+/// - `u256` = 8 elements
+/// - Unknown types default to 1 element
+fn type_to_element_count(type_name: &str) -> usize {
+    match type_name.trim() {
+        "u64" => 2,
+        "u128" => 4,
+        "u256" => 8,
+        _ => 1, // Default: single field element
+    }
+}
+
+/// Parse a procedure signature to extract input and output element counts.
+///
+/// Supports signatures like:
+/// - `proc foo(a: u256, b: u64) -> u128`
+/// - `pub proc bar(x: u256) -> u256`
+/// - `export.baz(a: u64, b: u64)`
+///
+/// Returns `None` if no signature with types is found.
+pub fn parse_procedure_signature(signature_line: &str) -> Option<ParsedSignature> {
+    // Find the parameter list: everything between ( and )
+    let params_start = signature_line.find('(')?;
+    let params_end = signature_line.find(')')?;
+    if params_start >= params_end {
+        return None;
+    }
+
+    let params_str = &signature_line[params_start + 1..params_end];
+
+    // Parse input parameters
+    let mut inputs = 0;
+    if !params_str.trim().is_empty() {
+        for param in params_str.split(',') {
+            let param = param.trim();
+            if param.is_empty() {
+                continue;
+            }
+            // Look for type annotation: "name: type"
+            if let Some(colon_pos) = param.find(':') {
+                let type_name = param[colon_pos + 1..].trim();
+                inputs += type_to_element_count(type_name);
+            } else {
+                // No type annotation, assume single element
+                inputs += 1;
+            }
+        }
+    }
+
+    // Parse return type(s): everything after "->"
+    let mut outputs = 0;
+    if let Some(arrow_pos) = signature_line.find("->") {
+        let return_str = &signature_line[arrow_pos + 2..];
+        // Return can be a single type or comma-separated types
+        for ret_type in return_str.split(',') {
+            let ret_type = ret_type.trim();
+            if ret_type.is_empty() {
+                continue;
+            }
+            outputs += type_to_element_count(ret_type);
+        }
+    }
+
+    // Only return if we found typed parameters (otherwise fall back to inference)
+    if inputs > 0 || outputs > 0 {
+        Some(ParsedSignature { inputs, outputs })
+    } else {
+        None
+    }
+}
+
+/// Extract and parse a procedure signature from source text at a given line.
+///
+/// Returns the parsed signature if the procedure has explicit type annotations.
+pub fn extract_and_parse_signature(source: &str, def_line: usize) -> Option<ParsedSignature> {
+    let line = source.lines().nth(def_line)?;
+    parse_procedure_signature(line)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Contract Types
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -61,12 +157,33 @@ pub enum ValidationBehavior {
 /// Stack effect of a procedure - how it changes the stack depth.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum StackEffect {
-    /// Stack effect is unknown (contains control flow or calls to unknown procedures)
+    /// Stack effect is completely unknown
     #[default]
     Unknown,
+    /// Inputs are known but outputs are unknown (e.g., due to while loops with unknown iteration count)
+    KnownInputs { inputs: usize },
     /// Known stack effect: (inputs_consumed, outputs_produced)
     /// Net change = outputs_produced - inputs_consumed
     Known { inputs: usize, outputs: usize },
+}
+
+impl StackEffect {
+    /// Get the number of inputs if known.
+    pub fn inputs(&self) -> Option<usize> {
+        match self {
+            StackEffect::Unknown => None,
+            StackEffect::KnownInputs { inputs } => Some(*inputs),
+            StackEffect::Known { inputs, .. } => Some(*inputs),
+        }
+    }
+
+    /// Get the number of outputs if known.
+    pub fn outputs(&self) -> Option<usize> {
+        match self {
+            StackEffect::Unknown | StackEffect::KnownInputs { .. } => None,
+            StackEffect::Known { outputs, .. } => Some(*outputs),
+        }
+    }
 }
 
 /// Contract describing expected behavior of a procedure.
@@ -223,14 +340,19 @@ pub fn infer_module_contracts_with_store(
     // This allows procedures calling other procedures to get transitive effects
     let mut second_pass = Vec::new();
     for contract in &first_pass {
-        // Only re-infer if first pass had Unknown effect
-        if matches!(contract.stack_effect, StackEffect::Unknown) {
+        // Re-infer if first pass had incomplete effect (Unknown or KnownInputs)
+        // These may now have fully known effects after looking up their callees
+        let needs_reinference = matches!(
+            contract.stack_effect,
+            StackEffect::Unknown | StackEffect::KnownInputs { .. }
+        );
+        if needs_reinference {
             // Find the procedure in the module
             if let Some(proc) = find_procedure_by_path(module, &contract.path) {
                 let re_inferred = infer_procedure_contract_with_store(
                     proc,
                     contract.path.clone(),
-                    contract.definition_range.clone(),
+                    contract.definition_range,
                     Some(&temp_store),
                 );
                 second_pass.push(re_inferred);
@@ -350,11 +472,13 @@ impl<'a> ProcedureAnalyzer<'a> {
     }
 
     fn stack_effect(&self) -> StackEffect {
+        // inputs = how far below zero we went (min_depth is negative or zero)
+        let inputs = (-self.min_depth).max(0) as usize;
+
         if self.unknown_effect {
-            StackEffect::Unknown
+            // Even when outputs are unknown, we still know the minimum inputs required
+            StackEffect::KnownInputs { inputs }
         } else {
-            // inputs = how far below zero we went (min_depth is negative or zero)
-            let inputs = (-self.min_depth).max(0) as usize;
             // outputs = final depth + inputs consumed
             let outputs = (self.stack_depth - self.min_depth) as usize;
             StackEffect::Known { inputs, outputs }
@@ -453,6 +577,11 @@ impl<'a> ProcedureAnalyzer<'a> {
                 // Known effect: apply it
                 self.apply_stack_change(-(*inputs as i32));
                 self.apply_stack_change(*outputs as i32);
+            }
+            Some(StackEffect::KnownInputs { inputs }) => {
+                // We know inputs but not outputs - apply inputs, mark outputs unknown
+                self.apply_stack_change(-(*inputs as i32));
+                self.unknown_effect = true;
             }
             Some(StackEffect::Unknown) | None => {
                 // Unknown effect - mark as unknown
@@ -641,33 +770,339 @@ impl<'a> ProcedureAnalyzer<'a> {
                 self.apply_pop_push(1, 1);
             }
 
-            // Unary operations: pop 1, push 1 (no change but need 1 input)
-            Instruction::Neg | Instruction::Inv | Instruction::Not | Instruction::IsOdd => {
-                self.require_stack_depth(1);
+            // Unary operations: pop 1, push 1
+            Instruction::Neg | Instruction::Inv | Instruction::Not | Instruction::IsOdd | Instruction::Incr => {
+                self.apply_pop_push(1, 1);
             }
 
-            // Memory operations
-            Instruction::MemLoad | Instruction::MemLoadImm(_) => {
-                // pop addr, push value: no net change
+            // Other math operations
+            Instruction::Exp => {
+                self.apply_pop_push(2, 1); // pop base + exp, push result
             }
-            Instruction::MemStore | Instruction::MemStoreImm(_) => {
-                self.apply_stack_change(-2); // pop addr + value
+            Instruction::ExpImm(_) | Instruction::ExpBitLength(_) => {
+                self.apply_pop_push(1, 1); // pop base, push result
+            }
+            Instruction::ILog2 | Instruction::Pow2 => {
+                self.apply_pop_push(1, 1);
             }
 
-            // Merkle operations - complex, mark as unknown for safety
-            Instruction::MTreeGet | Instruction::MTreeSet | Instruction::MTreeMerge
-            | Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
-                // These have complex stack effects, mark unknown
+            // ─────────────────────────────────────────────────────────────────────
+            // Memory operations - single element
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::MemLoad => {
+                self.apply_pop_push(1, 1); // pop addr, push value
+            }
+            Instruction::MemLoadImm(_) => {
+                self.apply_stack_change(1); // push value (addr from immediate)
+            }
+            Instruction::MemStore => {
+                self.apply_pop_push(2, 0); // pop addr + value
+            }
+            Instruction::MemStoreImm(_) => {
+                self.apply_pop_push(1, 0); // pop value (addr from immediate)
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Memory operations - word level (4 elements)
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
+                self.apply_pop_push(1, 4); // pop addr, push 4 values
+            }
+            Instruction::MemLoadWBeImm(_) | Instruction::MemLoadWLeImm(_) => {
+                self.apply_stack_change(4); // push 4 values (addr from immediate)
+            }
+            Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
+                self.apply_pop_push(5, 0); // pop addr + 4 values
+            }
+            Instruction::MemStoreWBeImm(_) | Instruction::MemStoreWLeImm(_) => {
+                self.apply_pop_push(4, 0); // pop 4 values (addr from immediate)
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Local memory operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::LocLoad(_) => {
+                self.apply_stack_change(1); // push 1 value
+            }
+            Instruction::LocLoadWBe(_) | Instruction::LocLoadWLe(_) => {
+                self.apply_stack_change(4); // push 4 values
+            }
+            Instruction::LocStore(_) => {
+                self.apply_pop_push(1, 0); // pop 1 value
+            }
+            Instruction::LocStoreWBe(_) | Instruction::LocStoreWLe(_) => {
+                self.apply_pop_push(4, 0); // pop 4 values
+            }
+            Instruction::Locaddr(_) => {
+                self.apply_stack_change(1); // push address
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Memory streaming
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::MemStream => {
+                self.apply_pop_push(12, 12); // pops 12, pushes 12
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Merkle operations - known stack effects
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::MTreeGet => {
+                // Stack: [d, i, R, ...] -> [V, R, ...]
+                // Pops depth + index (2), root word stays, pushes value word
+                // Net: pops 2, pushes 4 (value word replaces nothing, root stays)
+                // Actually: [d, i, R0, R1, R2, R3] -> [V0, V1, V2, V3, R0, R1, R2, R3]
+                // That's pop 2, push 4
+                self.apply_pop_push(2, 4);
+            }
+            Instruction::MTreeSet => {
+                // Stack: [d, i, R, V, ...] -> [R', V, ...]
+                // Pops d, i (2), keeps R (4), keeps V (4), pushes new R' (4)
+                // Net: pops 2, pushes 4 (new root)
+                self.apply_pop_push(2, 4);
+            }
+            Instruction::MTreeMerge => {
+                // Stack: [R, L, ...] -> [M, ...]
+                // Pops 8 (two words), pushes 4 (merged hash)
+                self.apply_pop_push(8, 4);
+            }
+            Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
+                // Stack: [d, i, R, V] -> [d, i, R, V] (unchanged, just verifies)
+                // No stack change
+                self.require_stack_depth(10); // needs d, i, R(4), V(4)
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Cryptographic operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::Hash => {
+                self.apply_pop_push(4, 4); // pop word, push hash
+            }
+            Instruction::HMerge => {
+                self.apply_pop_push(8, 4); // pop 2 words, push merged hash
+            }
+            Instruction::HPerm => {
+                self.apply_pop_push(12, 12); // permutation on 12 elements
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Extension field operations (ext2 - 2 field elements per value)
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::Ext2Add | Instruction::Ext2Sub | Instruction::Ext2Mul | Instruction::Ext2Div => {
+                self.apply_pop_push(4, 2); // pop 2 ext2 values (4 felts), push 1 ext2 (2 felts)
+            }
+            Instruction::Ext2Neg | Instruction::Ext2Inv => {
+                self.apply_pop_push(2, 2); // pop 1 ext2, push 1 ext2
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Conditional operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::CSwap => {
+                self.apply_pop_push(3, 2); // pop cond + 2 values, push 2 values
+            }
+            Instruction::CSwapW => {
+                self.apply_pop_push(9, 8); // pop cond + 2 words, push 2 words
+            }
+            Instruction::CDrop => {
+                self.apply_pop_push(3, 1); // pop cond + 2 values, push 1 value
+            }
+            Instruction::CDropW => {
+                self.apply_pop_push(9, 4); // pop cond + 2 words, push 1 word
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Assertion operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::Assert | Instruction::AssertWithError(_) => {
+                self.apply_pop_push(1, 0); // pop condition
+            }
+            Instruction::AssertEq | Instruction::AssertEqWithError(_) => {
+                self.apply_pop_push(2, 0); // pop 2 values to compare
+            }
+            Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
+                self.apply_pop_push(8, 0); // pop 2 words to compare
+            }
+            Instruction::Assertz | Instruction::AssertzWithError(_) => {
+                self.apply_pop_push(1, 0); // pop value to check
+            }
+            Instruction::Eqw => {
+                self.apply_pop_push(8, 1); // pop 2 words, push bool
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Input/environment operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::Sdepth => {
+                self.apply_stack_change(1); // push stack depth
+            }
+            Instruction::Caller => {
+                self.apply_stack_change(4); // push caller hash (4 elements)
+            }
+            Instruction::Clk => {
+                self.apply_stack_change(1); // push clock cycle
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Word-level stack manipulation
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::SwapW1 => self.require_stack_depth(8),
+            Instruction::SwapW2 => self.require_stack_depth(12),
+            Instruction::SwapW3 => self.require_stack_depth(16),
+            Instruction::SwapDw => self.require_stack_depth(16),
+
+            Instruction::MovUpW2 => self.require_stack_depth(12),
+            Instruction::MovUpW3 => self.require_stack_depth(16),
+            Instruction::MovDnW2 => self.require_stack_depth(12),
+            Instruction::MovDnW3 => self.require_stack_depth(16),
+
+            Instruction::Reversew => self.require_stack_depth(4),
+            Instruction::Reversedw => self.require_stack_depth(8),
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Dynamic procedure calls
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::DynExec | Instruction::DynCall => {
+                // Pop target hash (4 elements), unknown effect after
+                self.apply_pop_push(4, 0);
                 self.unknown_effect = true;
             }
-
-            // u32 operations: most are binary (pop 2, push 1)
-            _ if inst_str.starts_with("u32") && !inst_str.starts_with("u32assert") => {
-                self.apply_stack_change(-1);
+            Instruction::ProcRef(_) => {
+                self.apply_stack_change(4); // push procedure hash
             }
 
-            // Default: no change (conservative for unknown instructions)
-            _ => {}
+            // ─────────────────────────────────────────────────────────────────────
+            // u32 operations - explicit handling for each variant
+            // ─────────────────────────────────────────────────────────────────────
+
+            // u32 assertions - no stack change
+            Instruction::U32Assert | Instruction::U32AssertWithError(_) |
+            Instruction::U32Assert2 | Instruction::U32Assert2WithError(_) |
+            Instruction::U32AssertW | Instruction::U32AssertWWithError(_) => {
+                // No stack change, just validation
+            }
+
+            // u32 test - pushes bool without popping
+            Instruction::U32Test => {
+                self.apply_stack_change(1);
+            }
+            Instruction::U32TestW => {
+                self.apply_stack_change(1);
+            }
+
+            // u32 split/cast
+            Instruction::U32Split => {
+                self.apply_pop_push(1, 2); // pop 1 felt, push hi + lo
+            }
+            Instruction::U32Cast => {
+                self.apply_pop_push(1, 1); // pop 1, push truncated
+            }
+
+            // u32 wrapping binary ops: pop 2, push 1
+            Instruction::U32WrappingAdd | Instruction::U32WrappingSub | Instruction::U32WrappingMul => {
+                self.apply_pop_push(2, 1);
+            }
+            // u32 wrapping with immediate: pop 1, push 1
+            Instruction::U32WrappingAddImm(_) | Instruction::U32WrappingSubImm(_) | Instruction::U32WrappingMulImm(_) => {
+                self.apply_pop_push(1, 1);
+            }
+
+            // u32 overflowing binary ops: pop 2, push 2 (result + overflow flag)
+            Instruction::U32OverflowingAdd | Instruction::U32OverflowingSub | Instruction::U32OverflowingMul => {
+                self.apply_pop_push(2, 2);
+            }
+            // u32 overflowing with immediate: pop 1, push 2
+            Instruction::U32OverflowingAddImm(_) | Instruction::U32OverflowingSubImm(_) | Instruction::U32OverflowingMulImm(_) => {
+                self.apply_pop_push(1, 2);
+            }
+
+            // u32 ternary ops: pop 3
+            Instruction::U32OverflowingAdd3 => {
+                self.apply_pop_push(3, 2); // pop 3, push result + carry
+            }
+            Instruction::U32WrappingAdd3 => {
+                self.apply_pop_push(3, 1); // pop 3, push wrapped result
+            }
+            Instruction::U32OverflowingMadd => {
+                self.apply_pop_push(3, 2); // pop 3, push result + overflow
+            }
+            Instruction::U32WrappingMadd => {
+                self.apply_pop_push(3, 1); // pop 3, push wrapped result
+            }
+
+            // u32 division: pop 2, push 1
+            Instruction::U32Div | Instruction::U32Mod => {
+                self.apply_pop_push(2, 1);
+            }
+            // u32 division with immediate: pop 1, push 1
+            Instruction::U32DivImm(_) | Instruction::U32ModImm(_) => {
+                self.apply_pop_push(1, 1);
+            }
+            // u32 divmod: pop 2, push 2 (quotient + remainder)
+            Instruction::U32DivMod => {
+                self.apply_pop_push(2, 2);
+            }
+            Instruction::U32DivModImm(_) => {
+                self.apply_pop_push(1, 2);
+            }
+
+            // u32 bitwise binary: pop 2, push 1
+            Instruction::U32And | Instruction::U32Or | Instruction::U32Xor => {
+                self.apply_pop_push(2, 1);
+            }
+            // u32 bitwise not: pop 1, push 1
+            Instruction::U32Not => {
+                self.apply_pop_push(1, 1);
+            }
+
+            // u32 shift/rotate: pop 2, push 1
+            Instruction::U32Shl | Instruction::U32Shr | Instruction::U32Rotl | Instruction::U32Rotr => {
+                self.apply_pop_push(2, 1);
+            }
+            // u32 shift/rotate with immediate: pop 1, push 1
+            Instruction::U32ShlImm(_) | Instruction::U32ShrImm(_) |
+            Instruction::U32RotlImm(_) | Instruction::U32RotrImm(_) => {
+                self.apply_pop_push(1, 1);
+            }
+
+            // u32 bit counting: pop 1, push 1
+            Instruction::U32Popcnt | Instruction::U32Clz | Instruction::U32Ctz |
+            Instruction::U32Clo | Instruction::U32Cto => {
+                self.apply_pop_push(1, 1);
+            }
+
+            // u32 comparison: pop 2, push 1 (bool)
+            Instruction::U32Lt | Instruction::U32Lte | Instruction::U32Gt | Instruction::U32Gte => {
+                self.apply_pop_push(2, 1);
+            }
+
+            // u32 min/max: pop 2, push 1
+            Instruction::U32Min | Instruction::U32Max => {
+                self.apply_pop_push(2, 1);
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Push slice
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::PushSlice(_, range) => {
+                self.apply_stack_change(range.len() as i32);
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Debug/trace/nop - no stack effect
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::Nop | Instruction::Breakpoint | Instruction::Debug(_) |
+            Instruction::Emit | Instruction::EmitImm(_) | Instruction::Trace(_) => {
+                // No stack effect
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // STARK/complex operations - mark as unknown
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::FriExt2Fold4 | Instruction::HornerBase | Instruction::HornerExt |
+            Instruction::EvalCircuit | Instruction::LogPrecompile | Instruction::SysEvent(_) => {
+                self.unknown_effect = true;
+            }
         }
     }
 }
@@ -681,6 +1116,9 @@ impl<'a> Visit for ProcedureAnalyzer<'a> {
             Op::If {
                 then_blk, else_blk, ..
             } => {
+                // if.true consumes 1 element (the condition) from the stack
+                self.apply_pop_push(1, 0);
+
                 // Compute effects of both branches
                 let then_effect = self.compute_block_effect(then_blk);
                 let else_effect = self.compute_block_effect(else_blk);
@@ -701,7 +1139,7 @@ impl<'a> Visit for ProcedureAnalyzer<'a> {
                             self.apply_stack_change(-max_inputs);
                             self.apply_stack_change(outputs);
                         } else {
-                            // Different net effects - unknown
+                            // Different net effects - unknown outputs
                             self.unknown_effect = true;
                         }
                     }
@@ -1009,18 +1447,19 @@ end",
         );
 
         assert_eq!(contracts.len(), 1);
-        // Both branches push 1, so net effect is 0 inputs, 1 output
+        // if.true consumes 1 (condition), both branches push 1
+        // Net: 1 input (condition), 1 output
         assert_eq!(
             contracts[0].stack_effect,
             StackEffect::Known {
-                inputs: 0,
+                inputs: 1,
                 outputs: 1
             }
         );
     }
 
     #[test]
-    fn test_if_else_different_effects_unknown() {
+    fn test_if_else_different_effects_known_inputs() {
         // if-else where branches have different net effects
         let contracts = parse_and_infer(
             "proc if_unbalanced
@@ -1033,8 +1472,11 @@ end",
         );
 
         assert_eq!(contracts.len(), 1);
-        // Different net effects: then=+1, else=+2 -> unknown
-        assert_eq!(contracts[0].stack_effect, StackEffect::Unknown);
+        // Different net effects: then=+1, else=+2 -> outputs unknown, but inputs (1 for condition) known
+        assert_eq!(
+            contracts[0].stack_effect,
+            StackEffect::KnownInputs { inputs: 1 }
+        );
     }
 
     #[test]
@@ -1061,10 +1503,12 @@ end",
     }
 
     #[test]
-    fn test_while_nonzero_net_effect_unknown() {
-        // while loop with non-zero net effect = unknown
+    fn test_while_nonzero_net_effect_known_inputs() {
+        // while loop with non-zero net effect = inputs known, outputs unknown
+        // This test: while body just pushes, needs 1 input for condition check
         let contracts = parse_and_infer(
             "proc while_push
+    swap
     while.true
         push.1
     end
@@ -1072,8 +1516,12 @@ end",
         );
 
         assert_eq!(contracts.len(), 1);
-        // Non-zero net effect in while loop = unknown
-        assert_eq!(contracts[0].stack_effect, StackEffect::Unknown);
+        // swap needs 2 inputs, while loop body has non-zero net effect
+        // Inputs are preserved even though outputs are unknown
+        assert_eq!(
+            contracts[0].stack_effect,
+            StackEffect::KnownInputs { inputs: 2 }
+        );
     }
 
     #[test]
@@ -1178,5 +1626,87 @@ end",
                 outputs: 5
             }
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Signature Parsing Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_signature_u256_params() {
+        let sig = parse_procedure_signature("pub proc xor(rhs: u256, lhs: u256) -> u256");
+        assert!(sig.is_some());
+        let sig = sig.unwrap();
+        // u256 = 8 elements each, so 2 params = 16 inputs
+        assert_eq!(sig.inputs, 16);
+        // Return u256 = 8 outputs
+        assert_eq!(sig.outputs, 8);
+    }
+
+    #[test]
+    fn test_parse_signature_u64_params() {
+        let sig = parse_procedure_signature("proc add_u64(a: u64, b: u64) -> u64");
+        assert!(sig.is_some());
+        let sig = sig.unwrap();
+        // u64 = 2 elements each, so 2 params = 4 inputs
+        assert_eq!(sig.inputs, 4);
+        // Return u64 = 2 outputs
+        assert_eq!(sig.outputs, 2);
+    }
+
+    #[test]
+    fn test_parse_signature_u128_params() {
+        let sig = parse_procedure_signature("proc transform(x: u128) -> u128");
+        assert!(sig.is_some());
+        let sig = sig.unwrap();
+        // u128 = 4 elements
+        assert_eq!(sig.inputs, 4);
+        assert_eq!(sig.outputs, 4);
+    }
+
+    #[test]
+    fn test_parse_signature_mixed_types() {
+        let sig = parse_procedure_signature("proc mixed(a: u64, b: u128, c: u256) -> u64");
+        assert!(sig.is_some());
+        let sig = sig.unwrap();
+        // u64=2 + u128=4 + u256=8 = 14 inputs
+        assert_eq!(sig.inputs, 14);
+        // Return u64 = 2 outputs
+        assert_eq!(sig.outputs, 2);
+    }
+
+    #[test]
+    fn test_parse_signature_no_types() {
+        // No type annotations - should return None
+        let sig = parse_procedure_signature("proc simple");
+        assert!(sig.is_none());
+    }
+
+    #[test]
+    fn test_parse_signature_no_params_with_return() {
+        let sig = parse_procedure_signature("proc get_value() -> u256");
+        assert!(sig.is_some());
+        let sig = sig.unwrap();
+        assert_eq!(sig.inputs, 0);
+        assert_eq!(sig.outputs, 8);
+    }
+
+    #[test]
+    fn test_parse_signature_unknown_type_defaults() {
+        // Unknown types default to 1 element
+        let sig = parse_procedure_signature("proc foo(x: felt) -> felt");
+        assert!(sig.is_some());
+        let sig = sig.unwrap();
+        assert_eq!(sig.inputs, 1);
+        assert_eq!(sig.outputs, 1);
+    }
+
+    #[test]
+    fn test_type_to_element_count() {
+        assert_eq!(type_to_element_count("u64"), 2);
+        assert_eq!(type_to_element_count("u128"), 4);
+        assert_eq!(type_to_element_count("u256"), 8);
+        assert_eq!(type_to_element_count("felt"), 1);
+        assert_eq!(type_to_element_count("unknown"), 1);
     }
 }

@@ -12,7 +12,7 @@ use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, Position, Range,
 };
 
-use crate::analysis::{ContractStore, StackEffect};
+use crate::analysis::{parse_procedure_signature, ContractStore, StackEffect};
 use crate::diagnostics::span_to_range;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -27,12 +27,20 @@ struct NamedValue {
 }
 
 /// State for disassembling a procedure.
+///
+/// Supports dynamic input discovery: when an operation tries to access a stack
+/// position that doesn't exist, a new input variable is automatically created.
 #[derive(Debug)]
 struct DisassemblerState {
     /// The symbolic stack with named values
     stack: Vec<NamedValue>,
     /// Counter for generating variable names (v1, v2, ...)
     next_var_id: usize,
+    /// Counter for dynamically discovered input variables
+    /// This tracks how many "virtual" inputs exist below our current stack
+    next_input_id: usize,
+    /// The initial input count we started with (from contract or signature)
+    initial_input_count: usize,
     /// Whether stack tracking has failed (e.g., after dynamic call)
     tracking_failed: bool,
     /// The span where tracking failed (for diagnostic reporting)
@@ -56,10 +64,17 @@ impl DisassemblerState {
         Self {
             stack,
             next_var_id: 1,
+            next_input_id: input_count + 1,
+            initial_input_count: input_count,
             tracking_failed: false,
             failure_span: None,
             failure_reason: None,
         }
+    }
+
+    /// Get the total number of inputs discovered (initial + dynamically discovered).
+    fn total_inputs(&self) -> usize {
+        self.next_input_id - 1
     }
 
     /// Generate a new variable name.
@@ -69,72 +84,136 @@ impl DisassemblerState {
         name
     }
 
+    /// Generate a new input variable name (for dynamic discovery).
+    fn new_input(&mut self) -> String {
+        let name = format!("a{}", self.next_input_id);
+        self.next_input_id += 1;
+        name
+    }
+
     /// Push a new named value onto the stack.
     fn push(&mut self, name: String) {
         self.stack.push(NamedValue { name });
     }
 
     /// Pop a value from the stack, returning its name.
-    fn pop(&mut self) -> Option<String> {
-        self.stack.pop().map(|v| v.name)
+    /// If the stack is empty, dynamically discovers a new input.
+    fn pop(&mut self) -> String {
+        if let Some(v) = self.stack.pop() {
+            v.name
+        } else {
+            // Stack underflow - discover a new input!
+            // This input was "below" our visible stack when we started
+            self.new_input()
+        }
     }
 
     /// Peek at a value on the stack (0 = top).
-    #[allow(dead_code)]
-    fn peek(&self, n: usize) -> Option<&str> {
+    /// If the position is beyond the current stack, returns a dynamically generated input name.
+    fn peek(&self, n: usize) -> String {
         if n < self.stack.len() {
-            Some(&self.stack[self.stack.len() - 1 - n].name)
+            self.stack[self.stack.len() - 1 - n].name.clone()
         } else {
-            None
+            // Position is beyond our stack - this is accessing an input
+            // Calculate which input index this would be
+            let inputs_below = n - self.stack.len();
+            format!("a{}", self.next_input_id + inputs_below)
         }
     }
 
     /// Duplicate the value at position n onto the top.
-    fn dup(&mut self, n: usize) -> Option<String> {
+    /// If n is beyond the stack, dynamically discovers inputs as needed.
+    fn dup(&mut self, n: usize) -> String {
         if n < self.stack.len() {
-            let name = self.stack[self.stack.len() - 1 - n].name.clone();
-            name.into()
+            self.stack[self.stack.len() - 1 - n].name.clone()
         } else {
-            None
+            // Need to access beyond current stack - expand inputs
+            // Each new input goes at the bottom (lower stack positions)
+            // If we have [a1] and need position 2, the original stack would have been:
+            // [a3, a2, a1] where a3 is at the bottom (position 2 from top)
+            let inputs_needed = n - self.stack.len() + 1;
+            // Add inputs at the bottom in reverse order so that
+            // higher position numbers get higher argument numbers
+            for _ in 0..inputs_needed {
+                let input = NamedValue {
+                    name: self.new_input(),
+                };
+                self.stack.insert(0, input);
+            }
+            // Now we can access it
+            self.stack[self.stack.len() - 1 - n].name.clone()
+        }
+    }
+
+    /// Ensure the stack has at least `needed` elements, expanding with inputs if necessary.
+    fn ensure_stack_depth(&mut self, needed: usize) {
+        while self.stack.len() < needed {
+            // Add a new input at the bottom of the stack
+            let input = NamedValue {
+                name: self.new_input(),
+            };
+            self.stack.insert(0, input);
         }
     }
 
     /// Swap values at positions a and b (0 = top).
-    fn swap(&mut self, a: usize, b: usize) -> bool {
+    /// Expands the stack with inputs if needed.
+    fn swap(&mut self, a: usize, b: usize) {
+        let max_pos = a.max(b);
+        self.ensure_stack_depth(max_pos + 1);
         let len = self.stack.len();
-        if a < len && b < len {
-            let idx_a = len - 1 - a;
-            let idx_b = len - 1 - b;
-            self.stack.swap(idx_a, idx_b);
-            true
-        } else {
-            false
-        }
+        let idx_a = len - 1 - a;
+        let idx_b = len - 1 - b;
+        self.stack.swap(idx_a, idx_b);
     }
 
     /// Move the element at position n to the top.
-    fn movup(&mut self, n: usize) -> bool {
-        let len = self.stack.len();
-        if n < len && n > 0 {
-            let idx = len - 1 - n;
-            let elem = self.stack.remove(idx);
-            self.stack.push(elem);
-            true
-        } else {
-            false
+    /// Expands the stack with inputs if needed.
+    fn movup(&mut self, n: usize) {
+        if n == 0 {
+            return;
         }
+        self.ensure_stack_depth(n + 1);
+        let len = self.stack.len();
+        let idx = len - 1 - n;
+        let elem = self.stack.remove(idx);
+        self.stack.push(elem);
     }
 
     /// Move the top element to position n.
-    fn movdn(&mut self, n: usize) -> bool {
+    /// Expands the stack with inputs if needed.
+    fn movdn(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_stack_depth(n + 1);
+        let elem = self.stack.pop().unwrap();
         let len = self.stack.len();
-        if n < len && n > 0 {
-            let elem = self.stack.pop().unwrap();
-            let idx = len - n;
-            self.stack.insert(idx, elem);
-            true
-        } else {
-            false
+        let idx = len + 1 - n;
+        self.stack.insert(idx, elem);
+    }
+
+    /// Swap two words (4-element groups) at word positions a and b.
+    fn swapw(&mut self, a: usize, b: usize) {
+        // Word positions: word 0 = stack[top-3..top], word 1 = stack[top-7..top-4], etc.
+        for i in 0..4 {
+            self.swap(a * 4 + i, b * 4 + i);
+        }
+    }
+
+    /// Move the word at position n to the top (movupw).
+    fn movupw(&mut self, word_pos: usize) {
+        // Move 4 elements as a group
+        for _ in 0..4 {
+            self.movup(word_pos * 4);
+        }
+    }
+
+    /// Move the top word to position n (movdnw).
+    fn movdnw(&mut self, word_pos: usize) {
+        // Move top 4 elements down as a group
+        for _ in 0..4 {
+            self.movdn(word_pos * 4);
         }
     }
 
@@ -180,16 +259,21 @@ fn generate_pseudocode(
         }
 
         Instruction::PushFeltList(values) => {
-            let mut result = Vec::new();
-            for v in values {
-                let var = state.new_var();
-                state.push(var.clone());
-                result.push(format!("{} = {}", var, v.as_int()));
-            }
-            if result.is_empty() {
+            if values.is_empty() {
                 None
             } else {
-                Some(result.join("; "))
+                let mut vars = Vec::new();
+                let mut vals = Vec::new();
+                for v in values {
+                    let var = state.new_var();
+                    state.push(var.clone());
+                    vars.push(var);
+                    vals.push(v.as_int().to_string());
+                }
+                // Reverse to show in stack order (first pushed = leftmost)
+                vars.reverse();
+                vals.reverse();
+                Some(format!("[{}] = [{}]", vars.join(", "), vals.join(", ")))
             }
         }
 
@@ -212,6 +296,12 @@ fn generate_pseudocode(
         Instruction::Dup13 => dup_pseudocode(state, 13),
         Instruction::Dup14 => dup_pseudocode(state, 14),
         Instruction::Dup15 => dup_pseudocode(state, 15),
+
+        // Word dup (duplicate 4 elements as a word)
+        Instruction::DupW0 => dupw_pseudocode(state, 0),
+        Instruction::DupW1 => dupw_pseudocode(state, 1),
+        Instruction::DupW2 => dupw_pseudocode(state, 2),
+        Instruction::DupW3 => dupw_pseudocode(state, 3),
 
         // ─────────────────────────────────────────────────────────────────────
         // Stack manipulation - Drop
@@ -246,6 +336,21 @@ fn generate_pseudocode(
         Instruction::Swap14 => { state.swap(0, 14); None }
         Instruction::Swap15 => { state.swap(0, 15); None }
 
+        // Word swap (swap 4-element words)
+        Instruction::SwapW1 => { state.swapw(0, 1); None }
+        Instruction::SwapW2 => { state.swapw(0, 2); None }
+        Instruction::SwapW3 => { state.swapw(0, 3); None }
+        Instruction::SwapDw => {
+            // Swap double words (positions 0-7 with 8-15)
+            for i in 0..4 {
+                state.swap(i, i + 8);
+            }
+            for i in 4..8 {
+                state.swap(i, i + 4);
+            }
+            None
+        }
+
         // ─────────────────────────────────────────────────────────────────────
         // Stack manipulation - Move
         // ─────────────────────────────────────────────────────────────────────
@@ -279,6 +384,28 @@ fn generate_pseudocode(
         Instruction::MovDn14 => { state.movdn(14); None }
         Instruction::MovDn15 => { state.movdn(15); None }
 
+        // Word move operations
+        Instruction::MovUpW2 => { state.movupw(2); None }
+        Instruction::MovUpW3 => { state.movupw(3); None }
+        Instruction::MovDnW2 => { state.movdnw(2); None }
+        Instruction::MovDnW3 => { state.movdnw(3); None }
+
+        // Reverse operations
+        Instruction::Reversew => {
+            // Reverse top 4 elements
+            state.swap(0, 3);
+            state.swap(1, 2);
+            None
+        }
+        Instruction::Reversedw => {
+            // Reverse top 8 elements
+            state.swap(0, 7);
+            state.swap(1, 6);
+            state.swap(2, 5);
+            state.swap(3, 4);
+            None
+        }
+
         // ─────────────────────────────────────────────────────────────────────
         // Arithmetic operations
         // ─────────────────────────────────────────────────────────────────────
@@ -294,13 +421,13 @@ fn generate_pseudocode(
 
         Instruction::Neg => unary_op_pseudocode(state, "-"),
         Instruction::Inv => {
-            let a = state.pop().unwrap_or_else(|| "?".to_string());
+            let a = state.pop();
             let var = state.new_var();
             state.push(var.clone());
             Some(format!("{} = 1/{}", var, a))
         }
         Instruction::Incr => {
-            let a = state.pop().unwrap_or_else(|| "?".to_string());
+            let a = state.pop();
             let var = state.new_var();
             state.push(var.clone());
             Some(format!("{} = {} + 1", var, a))
@@ -373,8 +500,8 @@ fn generate_pseudocode(
 
         // u32 overflowing operations (produce 2 values)
         Instruction::U32OverflowingAdd => {
-            let b = state.pop().unwrap_or_else(|| "?".to_string());
-            let a = state.pop().unwrap_or_else(|| "?".to_string());
+            let b = state.pop();
+            let a = state.pop();
             let overflow = state.new_var();
             let result = state.new_var();
             state.push(overflow.clone());
@@ -382,8 +509,8 @@ fn generate_pseudocode(
             Some(format!("{}, {} = {} + {} (overflow)", result, overflow, a, b))
         }
         Instruction::U32OverflowingSub => {
-            let b = state.pop().unwrap_or_else(|| "?".to_string());
-            let a = state.pop().unwrap_or_else(|| "?".to_string());
+            let b = state.pop();
+            let a = state.pop();
             let underflow = state.new_var();
             let result = state.new_var();
             state.push(underflow.clone());
@@ -391,8 +518,8 @@ fn generate_pseudocode(
             Some(format!("{}, {} = {} - {} (underflow)", result, underflow, a, b))
         }
         Instruction::U32OverflowingMul => {
-            let b = state.pop().unwrap_or_else(|| "?".to_string());
-            let a = state.pop().unwrap_or_else(|| "?".to_string());
+            let b = state.pop();
+            let a = state.pop();
             let overflow = state.new_var();
             let result = state.new_var();
             state.push(overflow.clone());
@@ -401,8 +528,8 @@ fn generate_pseudocode(
         }
 
         Instruction::U32DivMod => {
-            let b = state.pop().unwrap_or_else(|| "?".to_string());
-            let a = state.pop().unwrap_or_else(|| "?".to_string());
+            let b = state.pop();
+            let a = state.pop();
             let remainder = state.new_var();
             let quotient = state.new_var();
             state.push(remainder.clone());
@@ -411,7 +538,7 @@ fn generate_pseudocode(
         }
 
         Instruction::U32Split => {
-            let a = state.pop().unwrap_or_else(|| "?".to_string());
+            let a = state.pop();
             let lo = state.new_var();
             let hi = state.new_var();
             state.push(lo.clone());
@@ -433,11 +560,89 @@ fn generate_pseudocode(
             Some(format!("{} = is_u32(top)", var))
         }
 
+        // u32 divmod with immediate
+        Instruction::U32DivModImm(imm) => {
+            let a = state.pop();
+            let divisor = format_u32_immediate(imm);
+            let remainder = state.new_var();
+            let quotient = state.new_var();
+            state.push(remainder.clone());
+            state.push(quotient.clone());
+            Some(format!("{}, {} = divmod({}, {})", quotient, remainder, a, divisor))
+        }
+
+        // u32 overflowing with immediate
+        Instruction::U32OverflowingAddImm(imm) => {
+            let a = state.pop();
+            let b = format_u32_immediate(imm);
+            let overflow = state.new_var();
+            let result = state.new_var();
+            state.push(overflow.clone());
+            state.push(result.clone());
+            Some(format!("{}, {} = {} + {} (overflow)", result, overflow, a, b))
+        }
+        Instruction::U32OverflowingSubImm(imm) => {
+            let a = state.pop();
+            let b = format_u32_immediate(imm);
+            let underflow = state.new_var();
+            let result = state.new_var();
+            state.push(underflow.clone());
+            state.push(result.clone());
+            Some(format!("{}, {} = {} - {} (underflow)", result, underflow, a, b))
+        }
+        Instruction::U32OverflowingMulImm(imm) => {
+            let a = state.pop();
+            let b = format_u32_immediate(imm);
+            let overflow = state.new_var();
+            let result = state.new_var();
+            state.push(overflow.clone());
+            state.push(result.clone());
+            Some(format!("{}, {} = {} * {} (overflow)", result, overflow, a, b))
+        }
+
+        // u32 ternary operations
+        Instruction::U32OverflowingAdd3 => {
+            let c = state.pop();
+            let b = state.pop();
+            let a = state.pop();
+            let carry = state.new_var();
+            let result = state.new_var();
+            state.push(carry.clone());
+            state.push(result.clone());
+            Some(format!("{}, {} = {} + {} + {} (carry)", result, carry, a, b, c))
+        }
+        Instruction::U32WrappingAdd3 => {
+            let c = state.pop();
+            let b = state.pop();
+            let a = state.pop();
+            let result = state.new_var();
+            state.push(result.clone());
+            Some(format!("{} = {} + {} + {}", result, a, b, c))
+        }
+        Instruction::U32OverflowingMadd => {
+            let c = state.pop();
+            let b = state.pop();
+            let a = state.pop();
+            let overflow = state.new_var();
+            let result = state.new_var();
+            state.push(overflow.clone());
+            state.push(result.clone());
+            Some(format!("{}, {} = {} * {} + {} (overflow)", result, overflow, a, b, c))
+        }
+        Instruction::U32WrappingMadd => {
+            let c = state.pop();
+            let b = state.pop();
+            let a = state.pop();
+            let result = state.new_var();
+            state.push(result.clone());
+            Some(format!("{} = {} * {} + {}", result, a, b, c))
+        }
+
         // ─────────────────────────────────────────────────────────────────────
         // Memory operations
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MemLoad => {
-            let addr = state.pop().unwrap_or_else(|| "?".to_string());
+            let addr = state.pop();
             let var = state.new_var();
             state.push(var.clone());
             Some(format!("{} = mem[{}]", var, addr))
@@ -449,19 +654,19 @@ fn generate_pseudocode(
             Some(format!("{} = mem[{}]", var, addr))
         }
         Instruction::MemStore => {
-            let addr = state.pop().unwrap_or_else(|| "?".to_string());
-            let val = state.pop().unwrap_or_else(|| "?".to_string());
+            let addr = state.pop();
+            let val = state.pop();
             Some(format!("mem[{}] = {}", addr, val))
         }
         Instruction::MemStoreImm(imm) => {
             let addr = format_u32_immediate(imm);
-            let val = state.pop().unwrap_or_else(|| "?".to_string());
+            let val = state.pop();
             Some(format!("mem[{}] = {}", addr, val))
         }
 
         // Word memory operations
         Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
-            let addr = state.pop().unwrap_or_else(|| "?".to_string());
+            let addr = state.pop();
             let mut vars = Vec::new();
             for _ in 0..4 {
                 let var = state.new_var();
@@ -483,16 +688,39 @@ fn generate_pseudocode(
             Some(format!("[{}] = mem_w[{}]", vars.join(", "), addr))
         }
         Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
-            let addr = state.pop().unwrap_or_else(|| "?".to_string());
+            let addr = state.pop();
             let mut vals = Vec::new();
             for _ in 0..4 {
-                vals.push(state.pop().unwrap_or_else(|| "?".to_string()));
+                vals.push(state.pop());
             }
             vals.reverse();
             Some(format!("mem_w[{}] = [{}]", addr, vals.join(", ")))
         }
+        Instruction::MemStoreWBeImm(imm) | Instruction::MemStoreWLeImm(imm) => {
+            let addr = format_u32_immediate(imm);
+            let mut vals = Vec::new();
+            for _ in 0..4 {
+                vals.push(state.pop());
+            }
+            vals.reverse();
+            Some(format!("mem_w[{}] = [{}]", addr, vals.join(", ")))
+        }
+        Instruction::MemStream => {
+            // Pop 12, push 12 (memory streaming)
+            for _ in 0..12 {
+                state.pop();
+            }
+            let mut vars = Vec::new();
+            for _ in 0..12 {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = mem_stream()", vars.join(", ")))
+        }
 
-        // Local memory
+        // Local memory - single element
         Instruction::LocLoad(idx) => {
             let idx_val = format_u16_immediate(idx);
             let var = state.new_var();
@@ -501,8 +729,36 @@ fn generate_pseudocode(
         }
         Instruction::LocStore(idx) => {
             let idx_val = format_u16_immediate(idx);
-            let val = state.pop().unwrap_or_else(|| "?".to_string());
+            let val = state.pop();
             Some(format!("local[{}] = {}", idx_val, val))
+        }
+
+        // Local memory - word level (4 elements)
+        Instruction::LocLoadWBe(idx) | Instruction::LocLoadWLe(idx) => {
+            let idx_val = format_u16_immediate(idx);
+            let mut vars = Vec::new();
+            for _ in 0..4 {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = local_w[{}]", vars.join(", "), idx_val))
+        }
+        Instruction::LocStoreWBe(idx) | Instruction::LocStoreWLe(idx) => {
+            let idx_val = format_u16_immediate(idx);
+            let mut vals = Vec::new();
+            for _ in 0..4 {
+                vals.push(state.pop());
+            }
+            vals.reverse();
+            Some(format!("local_w[{}] = [{}]", idx_val, vals.join(", ")))
+        }
+        Instruction::Locaddr(idx) => {
+            let idx_val = format_u16_immediate(idx);
+            let var = state.new_var();
+            state.push(var.clone());
+            Some(format!("{} = &local[{}]", var, idx_val))
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -522,6 +778,34 @@ fn generate_pseudocode(
             vars.reverse();
             Some(format!("[{}] = advice()", vars.join(", ")))
         }
+        Instruction::AdvLoadW => {
+            // Pop 4 values (address), push 4 values (loaded word)
+            for _ in 0..4 {
+                state.pop();
+            }
+            let mut vars = Vec::new();
+            for _ in 0..4 {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = advice_w()", vars.join(", ")))
+        }
+        Instruction::AdvPipe => {
+            // Pop 8, push 8 (hasher state + word)
+            for _ in 0..8 {
+                state.pop();
+            }
+            let mut vars = Vec::new();
+            for _ in 0..8 {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = advice_pipe()", vars.join(", ")))
+        }
 
         // ─────────────────────────────────────────────────────────────────────
         // Cryptographic operations (intrinsics)
@@ -529,7 +813,7 @@ fn generate_pseudocode(
         Instruction::Hash => {
             let mut args = Vec::new();
             for _ in 0..4 {
-                args.push(state.pop().unwrap_or_else(|| "?".to_string()));
+                args.push(state.pop());
             }
             args.reverse();
             let mut vars = Vec::new();
@@ -544,7 +828,7 @@ fn generate_pseudocode(
         Instruction::HMerge => {
             let mut args = Vec::new();
             for _ in 0..8 {
-                args.push(state.pop().unwrap_or_else(|| "?".to_string()));
+                args.push(state.pop());
             }
             args.reverse();
             let mut vars = Vec::new();
@@ -569,20 +853,85 @@ fn generate_pseudocode(
         }
 
         // ─────────────────────────────────────────────────────────────────────
+        // Merkle tree operations
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::MTreeGet => {
+            // Pop depth, index (2), push value word (4) - root word stays
+            state.pop(); // depth
+            state.pop(); // index
+            let mut vars = Vec::new();
+            for _ in 0..4 {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = mtree_get()", vars.join(", ")))
+        }
+        Instruction::MTreeSet => {
+            // Pop depth, index (2), push new root word (4) - old root and value stay
+            state.pop(); // depth
+            state.pop(); // index
+            let mut vars = Vec::new();
+            for _ in 0..4 {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = mtree_set()", vars.join(", ")))
+        }
+        Instruction::MTreeMerge => {
+            // Pop 8 (two words), push 4 (merged hash)
+            for _ in 0..8 {
+                state.pop();
+            }
+            let mut vars = Vec::new();
+            for _ in 0..4 {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = mtree_merge()", vars.join(", ")))
+        }
+        Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
+            // No stack change, just verification
+            Some("mtree_verify()".to_string())
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Extension field operations (quadratic extension)
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::Ext2Add => ext2_binary_op_pseudocode(state, "+"),
+        Instruction::Ext2Sub => ext2_binary_op_pseudocode(state, "-"),
+        Instruction::Ext2Mul => ext2_binary_op_pseudocode(state, "*"),
+        Instruction::Ext2Div => ext2_binary_op_pseudocode(state, "/"),
+        Instruction::Ext2Neg => ext2_unary_op_pseudocode(state, "-"),
+        Instruction::Ext2Inv => ext2_unary_fn_pseudocode(state, "inv"),
+
+        // ─────────────────────────────────────────────────────────────────────
         // Assertions
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Assert | Instruction::AssertWithError(_) => {
-            let cond = state.pop().unwrap_or_else(|| "?".to_string());
+            let cond = state.pop();
             Some(format!("assert({})", cond))
         }
         Instruction::AssertEq | Instruction::AssertEqWithError(_) => {
-            let b = state.pop().unwrap_or_else(|| "?".to_string());
-            let a = state.pop().unwrap_or_else(|| "?".to_string());
+            let b = state.pop();
+            let a = state.pop();
             Some(format!("assert({} == {})", a, b))
         }
         Instruction::Assertz | Instruction::AssertzWithError(_) => {
-            let val = state.pop().unwrap_or_else(|| "?".to_string());
+            let val = state.pop();
             Some(format!("assert({} == 0)", val))
+        }
+        Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
+            // Pop two words (8 elements)
+            for _ in 0..8 {
+                state.pop();
+            }
+            Some("assert_eqw()".to_string())
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -601,7 +950,7 @@ fn generate_pseudocode(
                     // We know the stack effect - apply it
                     let mut args = Vec::new();
                     for _ in 0..*inputs {
-                        args.push(state.pop().unwrap_or_else(|| "?".to_string()));
+                        args.push(state.pop());
                     }
                     args.reverse();
 
@@ -642,14 +991,27 @@ fn generate_pseudocode(
         // Conditionals
         // ─────────────────────────────────────────────────────────────────────
         Instruction::CSwap => {
-            let cond = state.pop().unwrap_or_else(|| "?".to_string());
-            // Conditionally swap - can't track precisely
+            let cond = state.pop();
+            // Conditionally swap top two elements
             Some(format!("cswap({})", cond))
         }
+        Instruction::CSwapW => {
+            let cond = state.pop();
+            // Conditionally swap top two words (8 elements)
+            Some(format!("cswapw({})", cond))
+        }
         Instruction::CDrop => {
-            let cond = state.pop().unwrap_or_else(|| "?".to_string());
+            let cond = state.pop();
             state.pop(); // Drop one of two values
             Some(format!("cdrop({})", cond))
+        }
+        Instruction::CDropW => {
+            let cond = state.pop();
+            // Drop one of two words (4 elements)
+            for _ in 0..4 {
+                state.pop();
+            }
+            Some(format!("cdropw({})", cond))
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -679,7 +1041,42 @@ fn generate_pseudocode(
         Instruction::ILog2 => unary_fn_pseudocode(state, "ilog2"),
         Instruction::Pow2 => unary_fn_pseudocode(state, "pow2"),
         Instruction::Exp => binary_op_pseudocode(state, "**"),
+        Instruction::ExpImm(imm) => binary_imm_op_pseudocode(state, "**", format_felt_immediate(imm)),
+        Instruction::ExpBitLength(imm) => {
+            let base = state.pop();
+            let var = state.new_var();
+            state.push(var.clone());
+            Some(format!("{} = {}**<{}-bit exp>", var, base, imm))
+        }
         Instruction::IsOdd => unary_fn_pseudocode(state, "is_odd"),
+
+        // Procedure reference
+        Instruction::ProcRef(target) => {
+            let name = match target {
+                InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
+                InvocationTarget::Path(path) => path.inner().as_str().to_string(),
+                InvocationTarget::MastRoot(root) => format!("{:?}", root),
+            };
+            let mut vars = Vec::new();
+            for _ in 0..4 {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = &{}", vars.join(", "), name))
+        }
+
+        // Word equality
+        Instruction::Eqw => {
+            // Pop two words (8 elements), push bool
+            for _ in 0..8 {
+                state.pop();
+            }
+            let var = state.new_var();
+            state.push(var.clone());
+            Some(format!("{} = eqw()", var))
+        }
 
         // Pad with zeros
         Instruction::PadW => {
@@ -690,15 +1087,29 @@ fn generate_pseudocode(
             None // Just stack manipulation
         }
 
+        // Push slice
+        Instruction::PushSlice(_, range) => {
+            let count = range.len();
+            let mut vars = Vec::new();
+            for _ in 0..count {
+                let var = state.new_var();
+                state.push(var.clone());
+                vars.push(var);
+            }
+            vars.reverse();
+            Some(format!("[{}] = slice", vars.join(", ")))
+        }
+
         // No-ops
         Instruction::Nop | Instruction::Breakpoint | Instruction::Debug(_) |
-        Instruction::Emit | Instruction::EmitImm(_) | Instruction::Trace(_) => None,
+        Instruction::Emit | Instruction::EmitImm(_) | Instruction::Trace(_) |
+        Instruction::SysEvent(_) => None,
 
-        // Default - unhandled instructions
-        _ => {
-            // For unknown instructions, fail tracking to be safe
-            state.fail_tracking(span, &format!("unhandled instruction: {}", inst));
-            None
+        // Complex STARK operations - fail tracking (unknown effects)
+        Instruction::FriExt2Fold4 | Instruction::HornerBase | Instruction::HornerExt |
+        Instruction::EvalCircuit | Instruction::LogPrecompile => {
+            state.fail_tracking(span, &format!("complex STARK operation: {}", inst));
+            Some(format!("{}", inst))
         }
     }
 }
@@ -708,44 +1119,90 @@ fn generate_pseudocode(
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn dup_pseudocode(state: &mut DisassemblerState, n: usize) -> Option<String> {
-    if let Some(src_name) = state.dup(n) {
+    let src_name = state.dup(n);
+    let var = state.new_var();
+    state.push(var.clone());
+    Some(format!("{} = {}", var, src_name))
+}
+
+fn dupw_pseudocode(state: &mut DisassemblerState, word_idx: usize) -> Option<String> {
+    // DupW duplicates a word (4 elements) at word position word_idx
+    // Word 0 = positions 0-3, Word 1 = positions 4-7, etc.
+    let base = word_idx * 4;
+    let mut vars = Vec::new();
+    for i in 0..4 {
+        let src = state.dup(base + 3 - i); // Dup in reverse order to maintain stack order
         let var = state.new_var();
         state.push(var.clone());
-        Some(format!("{} = {}", var, src_name))
-    } else {
-        let var = state.new_var();
-        state.push(var.clone());
-        Some(format!("{} = ?", var))
+        vars.push((var, src));
     }
+    // No pseudocode output for pure stack manipulation
+    None
 }
 
 fn binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
-    let b = state.pop().unwrap_or_else(|| "?".to_string());
-    let a = state.pop().unwrap_or_else(|| "?".to_string());
+    let b = state.pop();
+    let a = state.pop();
     let var = state.new_var();
     state.push(var.clone());
     Some(format!("{} = {} {} {}", var, a, op, b))
 }
 
 fn binary_imm_op_pseudocode(state: &mut DisassemblerState, op: &str, imm: String) -> Option<String> {
-    let a = state.pop().unwrap_or_else(|| "?".to_string());
+    let a = state.pop();
     let var = state.new_var();
     state.push(var.clone());
     Some(format!("{} = {} {} {}", var, a, op, imm))
 }
 
 fn unary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
-    let a = state.pop().unwrap_or_else(|| "?".to_string());
+    let a = state.pop();
     let var = state.new_var();
     state.push(var.clone());
     Some(format!("{} = {}{}", var, op, a))
 }
 
 fn unary_fn_pseudocode(state: &mut DisassemblerState, fn_name: &str) -> Option<String> {
-    let a = state.pop().unwrap_or_else(|| "?".to_string());
+    let a = state.pop();
     let var = state.new_var();
     state.push(var.clone());
     Some(format!("{} = {}({})", var, fn_name, a))
+}
+
+// Extension field (ext2) operations - work on 2-element values
+fn ext2_binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
+    // Pop 4 elements (2 ext2 values), push 2 (1 ext2 result)
+    let b1 = state.pop();
+    let b0 = state.pop();
+    let a1 = state.pop();
+    let a0 = state.pop();
+    let var0 = state.new_var();
+    let var1 = state.new_var();
+    state.push(var0.clone());
+    state.push(var1.clone());
+    Some(format!("[{}, {}] = [{}, {}] {} [{}, {}]", var0, var1, a0, a1, op, b0, b1))
+}
+
+fn ext2_unary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
+    // Pop 2, push 2
+    let a1 = state.pop();
+    let a0 = state.pop();
+    let var0 = state.new_var();
+    let var1 = state.new_var();
+    state.push(var0.clone());
+    state.push(var1.clone());
+    Some(format!("[{}, {}] = {}[{}, {}]", var0, var1, op, a0, a1))
+}
+
+fn ext2_unary_fn_pseudocode(state: &mut DisassemblerState, fn_name: &str) -> Option<String> {
+    // Pop 2, push 2
+    let a1 = state.pop();
+    let a0 = state.pop();
+    let var0 = state.new_var();
+    let var1 = state.new_var();
+    state.push(var0.clone());
+    state.push(var1.clone());
+    Some(format!("[{}, {}] = {}([{}, {}])", var0, var1, fn_name, a0, a1))
 }
 
 fn format_push_immediate(imm: &Immediate<miden_assembly_syntax::parser::PushValue>) -> String {
@@ -926,6 +1383,8 @@ struct DisassemblyCollector<'a> {
     proc_hint_start: usize,
     /// Number of outputs for current procedure (for renaming returns)
     proc_outputs: Option<usize>,
+    /// Line number of the procedure declaration (for updating signature)
+    proc_decl_line: Option<u32>,
     /// Collected tracking failures for diagnostics
     failures: Vec<TrackingFailure>,
     /// Source manager for span conversion
@@ -950,6 +1409,7 @@ impl<'a> DisassemblyCollector<'a> {
             hints: Vec::new(),
             proc_hint_start: 0,
             proc_outputs: None,
+            proc_decl_line: None,
             failures: Vec::new(),
             sources,
             contracts,
@@ -1076,35 +1536,55 @@ impl<'a> DisassemblyCollector<'a> {
 impl<'a> Visit for DisassemblyCollector<'a> {
     fn visit_procedure(&mut self, proc: &Procedure) -> core::ops::ControlFlow<()> {
         let proc_name = proc.name().as_str().to_string();
+        let decl_range = span_to_range(self.sources, proc.name().span());
+        let decl_line = decl_range.as_ref().map(|r| r.start.line);
 
-        // Try to get the stack effect from the contract store
-        let stack_effect = self
+        // Priority for determining input/output counts:
+        // 1. Explicit signature with type annotations (highest priority)
+        // 2. Contract store (inferred from instructions)
+        // 3. Default to 0 (dynamic discovery will find inputs as needed)
+
+        // Try to parse explicit signature from source text
+        let parsed_sig = decl_line.and_then(|line| {
+            parse_procedure_signature(self.source_text.lines().nth(line as usize)?)
+        });
+
+        // Get contract from store
+        let contract_effect = self
             .contracts
             .and_then(|c| c.get_by_name(&proc_name))
             .map(|contract| contract.stack_effect.clone());
 
-        let (input_count, output_count) = match &stack_effect {
-            Some(StackEffect::Known { inputs, outputs }) => (*inputs, Some(*outputs)),
-            _ => (0, None),
+        // Determine initial input/output counts
+        let (initial_input_count, output_count) = if let Some(sig) = &parsed_sig {
+            // Explicit signature has priority
+            (sig.inputs, Some(sig.outputs))
+        } else {
+            // Fall back to contract inference
+            match &contract_effect {
+                Some(StackEffect::Known { inputs, outputs }) => (*inputs, Some(*outputs)),
+                Some(StackEffect::KnownInputs { inputs }) => (*inputs, None),
+                _ => (0, None), // Will be discovered dynamically
+            }
         };
 
-        // Track where this procedure's hints start (for return value renaming)
+        // Track where this procedure's hints start (for renaming returns and updating signature)
         self.proc_hint_start = self.hints.len();
         self.proc_outputs = output_count;
+        self.proc_decl_line = decl_line;
 
-        // Generate signature hint for the procedure declaration (no indentation)
-        if let Some(range) = span_to_range(self.sources, proc.name().span()) {
-            // Extract the declaration prefix from the source line
-            let decl_prefix = extract_declaration_prefix(self.source_text, range.start.line);
-            let signature = format_procedure_signature(&decl_prefix, &proc_name, input_count, output_count);
-            self.hints.push((range.start.line, signature));
+        // Generate initial signature hint for the procedure declaration
+        if let Some(line) = decl_line {
+            let decl_prefix = extract_declaration_prefix(self.source_text, line);
+            let signature = format_procedure_signature(&decl_prefix, &proc_name, initial_input_count, output_count);
+            self.hints.push((line, signature));
         }
 
         self.current_proc = Some(ProcedureDisassembly {
             name: proc_name.clone(),
-            input_count,
+            input_count: initial_input_count,
         });
-        self.state = Some(DisassemblerState::new(input_count));
+        self.state = Some(DisassemblerState::new(initial_input_count));
 
         // Visit procedure body with indentation
         self.indent_level = 1;
@@ -1118,8 +1598,24 @@ impl<'a> Visit for DisassemblyCollector<'a> {
                     self.failures.push(TrackingFailure {
                         span,
                         reason,
-                        proc_name,
+                        proc_name: proc_name.clone(),
                     });
+                }
+            }
+        }
+
+        // Check if we discovered more inputs than initially expected
+        // and update the signature hint accordingly
+        if let Some(ref state) = self.state {
+            let discovered_inputs = state.total_inputs();
+            if discovered_inputs > initial_input_count {
+                // Update the signature hint with the discovered input count
+                if let Some(line) = self.proc_decl_line {
+                    // Find and update the signature hint for this procedure
+                    if let Some(sig_hint) = self.hints.iter_mut().find(|(l, _)| *l == line) {
+                        let decl_prefix = extract_declaration_prefix(self.source_text, line);
+                        sig_hint.1 = format_procedure_signature(&decl_prefix, &proc_name, discovered_inputs, output_count);
+                    }
                 }
             }
         }
@@ -1150,6 +1646,7 @@ impl<'a> Visit for DisassemblyCollector<'a> {
         self.current_proc = None;
         self.state = None;
         self.proc_outputs = None;
+        self.proc_decl_line = None;
 
         core::ops::ControlFlow::Continue(())
     }
@@ -1258,22 +1755,22 @@ mod tests {
     fn test_disassembler_state_new() {
         let state = DisassemblerState::new(3);
         assert_eq!(state.stack.len(), 3);
-        assert_eq!(state.peek(0), Some("a1"));
-        assert_eq!(state.peek(1), Some("a2"));
-        assert_eq!(state.peek(2), Some("a3"));
+        assert_eq!(state.peek(0), "a1");
+        assert_eq!(state.peek(1), "a2");
+        assert_eq!(state.peek(2), "a3");
     }
 
     #[test]
     fn test_disassembler_push_pop() {
         let mut state = DisassemblerState::new(1);
-        assert_eq!(state.peek(0), Some("a1"));
+        assert_eq!(state.peek(0), "a1");
 
         state.push("v1".to_string());
-        assert_eq!(state.peek(0), Some("v1"));
-        assert_eq!(state.peek(1), Some("a1"));
+        assert_eq!(state.peek(0), "v1");
+        assert_eq!(state.peek(1), "a1");
 
-        assert_eq!(state.pop(), Some("v1".to_string()));
-        assert_eq!(state.peek(0), Some("a1"));
+        assert_eq!(state.pop(), "v1");
+        assert_eq!(state.peek(0), "a1");
     }
 
     #[test]
@@ -1281,7 +1778,7 @@ mod tests {
         let mut state = DisassemblerState::new(2);
         // Stack: [a2, a1] (a1 on top)
         let duped = state.dup(1);
-        assert_eq!(duped, Some("a2".to_string()));
+        assert_eq!(duped, "a2");
     }
 
     #[test]
@@ -1289,8 +1786,8 @@ mod tests {
         let mut state = DisassemblerState::new(2);
         // Stack: [a2, a1] (a1 on top)
         state.swap(0, 1);
-        assert_eq!(state.peek(0), Some("a2"));
-        assert_eq!(state.peek(1), Some("a1"));
+        assert_eq!(state.peek(0), "a2");
+        assert_eq!(state.peek(1), "a1");
     }
 
     #[test]
@@ -1299,7 +1796,46 @@ mod tests {
         // Stack: [a2, a1] (a1 on top)
         let result = binary_op_pseudocode(&mut state, "+");
         assert_eq!(result, Some("v1 = a2 + a1".to_string()));
-        assert_eq!(state.peek(0), Some("v1"));
+        assert_eq!(state.peek(0), "v1");
+    }
+
+    #[test]
+    fn test_dynamic_input_discovery_pop() {
+        let mut state = DisassemblerState::new(0); // Start with no inputs
+        assert_eq!(state.total_inputs(), 0);
+
+        // Pop from empty stack - should discover inputs
+        let a = state.pop();
+        assert_eq!(a, "a1");
+        assert_eq!(state.total_inputs(), 1);
+
+        let b = state.pop();
+        assert_eq!(b, "a2");
+        assert_eq!(state.total_inputs(), 2);
+    }
+
+    #[test]
+    fn test_dynamic_input_discovery_dup() {
+        let mut state = DisassemblerState::new(1); // Start with 1 input
+        assert_eq!(state.total_inputs(), 1);
+
+        // Dup beyond current stack - should discover inputs
+        let duped = state.dup(2); // Access position 2, but stack only has 1 element
+        assert_eq!(duped, "a3"); // Should be third input
+        assert_eq!(state.total_inputs(), 3);
+    }
+
+    #[test]
+    fn test_dynamic_input_discovery_swap() {
+        let mut state = DisassemblerState::new(1); // Start with 1 input
+        // Stack: [a1]
+        assert_eq!(state.total_inputs(), 1);
+
+        // Swap beyond current stack - should discover inputs
+        state.swap(0, 1);
+        assert_eq!(state.total_inputs(), 2);
+        assert_eq!(state.peek(0), "a2");
+        assert_eq!(state.peek(1), "a1");
     }
 
     #[test]

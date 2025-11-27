@@ -27,7 +27,8 @@ pub use analyzer::analyze_module;
 
 // Re-export contract types for workspace integration
 pub use contracts::{
-    infer_module_contracts, ContractStore, ProcContract, StackEffect, ValidationBehavior,
+    infer_module_contracts, parse_procedure_signature, ContractStore, ParsedSignature,
+    ProcContract, StackEffect, ValidationBehavior,
 };
 
 // Re-export core types for external use
