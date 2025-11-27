@@ -273,7 +273,7 @@ fn generate_pseudocode(
                 // Reverse to show in stack order (first pushed = leftmost)
                 vars.reverse();
                 vals.reverse();
-                Some(format!("[{}] = [{}]", vars.join(", "), vals.join(", ")))
+                Some(format!("({}) = ({})", vars.join(", "), vals.join(", ")))
             }
         }
 
@@ -506,7 +506,7 @@ fn generate_pseudocode(
             let result = state.new_var();
             state.push(overflow.clone());
             state.push(result.clone());
-            Some(format!("{}, {} = {} + {} (overflow)", result, overflow, a, b))
+            Some(format!("({}, {}) = {} + {} (overflow)", result, overflow, a, b))
         }
         Instruction::U32OverflowingSub => {
             let b = state.pop();
@@ -515,7 +515,7 @@ fn generate_pseudocode(
             let result = state.new_var();
             state.push(underflow.clone());
             state.push(result.clone());
-            Some(format!("{}, {} = {} - {} (underflow)", result, underflow, a, b))
+            Some(format!("({}, {}) = {} - {} (underflow)", result, underflow, a, b))
         }
         Instruction::U32OverflowingMul => {
             let b = state.pop();
@@ -524,7 +524,7 @@ fn generate_pseudocode(
             let result = state.new_var();
             state.push(overflow.clone());
             state.push(result.clone());
-            Some(format!("{}, {} = {} * {} (overflow)", result, overflow, a, b))
+            Some(format!("({}, {}) = {} * {} (overflow)", result, overflow, a, b))
         }
 
         Instruction::U32DivMod => {
@@ -534,7 +534,7 @@ fn generate_pseudocode(
             let quotient = state.new_var();
             state.push(remainder.clone());
             state.push(quotient.clone());
-            Some(format!("{}, {} = divmod({}, {})", quotient, remainder, a, b))
+            Some(format!("({}, {}) = divmod({}, {})", quotient, remainder, a, b))
         }
 
         Instruction::U32Split => {
@@ -543,7 +543,7 @@ fn generate_pseudocode(
             let hi = state.new_var();
             state.push(lo.clone());
             state.push(hi.clone());
-            Some(format!("{}, {} = split({})", hi, lo, a))
+            Some(format!("({}, {}) = split({})", hi, lo, a))
         }
 
         Instruction::U32Cast => unary_fn_pseudocode(state, "u32"),
@@ -568,7 +568,7 @@ fn generate_pseudocode(
             let quotient = state.new_var();
             state.push(remainder.clone());
             state.push(quotient.clone());
-            Some(format!("{}, {} = divmod({}, {})", quotient, remainder, a, divisor))
+            Some(format!("({}, {}) = divmod({}, {})", quotient, remainder, a, divisor))
         }
 
         // u32 overflowing with immediate
@@ -579,7 +579,7 @@ fn generate_pseudocode(
             let result = state.new_var();
             state.push(overflow.clone());
             state.push(result.clone());
-            Some(format!("{}, {} = {} + {} (overflow)", result, overflow, a, b))
+            Some(format!("({}, {}) = {} + {} (overflow)", result, overflow, a, b))
         }
         Instruction::U32OverflowingSubImm(imm) => {
             let a = state.pop();
@@ -588,7 +588,7 @@ fn generate_pseudocode(
             let result = state.new_var();
             state.push(underflow.clone());
             state.push(result.clone());
-            Some(format!("{}, {} = {} - {} (underflow)", result, underflow, a, b))
+            Some(format!("({}, {}) = {} - {} (underflow)", result, underflow, a, b))
         }
         Instruction::U32OverflowingMulImm(imm) => {
             let a = state.pop();
@@ -597,7 +597,7 @@ fn generate_pseudocode(
             let result = state.new_var();
             state.push(overflow.clone());
             state.push(result.clone());
-            Some(format!("{}, {} = {} * {} (overflow)", result, overflow, a, b))
+            Some(format!("({}, {}) = {} * {} (overflow)", result, overflow, a, b))
         }
 
         // u32 ternary operations
@@ -609,7 +609,7 @@ fn generate_pseudocode(
             let result = state.new_var();
             state.push(carry.clone());
             state.push(result.clone());
-            Some(format!("{}, {} = {} + {} + {} (carry)", result, carry, a, b, c))
+            Some(format!("({}, {}) = {} + {} + {} (carry)", result, carry, a, b, c))
         }
         Instruction::U32WrappingAdd3 => {
             let c = state.pop();
@@ -627,7 +627,7 @@ fn generate_pseudocode(
             let result = state.new_var();
             state.push(overflow.clone());
             state.push(result.clone());
-            Some(format!("{}, {} = {} * {} + {} (overflow)", result, overflow, a, b, c))
+            Some(format!("({}, {}) = {} * {} + {} (overflow)", result, overflow, a, b, c))
         }
         Instruction::U32WrappingMadd => {
             let c = state.pop();
@@ -674,7 +674,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = mem_w[{}]", vars.join(", "), addr))
+            Some(format!("({}) = mem_w[{}]", vars.join(", "), addr))
         }
         Instruction::MemLoadWBeImm(imm) | Instruction::MemLoadWLeImm(imm) => {
             let addr = format_u32_immediate(imm);
@@ -685,7 +685,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = mem_w[{}]", vars.join(", "), addr))
+            Some(format!("({}) = mem_w[{}]", vars.join(", "), addr))
         }
         Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
             let addr = state.pop();
@@ -694,7 +694,7 @@ fn generate_pseudocode(
                 vals.push(state.pop());
             }
             vals.reverse();
-            Some(format!("mem_w[{}] = [{}]", addr, vals.join(", ")))
+            Some(format!("mem_w[{}] = ({})", addr, vals.join(", ")))
         }
         Instruction::MemStoreWBeImm(imm) | Instruction::MemStoreWLeImm(imm) => {
             let addr = format_u32_immediate(imm);
@@ -703,7 +703,7 @@ fn generate_pseudocode(
                 vals.push(state.pop());
             }
             vals.reverse();
-            Some(format!("mem_w[{}] = [{}]", addr, vals.join(", ")))
+            Some(format!("mem_w[{}] = ({})", addr, vals.join(", ")))
         }
         Instruction::MemStream => {
             // Pop 12, push 12 (memory streaming)
@@ -717,7 +717,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = mem_stream()", vars.join(", ")))
+            Some(format!("({}) = mem_stream()", vars.join(", ")))
         }
 
         // Local memory - single element
@@ -743,7 +743,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = local_w[{}]", vars.join(", "), idx_val))
+            Some(format!("({}) = local_w[{}]", vars.join(", "), idx_val))
         }
         Instruction::LocStoreWBe(idx) | Instruction::LocStoreWLe(idx) => {
             let idx_val = format_u16_immediate(idx);
@@ -752,7 +752,7 @@ fn generate_pseudocode(
                 vals.push(state.pop());
             }
             vals.reverse();
-            Some(format!("local_w[{}] = [{}]", idx_val, vals.join(", ")))
+            Some(format!("local_w[{}] = ({})", idx_val, vals.join(", ")))
         }
         Instruction::Locaddr(idx) => {
             let idx_val = format_u16_immediate(idx);
@@ -776,7 +776,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = advice()", vars.join(", ")))
+            Some(format!("({}) = advice()", vars.join(", ")))
         }
         Instruction::AdvLoadW => {
             // Pop 4 values (address), push 4 values (loaded word)
@@ -790,7 +790,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = advice_w()", vars.join(", ")))
+            Some(format!("({}) = advice_w()", vars.join(", ")))
         }
         Instruction::AdvPipe => {
             // Pop 8, push 8 (hasher state + word)
@@ -804,7 +804,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = advice_pipe()", vars.join(", ")))
+            Some(format!("({}) = advice_pipe()", vars.join(", ")))
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -823,7 +823,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = hash([{}])", vars.join(", "), args.join(", ")))
+            Some(format!("({}) = hash(({}))", vars.join(", "), args.join(", ")))
         }
         Instruction::HMerge => {
             let mut args = Vec::new();
@@ -838,7 +838,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = hmerge(...)", vars.join(", ")))
+            Some(format!("({}) = hmerge(...)", vars.join(", ")))
         }
         Instruction::HPerm => {
             // Pop 12, push 12
@@ -866,7 +866,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = mtree_get()", vars.join(", ")))
+            Some(format!("({}) = mtree_get()", vars.join(", ")))
         }
         Instruction::MTreeSet => {
             // Pop depth, index (2), push new root word (4) - old root and value stay
@@ -879,7 +879,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = mtree_set()", vars.join(", ")))
+            Some(format!("({}) = mtree_set()", vars.join(", ")))
         }
         Instruction::MTreeMerge => {
             // Pop 8 (two words), push 4 (merged hash)
@@ -893,7 +893,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = mtree_merge()", vars.join(", ")))
+            Some(format!("({}) = mtree_merge()", vars.join(", ")))
         }
         Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
             // No stack change, just verification
@@ -938,7 +938,7 @@ fn generate_pseudocode(
             let a1 = state.pop();
             let a0 = state.pop();
             Some(format!(
-                "assert([{}, {}, {}, {}] == [{}, {}, {}, {}])",
+                "assert(({}, {}, {}, {}) == ({}, {}, {}, {}))",
                 a0, a1, a2, a3, b0, b1, b2, b3
             ))
         }
@@ -976,7 +976,7 @@ fn generate_pseudocode(
                     } else if results.len() == 1 {
                         Some(format!("{} = {}({})", results[0], name, args.join(", ")))
                     } else {
-                        Some(format!("[{}] = {}({})", results.join(", "), name, args.join(", ")))
+                        Some(format!("({}) = {}({})", results.join(", "), name, args.join(", ")))
                     }
                 }
                 _ => {
@@ -1044,7 +1044,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = caller()", vars.join(", ")))
+            Some(format!("({}) = caller()", vars.join(", ")))
         }
 
         Instruction::ILog2 => unary_fn_pseudocode(state, "ilog2"),
@@ -1073,7 +1073,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = &{}", vars.join(", "), name))
+            Some(format!("({}) = &{}", vars.join(", "), name))
         }
 
         // Word equality
@@ -1091,7 +1091,7 @@ fn generate_pseudocode(
             let var = state.new_var();
             state.push(var.clone());
             Some(format!(
-                "{} = [{}, {}, {}, {}] == [{}, {}, {}, {}]",
+                "{} = ({}, {}, {}, {}) == ({}, {}, {}, {})",
                 var, a0, a1, a2, a3, b0, b1, b2, b3
             ))
         }
@@ -1115,7 +1115,7 @@ fn generate_pseudocode(
                 vars.push(var);
             }
             vars.reverse();
-            Some(format!("[{}] = slice", vars.join(", ")))
+            Some(format!("({}) = slice", vars.join(", ")))
         }
 
         // No-ops
@@ -1198,7 +1198,7 @@ fn ext2_binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<
     let var1 = state.new_var();
     state.push(var0.clone());
     state.push(var1.clone());
-    Some(format!("[{}, {}] = [{}, {}] {} [{}, {}]", var0, var1, a0, a1, op, b0, b1))
+    Some(format!("({}, {}) = ({}, {}) {} ({}, {})", var0, var1, a0, a1, op, b0, b1))
 }
 
 fn ext2_unary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
@@ -1209,7 +1209,7 @@ fn ext2_unary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<S
     let var1 = state.new_var();
     state.push(var0.clone());
     state.push(var1.clone());
-    Some(format!("[{}, {}] = {}[{}, {}]", var0, var1, op, a0, a1))
+    Some(format!("({}, {}) = {}({}, {})", var0, var1, op, a0, a1))
 }
 
 fn ext2_unary_fn_pseudocode(state: &mut DisassemblerState, fn_name: &str) -> Option<String> {
@@ -1220,7 +1220,7 @@ fn ext2_unary_fn_pseudocode(state: &mut DisassemblerState, fn_name: &str) -> Opt
     let var1 = state.new_var();
     state.push(var0.clone());
     state.push(var1.clone());
-    Some(format!("[{}, {}] = {}([{}, {}])", var0, var1, fn_name, a0, a1))
+    Some(format!("({}, {}) = {}(({}, {}))", var0, var1, fn_name, a0, a1))
 }
 
 fn format_push_immediate(imm: &Immediate<miden_assembly_syntax::parser::PushValue>) -> String {
