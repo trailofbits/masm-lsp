@@ -928,10 +928,19 @@ fn generate_pseudocode(
         }
         Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
             // Pop two words (8 elements)
-            for _ in 0..8 {
-                state.pop();
-            }
-            Some("assert_eqw()".to_string())
+            // Word B is on top (positions 0-3), Word A is below (positions 4-7)
+            let b3 = state.pop();
+            let b2 = state.pop();
+            let b1 = state.pop();
+            let b0 = state.pop();
+            let a3 = state.pop();
+            let a2 = state.pop();
+            let a1 = state.pop();
+            let a0 = state.pop();
+            Some(format!(
+                "assert([{}, {}, {}, {}] == [{}, {}, {}, {}])",
+                a0, a1, a2, a3, b0, b1, b2, b3
+            ))
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1070,12 +1079,21 @@ fn generate_pseudocode(
         // Word equality
         Instruction::Eqw => {
             // Pop two words (8 elements), push bool
-            for _ in 0..8 {
-                state.pop();
-            }
+            // Word B is on top (positions 0-3), Word A is below (positions 4-7)
+            let b3 = state.pop();
+            let b2 = state.pop();
+            let b1 = state.pop();
+            let b0 = state.pop();
+            let a3 = state.pop();
+            let a2 = state.pop();
+            let a1 = state.pop();
+            let a0 = state.pop();
             let var = state.new_var();
             state.push(var.clone());
-            Some(format!("{} = eqw()", var))
+            Some(format!(
+                "{} = [{}, {}, {}, {}] == [{}, {}, {}, {}]",
+                var, a0, a1, a2, a3, b0, b1, b2, b3
+            ))
         }
 
         // Pad with zeros
