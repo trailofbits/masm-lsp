@@ -39,11 +39,11 @@ use crate::{
     util::{
         extract_token_at_position, extract_word_at_position, lsp_range_to_selection, to_miden_uri,
     },
-    InlayHintMode, LibraryPath, ServerConfig,
+    InlayHintType, LibraryPath, ServerConfig,
 };
 
 // Re-export submodule items used externally
-pub use config::{extract_inlay_hint_mode, extract_library_paths, extract_tab_count};
+pub use config::{extract_inlay_hint_type, extract_library_paths, extract_tab_count};
 pub use helpers::{
     determine_module_kind_from_ast, extract_doc_comment, extract_procedure_signature,
     is_on_use_statement,
@@ -557,9 +557,9 @@ where
             cfg.library_paths = paths;
             info!("updated library search paths");
         }
-        if let Some(mode) = extract_inlay_hint_mode(&params.settings) {
-            cfg.inlay_hint_mode = mode;
-            info!("updated inlay hint mode: {:?}", mode);
+        if let Some(mode) = extract_inlay_hint_type(&params.settings) {
+            cfg.inlay_hint_type = mode;
+            info!("updated inlay hint type: {:?}", mode);
         }
         drop(cfg);
         self.load_configured_libraries().await;
@@ -824,7 +824,7 @@ where
         let config = self.snapshot_config().await;
 
         // If hints are disabled, return empty
-        if config.inlay_hint_mode == InlayHintMode::None {
+        if config.inlay_hint_type == InlayHintType::None {
             return Ok(Some(vec![]));
         }
 
@@ -838,15 +838,15 @@ where
             return Ok(None);
         };
 
-        let hints = match config.inlay_hint_mode {
-            InlayHintMode::Description => collect_inlay_hints(
+        let hints = match config.inlay_hint_type {
+            InlayHintType::Description => collect_inlay_hints(
                 &doc.module,
                 self.sources.as_ref(),
                 &params.range,
                 config.inlay_hint_tabs,
                 source.as_str(),
             ),
-            InlayHintMode::Disassembly => {
+            InlayHintType::Disassembly => {
                 // Get contracts from workspace for inter-procedural analysis
                 let workspace = self.workspace.read().await;
                 let contracts = workspace.contracts();
@@ -864,7 +864,7 @@ where
                 // the hints simply stop when tracking fails.
                 result.hints
             }
-            InlayHintMode::None => vec![],
+            InlayHintType::None => vec![],
         };
         Ok(Some(hints))
     }

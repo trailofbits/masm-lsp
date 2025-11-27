@@ -17,7 +17,7 @@ pub use symbol_path::SymbolPath;
 
 /// The type of inlay hints to display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InlayHintMode {
+pub enum InlayHintType {
     /// Show instruction descriptions.
     Description,
     /// Show disassembly pseudocode (default behavior).
@@ -38,8 +38,8 @@ pub struct ServerConfig {
     pub instruction_hovers_enabled: bool,
     /// Whether to run taint analysis and report security warnings.
     pub taint_analysis_enabled: bool,
-    /// The type of inlay hints to display.
-    pub inlay_hint_mode: InlayHintMode,
+    /// The inlay hint type to display.
+    pub inlay_hint_type: InlayHintType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +59,7 @@ impl Default for ServerConfig {
             // Taint analysis is enabled by default.
             taint_analysis_enabled: true,
             // Disassembly hints are shown by default.
-            inlay_hint_mode: InlayHintMode::Disassembly,
+            inlay_hint_type: InlayHintType::Disassembly,
         }
     }
 }
@@ -78,7 +78,7 @@ pub struct ServerConfigBuilder {
     library_paths: Option<Vec<LibraryPath>>,
     instruction_hovers_enabled: Option<bool>,
     taint_analysis_enabled: Option<bool>,
-    inlay_hint_mode: Option<InlayHintMode>,
+    inlay_hint_type: Option<InlayHintType>,
 }
 
 impl ServerConfigBuilder {
@@ -106,9 +106,9 @@ impl ServerConfigBuilder {
         self
     }
 
-    /// Set the inlay hint mode.
-    pub fn inlay_hint_mode(mut self, mode: InlayHintMode) -> Self {
-        self.inlay_hint_mode = Some(mode);
+    /// Set the inlay hint type.
+    pub fn inlay_hint_type(mut self, mode: InlayHintType) -> Self {
+        self.inlay_hint_type = Some(mode);
         self
     }
 
@@ -121,7 +121,7 @@ impl ServerConfigBuilder {
             library_paths: self.library_paths.unwrap_or_else(default_library_paths),
             instruction_hovers_enabled: self.instruction_hovers_enabled.unwrap_or(false),
             taint_analysis_enabled: self.taint_analysis_enabled.unwrap_or(true),
-            inlay_hint_mode: self.inlay_hint_mode.unwrap_or(InlayHintMode::Disassembly),
+            inlay_hint_type: self.inlay_hint_type.unwrap_or(InlayHintType::Disassembly),
         }
     }
 }

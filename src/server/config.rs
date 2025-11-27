@@ -3,7 +3,7 @@
 //! This module handles parsing configuration values from JSON settings
 //! received via `didChangeConfiguration` notifications.
 
-use crate::{InlayHintMode, LibraryPath};
+use crate::{InlayHintType, LibraryPath};
 
 /// Extract the inlay hint tab padding count from LSP settings.
 ///
@@ -67,9 +67,9 @@ pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<Library
     }
 }
 
-/// Extract the inlay hint mode from LSP settings.
+/// Extract the inlay hint type from LSP settings.
 ///
-/// The mode is determined by checking which option is enabled:
+/// The type is determined by checking which option is enabled:
 /// - If `masm.inlayHints.disassembly` is true or unset, returns `Disassembly` (default)
 /// - Else if `masm.inlayHints.description` is true, returns `Description`
 /// - If both are explicitly false, returns `None`
@@ -78,7 +78,7 @@ pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<Library
 /// ```json
 /// { "masm": { "inlayHints": { "description": true, "disassembly": false } } }
 /// ```
-pub fn extract_inlay_hint_mode(settings: &serde_json::Value) -> Option<InlayHintMode> {
+pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHintType> {
     let hints = settings.get("masm").and_then(|v| v.get("inlayHints"))?;
 
     let description = hints
@@ -90,20 +90,20 @@ pub fn extract_inlay_hint_mode(settings: &serde_json::Value) -> Option<InlayHint
 
     match (description, disassembly) {
         // Disassembly takes priority if enabled (or default if nothing set)
-        (_, Some(true)) | (None, None) => Some(InlayHintMode::Disassembly),
+        (_, Some(true)) | (None, None) => Some(InlayHintType::Disassembly),
         // Description enabled, disassembly not set or disabled
-        (Some(true), _) => Some(InlayHintMode::Description),
+        (Some(true), _) => Some(InlayHintType::Description),
         // Both explicitly disabled
-        (Some(false), Some(false)) | (Some(false), None) => Some(InlayHintMode::None),
+        (Some(false), Some(false)) | (Some(false), None) => Some(InlayHintType::None),
         // Disassembly explicitly disabled but description not set - use description
-        (None, Some(false)) => Some(InlayHintMode::Description),
+        (None, Some(false)) => Some(InlayHintType::Description),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InlayHintMode;
+    use crate::InlayHintType;
     use serde_json::json;
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_inlay_hint_mode_disassembly_enabled() {
+    fn extract_inlay_hint_type_disassembly_enabled() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
@@ -200,13 +200,13 @@ mod tests {
             }
         });
         assert_eq!(
-            extract_inlay_hint_mode(&settings),
-            Some(InlayHintMode::Disassembly)
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::Disassembly)
         );
     }
 
     #[test]
-    fn extract_inlay_hint_mode_description_enabled() {
+    fn extract_inlay_hint_type_description_enabled() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
@@ -215,13 +215,13 @@ mod tests {
             }
         });
         assert_eq!(
-            extract_inlay_hint_mode(&settings),
-            Some(InlayHintMode::Description)
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::Description)
         );
     }
 
     #[test]
-    fn extract_inlay_hint_mode_disassembly_takes_priority() {
+    fn extract_inlay_hint_type_disassembly_takes_priority() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
@@ -231,13 +231,13 @@ mod tests {
             }
         });
         assert_eq!(
-            extract_inlay_hint_mode(&settings),
-            Some(InlayHintMode::Disassembly)
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::Disassembly)
         );
     }
 
     #[test]
-    fn extract_inlay_hint_mode_both_disabled() {
+    fn extract_inlay_hint_type_both_disabled() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
@@ -247,13 +247,13 @@ mod tests {
             }
         });
         assert_eq!(
-            extract_inlay_hint_mode(&settings),
-            Some(InlayHintMode::None)
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::None)
         );
     }
 
     #[test]
-    fn extract_inlay_hint_mode_description_disabled_only() {
+    fn extract_inlay_hint_type_description_disabled_only() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
@@ -262,27 +262,27 @@ mod tests {
             }
         });
         assert_eq!(
-            extract_inlay_hint_mode(&settings),
-            Some(InlayHintMode::None)
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::None)
         );
     }
 
     #[test]
-    fn extract_inlay_hint_mode_missing_returns_none() {
+    fn extract_inlay_hint_type_missing_returns_none() {
         let settings = json!({});
-        assert_eq!(extract_inlay_hint_mode(&settings), None);
+        assert_eq!(extract_inlay_hint_type(&settings), None);
     }
 
     #[test]
-    fn extract_inlay_hint_mode_empty_hints_defaults_disassembly() {
+    fn extract_inlay_hint_type_empty_hints_defaults_disassembly() {
         let settings = json!({
             "masm": {
                 "inlayHints": {}
             }
         });
         assert_eq!(
-            extract_inlay_hint_mode(&settings),
-            Some(InlayHintMode::Disassembly)
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::Disassembly)
         );
     }
 }
