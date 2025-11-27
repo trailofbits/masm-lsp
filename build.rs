@@ -87,8 +87,12 @@ fn sanitize_text(s: &str) -> String {
         .replace('}', ")")
         .replace("\\leftarrow", "←")
         .replace("\\rightarrow", "→")
+        .replace("\\lfloor", "⌊")
+        .replace("\\rfloor", "⌋")
         .replace("\\mod", "mod")
         .replace("\\neq", "≠")
+        .replace("\\le", "≤")
+        .replace("\\ge", "≥")
         .replace("\\cdot", "·")
         .replace("\\times", "×")
 }

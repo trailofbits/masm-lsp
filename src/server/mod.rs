@@ -226,18 +226,44 @@ where
             None
         };
 
+        // Check if taint analysis is enabled
+        let taint_enabled = self.config.read().await.taint_analysis_enabled;
+
         // Then acquire a read lock on the workspace after parsing is done
         let workspace = self.workspace.read().await;
         let diagnostics = match parse_result {
             Ok(doc) => {
                 let mut diags = Vec::new();
                 diags.extend(unresolved_to_diagnostics(&uri, &doc, &workspace));
+
+                // Run taint analysis if enabled (with workspace contracts)
+                if taint_enabled {
+                    let taint_diags = crate::analysis::analyze_module(
+                        &doc.module,
+                        self.sources.as_ref(),
+                        &uri,
+                        Some(workspace.contracts()),
+                    );
+                    diags.extend(taint_diags);
+                }
+
                 diags
             }
             Err(report) => {
                 let mut diags = diagnostics_from_report(&self.sources, &uri, report);
                 if let Some(doc) = fallback_doc {
                     diags.extend(unresolved_to_diagnostics(&uri, &doc, &workspace));
+
+                    // Run taint analysis on fallback doc if enabled (with workspace contracts)
+                    if taint_enabled {
+                        let taint_diags = crate::analysis::analyze_module(
+                            &doc.module,
+                            self.sources.as_ref(),
+                            &uri,
+                            Some(workspace.contracts()),
+                        );
+                        diags.extend(taint_diags);
+                    }
                 }
                 diags
             }
@@ -362,6 +388,8 @@ where
                 &doc_symbols.definitions,
                 &doc_symbols.references,
             );
+            // Update contracts for inter-procedural analysis
+            ws.update_contracts(&doc_symbols.module, self.sources.as_ref());
         }
 
         Ok(doc_symbols)

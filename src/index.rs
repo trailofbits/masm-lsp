@@ -4,6 +4,7 @@ use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module};
 use miden_debug_types::{DefaultSourceManager, Spanned};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
+use crate::analysis::{infer_module_contracts, ContractStore, ProcContract};
 use crate::diagnostics::span_to_range;
 use crate::symbol_path::SymbolPath;
 
@@ -50,6 +51,8 @@ pub struct WorkspaceIndex {
     refs_by_uri: HashMap<Url, Vec<SymbolPath>>,
     /// Index references by their short name for fast O(1) lookups.
     refs_by_name: HashMap<String, Vec<SymbolPath>>,
+    /// Procedure contracts inferred from implementations and user annotations.
+    contracts: ContractStore,
 }
 
 impl WorkspaceIndex {
@@ -205,6 +208,36 @@ impl WorkspaceIndex {
             })
             .map(|(path, loc)| (path.to_string(), loc.clone()))
             .collect()
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Contract methods
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Update contracts for a document by inferring them from procedure implementations.
+    pub fn update_contracts(&mut self, module: &Module, source_manager: &DefaultSourceManager) {
+        let contracts = infer_module_contracts(module, source_manager);
+        self.contracts.update_document(contracts);
+    }
+
+    /// Get a procedure contract by exact path.
+    pub fn get_contract(&self, path: &SymbolPath) -> Option<&ProcContract> {
+        self.contracts.get(path)
+    }
+
+    /// Get a procedure contract by short name.
+    pub fn get_contract_by_name(&self, name: &str) -> Option<&ProcContract> {
+        self.contracts.get_by_name(name)
+    }
+
+    /// Get a procedure contract by path suffix.
+    pub fn get_contract_by_suffix(&self, suffix: &str) -> Option<&ProcContract> {
+        self.contracts.get_by_suffix(suffix)
+    }
+
+    /// Get access to the contract store.
+    pub fn contracts(&self) -> &ContractStore {
+        &self.contracts
     }
 }
 

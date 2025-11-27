@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod client;
 pub mod diagnostics;
 pub mod index;
@@ -22,6 +23,8 @@ pub struct ServerConfig {
     pub library_paths: Vec<LibraryPath>,
     /// Whether to show hover information for built-in instructions.
     pub instruction_hovers_enabled: bool,
+    /// Whether to run taint analysis and report security warnings.
+    pub taint_analysis_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +41,8 @@ impl Default for ServerConfig {
             library_paths: default_library_paths(),
             // Instruction hovers are disabled by default.
             instruction_hovers_enabled: false,
+            // Taint analysis is enabled by default.
+            taint_analysis_enabled: true,
         }
     }
 }
@@ -55,6 +60,7 @@ pub struct ServerConfigBuilder {
     inlay_hint_tabs: Option<usize>,
     library_paths: Option<Vec<LibraryPath>>,
     instruction_hovers_enabled: Option<bool>,
+    taint_analysis_enabled: Option<bool>,
 }
 
 impl ServerConfigBuilder {
@@ -76,6 +82,12 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set whether to run taint analysis and report security warnings.
+    pub fn taint_analysis_enabled(mut self, enabled: bool) -> Self {
+        self.taint_analysis_enabled = Some(enabled);
+        self
+    }
+
     /// Build the `ServerConfig` with the configured values.
     ///
     /// Uses defaults for any values not explicitly set.
@@ -84,6 +96,7 @@ impl ServerConfigBuilder {
             inlay_hint_tabs: self.inlay_hint_tabs.unwrap_or(2),
             library_paths: self.library_paths.unwrap_or_else(default_library_paths),
             instruction_hovers_enabled: self.instruction_hovers_enabled.unwrap_or(false),
+            taint_analysis_enabled: self.taint_analysis_enabled.unwrap_or(true),
         }
     }
 }
