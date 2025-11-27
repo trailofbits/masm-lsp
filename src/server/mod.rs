@@ -39,11 +39,11 @@ use crate::{
     util::{
         extract_token_at_position, extract_word_at_position, lsp_range_to_selection, to_miden_uri,
     },
-    LibraryPath, ServerConfig,
+    InlayHintMode, LibraryPath, ServerConfig,
 };
 
 // Re-export submodule items used externally
-pub use config::{extract_library_paths, extract_tab_count};
+pub use config::{extract_inlay_hint_mode, extract_library_paths, extract_tab_count};
 pub use helpers::{
     determine_module_kind_from_ast, extract_doc_comment, extract_procedure_signature,
     is_on_use_statement,
@@ -557,6 +557,10 @@ where
             cfg.library_paths = paths;
             info!("updated library search paths");
         }
+        if let Some(mode) = extract_inlay_hint_mode(&params.settings) {
+            cfg.inlay_hint_mode = mode;
+            info!("updated inlay hint mode: {:?}", mode);
+        }
         drop(cfg);
         self.load_configured_libraries().await;
     }
@@ -817,6 +821,13 @@ where
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let config = self.snapshot_config().await;
+
+        // If hints are disabled, return empty
+        if config.inlay_hint_mode == InlayHintMode::None {
+            return Ok(Some(vec![]));
+        }
+
         let uri = params.text_document.uri;
         let Some(doc) = self.get_or_parse_document(&uri).await else {
             return Ok(None);
@@ -827,14 +838,34 @@ where
             return Ok(None);
         };
 
-        let tab_count = self.snapshot_config().await.inlay_hint_tabs;
-        let hints = collect_inlay_hints(
-            &doc.module,
-            self.sources.as_ref(),
-            &params.range,
-            tab_count,
-            source.as_str(),
-        );
+        let hints = match config.inlay_hint_mode {
+            InlayHintMode::Description => collect_inlay_hints(
+                &doc.module,
+                self.sources.as_ref(),
+                &params.range,
+                config.inlay_hint_tabs,
+                source.as_str(),
+            ),
+            InlayHintMode::Disassembly => {
+                // Get contracts from workspace for inter-procedural analysis
+                let workspace = self.workspace.read().await;
+                let contracts = workspace.contracts();
+                let result = crate::disassembler::collect_disassembly_hints(
+                    &doc.module,
+                    self.sources.as_ref(),
+                    &params.range,
+                    config.inlay_hint_tabs,
+                    source.as_str(),
+                    Some(contracts),
+                );
+                drop(workspace);
+                // Note: We could publish diagnostics here, but that would require
+                // storing them and publishing on document open/change. For now,
+                // the hints simply stop when tracking fails.
+                result.hints
+            }
+            InlayHintMode::None => vec![],
+        };
         Ok(Some(hints))
     }
 }
