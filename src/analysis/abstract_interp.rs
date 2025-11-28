@@ -1107,6 +1107,10 @@ pub struct LoopAnalysis {
     pub failure_reason: Option<String>,
 }
 
+/// Maximum iterations for stack-neutral loops before we consider them
+/// too complex to analyze (due to exponential expression growth).
+const MAX_NEUTRAL_LOOP_ITERATIONS: usize = 16;
+
 /// Analyze a repeat loop body to determine its stack effect.
 ///
 /// This uses abstract interpretation with fixed-point computation to determine:
@@ -1140,6 +1144,24 @@ pub fn analyze_repeat_loop(body: &Block, iteration_count: usize) -> LoopAnalysis
 
     // Calculate net effect from the stable iteration
     let net_effect = post_second_depth as i32 - pre_second_depth as i32;
+
+    // Early check: stack-neutral loops with many iterations cause exponential
+    // expression growth (e.g., `repeat.31 { dup; mul }` creates 2^31 nodes).
+    // Fail fast with a clear diagnostic instead of hanging.
+    if net_effect == 0 && iteration_count > MAX_NEUTRAL_LOOP_ITERATIONS {
+        return LoopAnalysis {
+            min_inputs_required: discovered_inputs,
+            net_effect_per_iteration: 0,
+            total_inputs_for_loop: Some(discovered_inputs),
+            is_consistent: true,
+            pattern_description: None,
+            failure_reason: Some(format!(
+                "repeat.{} loop with stack-neutral body causes exponential complexity; \
+                 decompilation skipped",
+                iteration_count
+            )),
+        };
+    }
 
     // Phase 3: Calculate total inputs needed for the full loop
     let total_inputs = if net_effect < 0 {
@@ -1347,8 +1369,19 @@ fn execute_op_abstract(op: &Op, state: &mut AbstractState) {
             }
         }
         Op::Repeat { count, body, .. } => {
-            // For nested repeat loops, execute all iterations symbolically
-            // This is expensive but precise for bounded loops
+            // For nested repeat loops, check for exponential complexity first
+            let analysis = analyze_repeat_loop(body, *count as usize);
+
+            if analysis.failure_reason.is_some() {
+                // Stack-neutral loop with high iteration count - skip full iteration
+                // and mark expressions as imprecise
+                for expr in &mut state.stack {
+                    *expr = SymbolicExpr::Top;
+                }
+                return;
+            }
+
+            // Execute all iterations symbolically
             for _ in 0..*count {
                 if state.has_failed() {
                     return;
@@ -1451,6 +1484,20 @@ fn pre_analyze_op(op: &Op, state: &mut AbstractState) {
             // Ensure we have enough inputs for the entire loop
             if let Some(total) = analysis.total_inputs_for_loop {
                 state.ensure_depth(total);
+            }
+
+            // Check if analysis detected exponential complexity
+            // If so, skip full iteration - for stack-neutral loops we already know
+            // the stack depth is unchanged, so just mark expressions as imprecise
+            if analysis.failure_reason.is_some() {
+                // For stack-neutral loops with exponential complexity,
+                // we know the stack depth is unchanged (net_effect = 0).
+                // Replace stack contents with Top to indicate expressions are imprecise
+                // but preserve stack depth for subsequent analysis.
+                for expr in &mut state.stack {
+                    *expr = SymbolicExpr::Top;
+                }
+                return;
             }
 
             // Execute the loop to update state properly

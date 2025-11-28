@@ -385,6 +385,7 @@ impl<'a> DecompilationCollector<'a> {
 impl<'a> Visit for DecompilationCollector<'a> {
     fn visit_procedure(&mut self, proc: &Procedure) -> core::ops::ControlFlow<()> {
         let proc_name = proc.name().as_str().to_string();
+
         let decl_range = span_to_range(self.sources, proc.name().span());
         let decl_line = decl_range.as_ref().map(|r| r.start.line);
 
