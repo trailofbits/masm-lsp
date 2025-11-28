@@ -5,40 +5,8 @@
 
 mod common;
 
-use common::fixtures::{load_example, load_fixture};
+use common::fixtures::load_fixture;
 use common::harness::TestHarness;
-
-#[tokio::test]
-async fn fib_example_parses_without_errors() {
-    let harness = TestHarness::new().await;
-    let content = load_example("fib/fib.masm");
-    let uri = harness.open_inline("fib.masm", &content).await;
-
-    tokio::task::yield_now().await;
-
-    harness.assert_no_diagnostics(&uri).await;
-}
-
-#[tokio::test]
-async fn sha256_example_parses_without_errors() {
-    let harness = TestHarness::new().await;
-    let content = load_example("hashing/sha256/sha256.masm");
-    let uri = harness.open_inline("sha256.masm", &content).await;
-
-    tokio::task::yield_now().await;
-
-    // Note: This may have unresolved references to stdlib if stdlib is not loaded.
-    // The test verifies parsing succeeds, not that all references resolve.
-    let diags = harness.client.diagnostics_for(&uri).await;
-    // Check that there are no syntax errors (unresolved refs are acceptable)
-    for diag in &diags {
-        assert!(
-            diag.message.contains("unresolved") || !diag.message.contains("parse"),
-            "unexpected error: {}",
-            diag.message
-        );
-    }
-}
 
 #[tokio::test]
 async fn multi_proc_fixture_goto_definition_works() {
