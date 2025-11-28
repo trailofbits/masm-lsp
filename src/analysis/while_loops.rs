@@ -189,7 +189,7 @@ impl WhileLoopAnalyzer {
         {
             if decrement > 0 && initial > 0 {
                 // Countdown loop: runs initial/decrement times (rounded up)
-                let iterations = (initial + decrement - 1) / decrement;
+                let iterations = initial.div_ceil(decrement);
                 return LoopBound::Exactly(iterations);
             }
         }
@@ -201,7 +201,7 @@ impl WhileLoopAnalyzer {
             if increment > 0 && limit > initial {
                 // Countup loop: runs (limit - initial) / increment times (rounded up)
                 let range = limit - initial;
-                let iterations = (range + increment - 1) / increment;
+                let iterations = range.div_ceil(increment);
                 return LoopBound::Exactly(iterations);
             }
         }

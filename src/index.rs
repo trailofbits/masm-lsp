@@ -114,7 +114,7 @@ impl WorkspaceIndex {
                 .push(Location::new(uri.clone(), r.range));
             // Index by short name for fast lookups
             let name = r.path.name().to_string();
-            if !self.refs_by_name.get(&name).map_or(false, |v| v.contains(&r.path)) {
+            if !self.refs_by_name.get(&name).is_some_and(|v| v.contains(&r.path)) {
                 self.refs_by_name
                     .entry(name)
                     .or_default()

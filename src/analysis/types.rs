@@ -16,9 +16,10 @@ pub const U32_MAX: u64 = 0xFFFF_FFFF;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Tracks what we know about a value's possible range.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum Bounds {
     /// No constraints - full field element
+    #[default]
     Field,
     /// Known exact value
     Const(u64),
@@ -26,12 +27,6 @@ pub enum Bounds {
     Range { lo: u64, hi: u64 },
     /// Boolean: exactly 0 or 1
     Bool,
-}
-
-impl Default for Bounds {
-    fn default() -> Self {
-        Bounds::Field
-    }
 }
 
 impl Bounds {
@@ -390,7 +385,7 @@ impl Bounds {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Tracks where a value came from (its provenance).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum Source {
     /// Literal constant in the code
     Literal,
@@ -403,17 +398,12 @@ pub enum Source {
     /// Loaded from memory
     Memory,
     /// Derived from other values (e.g., arithmetic result)
+    #[default]
     Derived,
     /// Input parameter to procedure
     ProcInput { position: usize },
     /// Return value from procedure call
     ProcReturn { target: String },
-}
-
-impl Default for Source {
-    fn default() -> Self {
-        Source::Derived
-    }
 }
 
 impl Source {

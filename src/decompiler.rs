@@ -31,22 +31,6 @@ struct NamedValue {
 struct SavedStackState {
     /// The stack contents at the save point
     stack: Vec<NamedValue>,
-    /// The next_var_id at the save point
-    next_var_id: usize,
-    /// The next_input_id at the save point
-    next_input_id: usize,
-}
-
-/// Information about an active loop for counter-indexed variable access.
-#[derive(Clone, Debug)]
-struct LoopContext {
-    /// The counter variable name (c1, c2, etc.)
-    counter: String,
-    /// Net stack effect per iteration (negative = consuming, positive = producing)
-    /// None if not yet determined (still in first pass of body)
-    net_effect: Option<i32>,
-    /// Stack depth at loop entry (after condition pop for while loops)
-    entry_depth: usize,
 }
 
 /// State for decompiling a procedure.
@@ -62,8 +46,6 @@ struct DecompilerState {
     /// Counter for dynamically discovered input variables
     /// This tracks how many "virtual" inputs exist below our current stack
     next_input_id: usize,
-    /// The initial input count we started with (from contract or signature)
-    initial_input_count: usize,
     /// Whether stack tracking has failed (e.g., after dynamic call)
     tracking_failed: bool,
     /// The span where tracking failed (for diagnostic reporting)
@@ -72,8 +54,6 @@ struct DecompilerState {
     failure_reason: Option<String>,
     /// Counter for generating loop counter names (c1, c2, ...)
     next_counter_id: usize,
-    /// Stack of active loop contexts (for nested loops)
-    loop_contexts: Vec<LoopContext>,
     /// Span of a loop that produced a dynamic/unknown number of stack items.
     /// When set, subsequent loops with non-zero net effect cannot be decompiled
     /// because we don't know the exact stack contents.
@@ -99,12 +79,10 @@ impl DecompilerState {
             stack,
             next_var_id: 0,
             next_input_id: input_count,
-            initial_input_count: input_count,
             tracking_failed: false,
             failure_span: None,
             failure_reason: None,
             next_counter_id: 0,
-            loop_contexts: Vec::new(),
             dynamic_stack_source: None,
         }
     }
@@ -119,70 +97,6 @@ impl DecompilerState {
         };
         self.next_counter_id += 1;
         name
-    }
-
-    /// Push a new loop context onto the stack.
-    fn push_loop_context(&mut self, counter: String, net_effect: Option<i32>) {
-        self.loop_contexts.push(LoopContext {
-            counter,
-            net_effect,
-            entry_depth: self.stack.len(),
-        });
-    }
-
-    /// Pop the current loop context.
-    fn pop_loop_context(&mut self) -> Option<LoopContext> {
-        self.loop_contexts.pop()
-    }
-
-    /// Get the current innermost loop context, if any.
-    fn current_loop(&self) -> Option<&LoopContext> {
-        self.loop_contexts.last()
-    }
-
-    /// Check if we're inside a loop that needs counter-indexed variables.
-    /// This is true when the loop has a non-zero net stack effect per iteration.
-    fn needs_counter_indexing(&self) -> bool {
-        self.loop_contexts.last()
-            .and_then(|ctx| ctx.net_effect)
-            .map(|effect| effect != 0)
-            .unwrap_or(false)
-    }
-
-    /// Format a variable name with counter indexing if needed.
-    /// For variables inside counter-indexed loops, shows the position relative to loop entry
-    /// with the counter offset.
-    fn format_indexed_var(&self, base_name: &str, position_from_top: usize) -> String {
-        if let Some(ctx) = self.current_loop() {
-            if let Some(net_effect) = ctx.net_effect {
-                if net_effect != 0 {
-                    // Extract the numeric part from the base name (e.g., "a1" -> 1)
-                    if let Some(num_str) = base_name.strip_prefix('a') {
-                        if let Ok(num) = num_str.parse::<i32>() {
-                            // For consuming loops (negative effect), positions shift
-                            // Position from top at iteration c is: original_pos + c * |effect|
-                            if net_effect < 0 {
-                                let effect_abs = (-net_effect) as i32;
-                                if effect_abs == 1 {
-                                    return format!("a({}+{})", num, ctx.counter);
-                                } else {
-                                    return format!("a({}+{}*{})", num, ctx.counter, effect_abs);
-                                }
-                            } else {
-                                // For producing loops, positions shift the other way
-                                let effect = net_effect as i32;
-                                if effect == 1 {
-                                    return format!("a({}-{})", num, ctx.counter);
-                                } else {
-                                    return format!("a({}-{}*{})", num, ctx.counter, effect);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        base_name.to_string()
     }
 
     /// Get the total number of inputs discovered (initial + dynamically discovered).
@@ -345,8 +259,6 @@ impl DecompilerState {
     fn save_state(&self) -> SavedStackState {
         SavedStackState {
             stack: self.stack.clone(),
-            next_var_id: self.next_var_id,
-            next_input_id: self.next_input_id,
         }
     }
 

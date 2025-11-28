@@ -156,7 +156,7 @@ pub fn collect_inlay_hints(
             let invoc_hints: Vec<String> = data
                 .invocations
                 .iter()
-                .map(|inv| render_invocation_hint(inv))
+                .map(render_invocation_hint)
                 .collect();
 
             inst_hints
