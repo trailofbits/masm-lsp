@@ -7,48 +7,7 @@ use miden_assembly_syntax::ast::{Immediate, Instruction};
 use miden_debug_types::SourceSpan;
 
 use super::types::{AnalysisState, Bounds};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helper for extracting values from immediates
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Try to extract a u64 value from a push immediate.
-fn push_imm_to_u64(imm: &Immediate<miden_assembly_syntax::parser::PushValue>) -> Option<u64> {
-    use miden_assembly_syntax::parser::{IntValue, PushValue};
-
-    match imm {
-        Immediate::Value(span) => match span.inner() {
-            PushValue::Int(int_val) => {
-                let val = match int_val {
-                    IntValue::U8(v) => *v as u64,
-                    IntValue::U16(v) => *v as u64,
-                    IntValue::U32(v) => *v as u64,
-                    IntValue::Felt(f) => f.as_int(),
-                };
-                Some(val)
-            }
-            PushValue::Word(_) => None, // Word pushes multiple values
-        },
-        _ => None,
-    }
-}
-
-/// Try to extract a u64 value from a Felt immediate.
-fn felt_imm_to_u64(imm: &Immediate<miden_assembly_syntax::Felt>) -> Option<u64> {
-    match imm {
-        Immediate::Value(span) => Some(span.inner().as_int()),
-        _ => None,
-    }
-}
-
-/// Try to extract a u32 value from a u32 immediate.
-#[allow(dead_code)]
-fn u32_imm_to_u64(imm: &Immediate<u32>) -> Option<u64> {
-    match imm {
-        Immediate::Value(span) => Some(*span.inner() as u64),
-        _ => None,
-    }
-}
+use super::utils::{felt_imm_to_u64, push_imm_to_u64};
 
 /// Apply an instruction's effect on the analysis state.
 ///

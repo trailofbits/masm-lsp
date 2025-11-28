@@ -5,6 +5,8 @@
 
 use miden_debug_types::SourceSpan;
 
+use super::stack_ops::StackLike;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════════════════════
@@ -378,6 +380,30 @@ impl Bounds {
             _ => Bounds::Field,
         }
     }
+
+    /// Right shift - divides by 2^shift_amount
+    pub fn shr(&self, shift_amount: u64) -> Bounds {
+        if shift_amount >= 64 {
+            return Bounds::Const(0);
+        }
+        match self {
+            Bounds::Const(v) => Bounds::Const(v >> shift_amount),
+            Bounds::Range { lo, hi } => {
+                let new_lo = lo >> shift_amount;
+                let new_hi = hi >> shift_amount;
+                if new_lo == new_hi {
+                    Bounds::Const(new_lo)
+                } else {
+                    Bounds::Range {
+                        lo: new_lo,
+                        hi: new_hi,
+                    }
+                }
+            }
+            Bounds::Bool => Bounds::Bool, // 0 or 1 shifted right by any amount stays 0 or 0
+            Bounds::Field => Bounds::Field,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -453,6 +479,18 @@ impl Taint {
         // Also constrain bounds to u32 after validation
         if matches!(self.bounds, Bounds::Field) {
             self.bounds = Bounds::u32();
+        }
+    }
+}
+
+impl Default for Taint {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            bounds: Bounds::Field,
+            source: Source::Literal,
+            validated: ValidationState::None,
+            source_span: None,
         }
     }
 }
@@ -566,6 +604,68 @@ impl SymbolicStack {
     /// values remain on the stack after the call.
     pub fn clear(&mut self) {
         self.elements.clear();
+    }
+}
+
+impl StackLike for SymbolicStack {
+    type Element = Taint;
+
+    fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    fn push(&mut self, elem: Taint) {
+        self.elements.push(elem);
+    }
+
+    fn pop(&mut self) -> Taint {
+        // Return default (untainted) value if stack is empty
+        self.elements.pop().unwrap_or_default()
+    }
+
+    fn peek(&self, n: usize) -> Option<&Taint> {
+        if n < self.elements.len() {
+            Some(&self.elements[self.elements.len() - 1 - n])
+        } else {
+            None
+        }
+    }
+
+    fn ensure_depth(&mut self, needed: usize) {
+        // For taint tracking, we pad with default (untainted) values
+        while self.elements.len() < needed {
+            self.elements.insert(0, Taint::default());
+        }
+    }
+
+    fn swap(&mut self, a: usize, b: usize) {
+        self.ensure_depth(a.max(b) + 1);
+        let len = self.elements.len();
+        let idx_a = len - 1 - a;
+        let idx_b = len - 1 - b;
+        self.elements.swap(idx_a, idx_b);
+    }
+
+    fn movup(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_depth(n + 1);
+        let len = self.elements.len();
+        let idx = len - 1 - n;
+        let elem = self.elements.remove(idx);
+        self.elements.push(elem);
+    }
+
+    fn movdn(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_depth(n + 1);
+        let elem = self.elements.pop().unwrap();
+        let len = self.elements.len();
+        let idx = len + 1 - n;
+        self.elements.insert(idx, elem);
     }
 }
 

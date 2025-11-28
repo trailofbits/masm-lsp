@@ -11,43 +11,12 @@ use std::ops::ControlFlow;
 
 use miden_assembly_syntax::ast::{
     visit::{self, Visit},
-    Block, Immediate, Instruction, Op,
+    Block, Instruction, Op,
 };
 
+use super::stack_ops::StackLike;
 use super::types::Bounds;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helper for extracting values from immediates
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Try to extract a u64 value from a push immediate.
-fn push_imm_to_u64(imm: &Immediate<miden_assembly_syntax::parser::PushValue>) -> Option<u64> {
-    use miden_assembly_syntax::parser::{IntValue, PushValue};
-
-    match imm {
-        Immediate::Value(span) => match span.inner() {
-            PushValue::Int(int_val) => {
-                let val = match int_val {
-                    IntValue::U8(v) => *v as u64,
-                    IntValue::U16(v) => *v as u64,
-                    IntValue::U32(v) => *v as u64,
-                    IntValue::Felt(f) => f.as_int(),
-                };
-                Some(val)
-            }
-            PushValue::Word(_) => None, // Word pushes multiple values, can't extract single u64
-        },
-        _ => None,
-    }
-}
-
-/// Try to extract a u64 value from a Felt immediate.
-fn felt_imm_to_u64(imm: &Immediate<miden_assembly_syntax::Felt>) -> Option<u64> {
-    match imm {
-        Immediate::Value(span) => Some(span.inner().as_int()),
-        _ => None,
-    }
-}
+use super::utils::{felt_imm_to_u64, push_imm_to_u64, u8_imm_to_u64};
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -131,6 +100,66 @@ impl SymbolicStack {
     }
 }
 
+impl StackLike for SymbolicStack {
+    type Element = Bounds;
+
+    fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    fn push(&mut self, elem: Bounds) {
+        self.elements.push(elem);
+    }
+
+    fn pop(&mut self) -> Bounds {
+        self.elements.pop().unwrap_or(Bounds::Field)
+    }
+
+    fn peek(&self, n: usize) -> Option<&Bounds> {
+        if n < self.elements.len() {
+            Some(&self.elements[self.elements.len() - 1 - n])
+        } else {
+            None
+        }
+    }
+
+    fn ensure_depth(&mut self, needed: usize) {
+        while self.elements.len() < needed {
+            self.elements.insert(0, Bounds::Field);
+        }
+    }
+
+    fn swap(&mut self, a: usize, b: usize) {
+        self.ensure_depth(a.max(b) + 1);
+        let len = self.elements.len();
+        let idx_a = len - 1 - a;
+        let idx_b = len - 1 - b;
+        self.elements.swap(idx_a, idx_b);
+    }
+
+    fn movup(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_depth(n + 1);
+        let len = self.elements.len();
+        let idx = len - 1 - n;
+        let elem = self.elements.remove(idx);
+        self.elements.push(elem);
+    }
+
+    fn movdn(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_depth(n + 1);
+        let elem = self.elements.pop().unwrap();
+        let len = self.elements.len();
+        let idx = len + 1 - n;
+        self.elements.insert(idx, elem);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // While Loop Analyzer
 // ═══════════════════════════════════════════════════════════════════════════
@@ -140,6 +169,8 @@ impl SymbolicStack {
 /// This analyzer simulates execution of the loop body to detect patterns like:
 /// - `sub.1 dup.0 neq.0` (countdown loop)
 /// - `add.1 dup.0 lt.N` (countup loop)
+/// - `u32shr.1 dup.0 neq.0` (halving loop - iterates log2(N) times)
+/// - `gt.N` pattern (counter > N condition)
 pub struct WhileLoopAnalyzer {
     /// Symbolic stack state
     stack: SymbolicStack,
@@ -149,8 +180,14 @@ pub struct WhileLoopAnalyzer {
     decrement_pattern: Option<(usize, u64)>,
     /// Detected increment pattern: (position, increment_amount)
     increment_pattern: Option<(usize, u64)>,
-    /// Detected upper limit from lt.N comparison
+    /// Detected halving pattern (divide by 2 or right shift by 1)
+    halving_pattern: bool,
+    /// Detected upper limit from lt.N or lte.N comparison
     upper_limit: Option<u64>,
+    /// Detected lower limit from gt.N comparison
+    lower_limit: Option<u64>,
+    /// Whether the limit is inclusive (lte/gte) vs exclusive (lt/gt)
+    limit_inclusive: bool,
     /// Initial counter value (if pushed before loop)
     initial_counter: Option<u64>,
 }
@@ -168,7 +205,10 @@ impl WhileLoopAnalyzer {
             unknown_ops: false,
             decrement_pattern: None,
             increment_pattern: None,
+            halving_pattern: false,
             upper_limit: None,
+            lower_limit: None,
+            limit_inclusive: false,
             initial_counter,
         }
     }
@@ -183,6 +223,16 @@ impl WhileLoopAnalyzer {
             return LoopBound::Unknown;
         }
 
+        // Check for halving pattern: counter halved each iteration (shr.1 or u32shr.1)
+        // Halving loop: runs ceil(log2(initial)) times
+        if let Some(initial) = self.initial_counter {
+            if self.halving_pattern && initial > 0 {
+                // Calculate ceil(log2(initial)) = number of bits needed to represent initial
+                let iterations = 64 - initial.leading_zeros() as u64;
+                return LoopBound::Exactly(iterations);
+            }
+        }
+
         // Check for countdown pattern: counter decremented, condition is counter != 0
         if let (Some(initial), Some((_, decrement))) =
             (self.initial_counter, self.decrement_pattern)
@@ -194,13 +244,33 @@ impl WhileLoopAnalyzer {
             }
         }
 
+        // Check for countdown with lower limit: counter > N pattern
+        if let (Some(initial), Some((_, decrement)), Some(lower)) =
+            (self.initial_counter, self.decrement_pattern, self.lower_limit)
+        {
+            if decrement > 0 && initial > lower {
+                // Countdown until counter <= lower (exclusive) or counter < lower (inclusive)
+                let range = if self.limit_inclusive {
+                    initial - lower
+                } else {
+                    initial.saturating_sub(lower + 1)
+                };
+                let iterations = range.div_ceil(decrement);
+                return LoopBound::Exactly(iterations);
+            }
+        }
+
         // Check for countup pattern: counter incremented, condition is counter < limit
         if let (Some(initial), Some((_, increment)), Some(limit)) =
             (self.initial_counter, self.increment_pattern, self.upper_limit)
         {
             if increment > 0 && limit > initial {
                 // Countup loop: runs (limit - initial) / increment times (rounded up)
-                let range = limit - initial;
+                let range = if self.limit_inclusive {
+                    limit - initial + 1
+                } else {
+                    limit - initial
+                };
                 let iterations = range.div_ceil(increment);
                 return LoopBound::Exactly(iterations);
             }
@@ -380,14 +450,69 @@ impl WhileLoopAnalyzer {
                 // Detect upper limit pattern: counter < limit (push.N lt)
                 if let Bounds::Const(limit) = &b {
                     self.upper_limit = Some(*limit);
+                    self.limit_inclusive = false;
                 }
 
                 self.stack.push(a.lt(&b));
             }
+            Instruction::Lte => {
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+
+                // Detect upper limit pattern: counter <= limit (push.N lte)
+                if let Bounds::Const(limit) = &b {
+                    self.upper_limit = Some(*limit);
+                    self.limit_inclusive = true;
+                }
+
+                self.stack.push(a.lte(&b));
+            }
             Instruction::Gt => {
                 let b = self.stack.pop();
                 let a = self.stack.pop();
+
+                // Detect lower limit pattern: counter > limit (countdown to limit)
+                if let Bounds::Const(limit) = &b {
+                    self.lower_limit = Some(*limit);
+                    self.limit_inclusive = false;
+                }
+
                 self.stack.push(a.gt(&b));
+            }
+            Instruction::Gte => {
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+
+                // Detect lower limit pattern: counter >= limit (countdown to limit)
+                if let Bounds::Const(limit) = &b {
+                    self.lower_limit = Some(*limit);
+                    self.limit_inclusive = true;
+                }
+
+                self.stack.push(a.gte(&b));
+            }
+
+            // u32 shift operations - detect halving patterns
+            Instruction::U32ShrImm(imm) => {
+                let a = self.stack.pop();
+                if let Some(shift) = u8_imm_to_u64(imm) {
+                    if shift == 1 {
+                        // shr.1 halves the value - detect halving pattern
+                        self.halving_pattern = true;
+                    }
+                    self.stack.push(a.shr(shift));
+                } else {
+                    self.stack.push(Bounds::Field);
+                }
+            }
+            Instruction::U32Shr => {
+                let shift = self.stack.pop();
+                let _a = self.stack.pop();
+                // If shift is constant 1, this is a halving pattern
+                if let Bounds::Const(1) = shift {
+                    self.halving_pattern = true;
+                }
+                self.stack.push(Bounds::Field);
             }
 
             // Boolean operations (maintain bool bounds)

@@ -1,0 +1,1598 @@
+//! Abstract interpretation framework for stack machine decompilation.
+//!
+//! This module provides a principled approach to analyzing stack-manipulating
+//! loops using abstract interpretation with fixed-point computation.
+//!
+//! # Key Concepts
+//!
+//! - **Abstract Domain**: Values are represented symbolically, tracking their
+//!   origin (input position) and how they were computed.
+//! - **Transfer Functions**: Each instruction has a function that transforms
+//!   the abstract state.
+//! - **Fixed-Point Computation**: Loops are analyzed by iterating until the
+//!   abstract state stabilizes.
+//! - **Widening/Narrowing**: For unbounded loops, widening ensures termination
+//!   while narrowing can recover precision.
+//!
+//! # Example
+//!
+//! ```text
+//! repeat.5
+//!     movup.5
+//!     add
+//!     movdn.4
+//! end
+//! ```
+//!
+//! The abstract interpretation determines:
+//! - Minimum inputs required: 10
+//! - Net effect per iteration: -1 (consuming)
+//! - Access pattern: `a_i + a_(i+5)` for each iteration `i`
+
+use std::fmt;
+
+use miden_assembly_syntax::ast::{Block, Instruction, Op};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Abstract Domain: Symbolic Stack Values
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A symbolic expression representing a stack value's computation.
+///
+/// This forms the core of our abstract domain, allowing us to track
+/// how values are derived from inputs through operations.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SymbolicExpr {
+    /// An input parameter at a fixed position: `a_0`, `a_1`, etc.
+    Input(usize),
+
+    /// An input at a position that depends on a loop counter.
+    /// Represents `a_(base + counter * stride)`.
+    ParametricInput {
+        /// Base input index
+        base: i32,
+        /// Coefficient of the loop counter
+        stride: i32,
+        /// Which loop counter (0 = innermost, 1 = next outer, etc.)
+        loop_depth: usize,
+    },
+
+    /// A constant literal value.
+    Constant(u64),
+
+    /// Binary operation on two expressions.
+    BinaryOp {
+        op: BinaryOpKind,
+        left: Box<SymbolicExpr>,
+        right: Box<SymbolicExpr>,
+    },
+
+    /// Unary operation on an expression.
+    UnaryOp {
+        op: UnaryOpKind,
+        operand: Box<SymbolicExpr>,
+    },
+
+    /// A value loaded from memory at an address.
+    MemoryLoad {
+        address: Box<SymbolicExpr>,
+    },
+
+    /// A value from the advice provider (untrusted input).
+    Advice,
+
+    /// Unknown value - we've lost track of what this is.
+    /// This is the top element (⊤) of our lattice.
+    Top,
+}
+
+/// Binary operation kinds for symbolic expressions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BinaryOpKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    And,
+    Or,
+    Xor,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+}
+
+/// Unary operation kinds for symbolic expressions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnaryOpKind {
+    Neg,
+    Not,
+    Inv,
+}
+
+impl SymbolicExpr {
+    /// Create an input expression for the given position.
+    pub fn input(pos: usize) -> Self {
+        SymbolicExpr::Input(pos)
+    }
+
+    /// Create a parametric input expression.
+    pub fn parametric(base: i32, stride: i32, loop_depth: usize) -> Self {
+        SymbolicExpr::ParametricInput {
+            base,
+            stride,
+            loop_depth,
+        }
+    }
+
+    /// Create a constant expression.
+    pub fn constant(value: u64) -> Self {
+        SymbolicExpr::Constant(value)
+    }
+
+    /// Create a binary operation expression.
+    pub fn binary(op: BinaryOpKind, left: SymbolicExpr, right: SymbolicExpr) -> Self {
+        SymbolicExpr::BinaryOp {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    /// Check if this expression is the top element.
+    pub fn is_top(&self) -> bool {
+        matches!(self, SymbolicExpr::Top)
+    }
+
+    /// Check if this is a simple input reference.
+    pub fn as_input(&self) -> Option<usize> {
+        match self {
+            SymbolicExpr::Input(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a parametric input reference.
+    pub fn as_parametric(&self) -> Option<(i32, i32, usize)> {
+        match self {
+            SymbolicExpr::ParametricInput {
+                base,
+                stride,
+                loop_depth,
+            } => Some((*base, *stride, *loop_depth)),
+            _ => None,
+        }
+    }
+
+    /// Lift a concrete input to parametric form for loop analysis.
+    ///
+    /// `a_n` becomes `a_(n + i * stride)` where `stride` is the net effect.
+    pub fn lift_to_parametric(&self, net_effect: i32, loop_depth: usize) -> Self {
+        match self {
+            SymbolicExpr::Input(n) => SymbolicExpr::ParametricInput {
+                base: *n as i32,
+                stride: -net_effect, // Negative because consuming moves us forward
+                loop_depth,
+            },
+            SymbolicExpr::BinaryOp { op, left, right } => SymbolicExpr::BinaryOp {
+                op: *op,
+                left: Box::new(left.lift_to_parametric(net_effect, loop_depth)),
+                right: Box::new(right.lift_to_parametric(net_effect, loop_depth)),
+            },
+            SymbolicExpr::UnaryOp { op, operand } => SymbolicExpr::UnaryOp {
+                op: *op,
+                operand: Box::new(operand.lift_to_parametric(net_effect, loop_depth)),
+            },
+            // Already parametric or other forms pass through
+            _ => self.clone(),
+        }
+    }
+
+    /// True lattice join (least upper bound).
+    ///
+    /// Returns the most general expression that covers both inputs.
+    /// This is a sound approximation - the result may be less precise
+    /// than either input, but never incorrect.
+    pub fn join(&self, other: &Self) -> Self {
+        if self == other {
+            return self.clone();
+        }
+
+        match (self, other) {
+            // Top absorbs everything
+            (SymbolicExpr::Top, _) | (_, SymbolicExpr::Top) => SymbolicExpr::Top,
+
+            // Same constants are equal (handled above), different constants -> Top
+            (SymbolicExpr::Constant(_), SymbolicExpr::Constant(_)) => SymbolicExpr::Top,
+
+            // Parametric inputs can be joined if they have identical structure
+            (
+                SymbolicExpr::ParametricInput {
+                    base: b1,
+                    stride: s1,
+                    loop_depth: d1,
+                },
+                SymbolicExpr::ParametricInput {
+                    base: b2,
+                    stride: s2,
+                    loop_depth: d2,
+                },
+            ) if d1 == d2 && s1 == s2 && b1 == b2 => self.clone(),
+
+            // Binary ops with same structure can join recursively
+            (
+                SymbolicExpr::BinaryOp {
+                    op: op1,
+                    left: l1,
+                    right: r1,
+                },
+                SymbolicExpr::BinaryOp {
+                    op: op2,
+                    left: l2,
+                    right: r2,
+                },
+            ) if op1 == op2 => {
+                let left = l1.join(l2);
+                let right = r1.join(r2);
+                if left.is_top() || right.is_top() {
+                    SymbolicExpr::Top
+                } else {
+                    SymbolicExpr::BinaryOp {
+                        op: *op1,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    }
+                }
+            }
+
+            // Default: incompatible expressions -> Top (sound approximation)
+            _ => SymbolicExpr::Top,
+        }
+    }
+
+    /// Heuristic pattern inference (NOT a lattice join).
+    ///
+    /// Used for loop analysis to infer parametric patterns.
+    /// Unlike `join`, this may produce MORE SPECIFIC results than inputs,
+    /// which is useful for loop analysis but not sound for general merging.
+    ///
+    /// Example: `infer_pattern(Input(0), Input(1))` -> `ParametricInput { base: 0, stride: 1 }`
+    pub fn infer_pattern(&self, other: &Self, loop_depth: usize) -> Self {
+        if self == other {
+            return self.clone();
+        }
+
+        match (self, other) {
+            // Two different inputs might form a linear pattern
+            (SymbolicExpr::Input(a), SymbolicExpr::Input(b)) => {
+                let diff = (*b as i32) - (*a as i32);
+                SymbolicExpr::ParametricInput {
+                    base: *a as i32,
+                    stride: diff,
+                    loop_depth,
+                }
+            }
+
+            // Binary ops: try to infer patterns in operands
+            (
+                SymbolicExpr::BinaryOp {
+                    op: op1,
+                    left: l1,
+                    right: r1,
+                },
+                SymbolicExpr::BinaryOp {
+                    op: op2,
+                    left: l2,
+                    right: r2,
+                },
+            ) if op1 == op2 => {
+                let left = l1.infer_pattern(l2, loop_depth);
+                let right = r1.infer_pattern(r2, loop_depth);
+                SymbolicExpr::BinaryOp {
+                    op: *op1,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
+            }
+
+            // Fall back to true join for incompatible patterns
+            _ => self.join(other),
+        }
+    }
+
+    /// Format as a human-readable string for pseudocode generation.
+    pub fn to_pseudocode(&self, counter_name: &str) -> String {
+        match self {
+            SymbolicExpr::Input(n) => format!("a_{}", n),
+            SymbolicExpr::ParametricInput {
+                base,
+                stride,
+                loop_depth: _,
+            } => {
+                if *stride == 0 {
+                    format!("a_{}", base)
+                } else if *base == 0 {
+                    if *stride == 1 {
+                        format!("a_{}", counter_name)
+                    } else if *stride == -1 {
+                        format!("a_(-{})", counter_name)
+                    } else if *stride > 0 {
+                        format!("a_({}*{})", counter_name, stride)
+                    } else {
+                        format!("a_(-{}*{})", counter_name, -stride)
+                    }
+                } else if *stride == 1 {
+                    format!("a_({}+{})", base, counter_name)
+                } else if *stride == -1 {
+                    format!("a_({}-{})", base, counter_name)
+                } else if *stride > 0 {
+                    format!("a_({}+{}*{})", base, counter_name, stride)
+                } else {
+                    format!("a_({}-{}*{})", base, counter_name, -stride)
+                }
+            }
+            SymbolicExpr::Constant(v) => format!("{}", v),
+            SymbolicExpr::BinaryOp { op, left, right } => {
+                let left_str = left.to_pseudocode(counter_name);
+                let right_str = right.to_pseudocode(counter_name);
+                let op_str = match op {
+                    BinaryOpKind::Add => "+",
+                    BinaryOpKind::Sub => "-",
+                    BinaryOpKind::Mul => "*",
+                    BinaryOpKind::Div => "/",
+                    BinaryOpKind::And => "&",
+                    BinaryOpKind::Or => "|",
+                    BinaryOpKind::Xor => "^",
+                    BinaryOpKind::Eq => "==",
+                    BinaryOpKind::Neq => "!=",
+                    BinaryOpKind::Lt => "<",
+                    BinaryOpKind::Lte => "<=",
+                    BinaryOpKind::Gt => ">",
+                    BinaryOpKind::Gte => ">=",
+                };
+                format!("{} {} {}", left_str, op_str, right_str)
+            }
+            SymbolicExpr::UnaryOp { op, operand } => {
+                let operand_str = operand.to_pseudocode(counter_name);
+                match op {
+                    UnaryOpKind::Neg => format!("-{}", operand_str),
+                    UnaryOpKind::Not => format!("!{}", operand_str),
+                    UnaryOpKind::Inv => format!("1/{}", operand_str),
+                }
+            }
+            SymbolicExpr::MemoryLoad { address } => {
+                format!("mem[{}]", address.to_pseudocode(counter_name))
+            }
+            SymbolicExpr::Advice => "advice".to_string(),
+            SymbolicExpr::Top => "?".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for SymbolicExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_pseudocode("i"))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Abstract State: Symbolic Stack
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Abstract state representing the symbolic stack during analysis.
+#[derive(Clone, Debug)]
+pub struct AbstractState {
+    /// The symbolic stack (index 0 = bottom, last = top).
+    stack: Vec<SymbolicExpr>,
+
+    /// Counter for generating temporary variable names.
+    next_temp_id: usize,
+
+    /// Number of inputs that have been discovered.
+    discovered_inputs: usize,
+
+    /// Current loop nesting depth (for parametric expressions).
+    loop_depth: usize,
+
+    /// Whether we've encountered an operation that makes tracking impossible.
+    tracking_failed: bool,
+
+    /// Reason for tracking failure, if any.
+    failure_reason: Option<String>,
+}
+
+impl AbstractState {
+    /// Create a new abstract state with the given number of inputs.
+    pub fn new(input_count: usize) -> Self {
+        let mut stack = Vec::with_capacity(input_count);
+        // Push inputs so that a_0 is at the top (last in Vec)
+        for i in (0..input_count).rev() {
+            stack.push(SymbolicExpr::Input(i));
+        }
+        Self {
+            stack,
+            next_temp_id: 0,
+            discovered_inputs: input_count,
+            loop_depth: 0,
+            tracking_failed: false,
+            failure_reason: None,
+        }
+    }
+
+    /// Create an empty abstract state.
+    pub fn empty() -> Self {
+        Self {
+            stack: Vec::new(),
+            next_temp_id: 0,
+            discovered_inputs: 0,
+            loop_depth: 0,
+            tracking_failed: false,
+            failure_reason: None,
+        }
+    }
+
+    /// Get the current stack depth.
+    pub fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Get the number of discovered inputs.
+    pub fn inputs_discovered(&self) -> usize {
+        self.discovered_inputs
+    }
+
+    /// Check if tracking has failed.
+    pub fn has_failed(&self) -> bool {
+        self.tracking_failed
+    }
+
+    /// Get the failure reason, if any.
+    pub fn failure_reason(&self) -> Option<&str> {
+        self.failure_reason.as_deref()
+    }
+
+    /// Push a symbolic expression onto the stack.
+    pub fn push(&mut self, expr: SymbolicExpr) {
+        self.stack.push(expr);
+    }
+
+    /// Pop a symbolic expression from the stack.
+    ///
+    /// If the stack is empty, discovers a new input.
+    pub fn pop(&mut self) -> SymbolicExpr {
+        if let Some(expr) = self.stack.pop() {
+            expr
+        } else {
+            // Stack underflow - discover a new input
+            let input_id = self.discovered_inputs;
+            self.discovered_inputs += 1;
+            SymbolicExpr::Input(input_id)
+        }
+    }
+
+    /// Peek at the expression at position n (0 = top).
+    pub fn peek(&self, n: usize) -> Option<&SymbolicExpr> {
+        if n < self.stack.len() {
+            Some(&self.stack[self.stack.len() - 1 - n])
+        } else {
+            None
+        }
+    }
+
+    /// Ensure the stack has at least `needed` elements.
+    ///
+    /// Discovers new inputs if necessary.
+    pub fn ensure_depth(&mut self, needed: usize) {
+        while self.stack.len() < needed {
+            let input_id = self.discovered_inputs;
+            self.discovered_inputs += 1;
+            // Insert at the bottom (older inputs have higher indices)
+            self.stack.insert(0, SymbolicExpr::Input(input_id));
+        }
+    }
+
+    /// Duplicate the value at position n onto the top.
+    pub fn dup(&mut self, n: usize) {
+        self.ensure_depth(n + 1);
+        let expr = self.stack[self.stack.len() - 1 - n].clone();
+        self.stack.push(expr);
+    }
+
+    /// Swap values at positions a and b (0 = top).
+    pub fn swap(&mut self, a: usize, b: usize) {
+        let max_pos = a.max(b);
+        self.ensure_depth(max_pos + 1);
+        let len = self.stack.len();
+        let idx_a = len - 1 - a;
+        let idx_b = len - 1 - b;
+        self.stack.swap(idx_a, idx_b);
+    }
+
+    /// Move the element at position n to the top.
+    pub fn movup(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_depth(n + 1);
+        let len = self.stack.len();
+        let idx = len - 1 - n;
+        let elem = self.stack.remove(idx);
+        self.stack.push(elem);
+    }
+
+    /// Move the top element to position n.
+    pub fn movdn(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_depth(n + 1);
+        let elem = self.stack.pop().unwrap();
+        let len = self.stack.len();
+        // Position n from top in final stack (len+1 elements) = index (len - n)
+        let idx = len - n;
+        self.stack.insert(idx, elem);
+    }
+
+    /// Mark tracking as failed with a reason.
+    pub fn fail(&mut self, reason: &str) {
+        self.tracking_failed = true;
+        self.failure_reason = Some(reason.to_string());
+    }
+
+    /// Join two abstract states (least upper bound).
+    ///
+    /// Used at control flow merge points.
+    pub fn join(&self, other: &Self) -> Self {
+        if self.tracking_failed || other.tracking_failed {
+            let mut result = Self::empty();
+            result.tracking_failed = true;
+            result.failure_reason = self
+                .failure_reason
+                .clone()
+                .or_else(|| other.failure_reason.clone());
+            return result;
+        }
+
+        let min_depth = self.stack.len().min(other.stack.len());
+        let mut joined_stack = Vec::with_capacity(min_depth);
+
+        // Join corresponding positions from the bottom
+        for i in 0..min_depth {
+            let self_idx = self.stack.len() - min_depth + i;
+            let other_idx = other.stack.len() - min_depth + i;
+            joined_stack.push(self.stack[self_idx].join(&other.stack[other_idx]));
+        }
+
+        Self {
+            stack: joined_stack,
+            next_temp_id: self.next_temp_id.max(other.next_temp_id),
+            discovered_inputs: self.discovered_inputs.max(other.discovered_inputs),
+            loop_depth: self.loop_depth,
+            tracking_failed: false,
+            failure_reason: None,
+        }
+    }
+
+    /// Check if this state is equivalent to another modulo variable names.
+    ///
+    /// Used for fixed-point detection in loops.
+    pub fn equivalent_structure(&self, other: &Self) -> bool {
+        if self.stack.len() != other.stack.len() {
+            return false;
+        }
+
+        // For now, use simple equality
+        // A more sophisticated implementation would check structural equivalence
+        self.stack == other.stack
+    }
+
+    /// Lift all input references to parametric form.
+    ///
+    /// Used when entering a loop to make expressions depend on the loop counter.
+    pub fn lift_to_parametric(&mut self, net_effect: i32) {
+        for expr in &mut self.stack {
+            *expr = expr.lift_to_parametric(net_effect, self.loop_depth);
+        }
+    }
+
+    /// Get a snapshot of the current state for comparison.
+    pub fn snapshot(&self) -> AbstractStateSnapshot {
+        AbstractStateSnapshot {
+            stack: self.stack.clone(),
+            discovered_inputs: self.discovered_inputs,
+        }
+    }
+
+    /// Restore from a snapshot.
+    pub fn restore(&mut self, snapshot: &AbstractStateSnapshot) {
+        self.stack = snapshot.stack.clone();
+        // Don't restore discovered_inputs - we want to keep tracking new discoveries
+    }
+}
+
+/// A lightweight snapshot of abstract state for comparison and restoration.
+#[derive(Clone, Debug)]
+pub struct AbstractStateSnapshot {
+    stack: Vec<SymbolicExpr>,
+    discovered_inputs: usize,
+}
+
+impl AbstractStateSnapshot {
+    /// Get the stack depth at the snapshot.
+    pub fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Get the number of inputs discovered at the snapshot.
+    pub fn inputs_discovered(&self) -> usize {
+        self.discovered_inputs
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Transfer Functions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Apply the transfer function for an instruction to the abstract state.
+///
+/// Returns a description of the operation for pseudocode generation, if any.
+pub fn transfer_instruction(
+    inst: &Instruction,
+    state: &mut AbstractState,
+) -> Option<TransferResult> {
+    if state.tracking_failed {
+        return None;
+    }
+
+    match inst {
+        // ─────────────────────────────────────────────────────────────────────
+        // Stack manipulation
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::Drop => {
+            state.pop();
+            None
+        }
+        Instruction::DropW => {
+            for _ in 0..4 {
+                state.pop();
+            }
+            None
+        }
+
+        Instruction::Dup0 => transfer_dup(state, 0),
+        Instruction::Dup1 => transfer_dup(state, 1),
+        Instruction::Dup2 => transfer_dup(state, 2),
+        Instruction::Dup3 => transfer_dup(state, 3),
+        Instruction::Dup4 => transfer_dup(state, 4),
+        Instruction::Dup5 => transfer_dup(state, 5),
+        Instruction::Dup6 => transfer_dup(state, 6),
+        Instruction::Dup7 => transfer_dup(state, 7),
+        Instruction::Dup8 => transfer_dup(state, 8),
+        Instruction::Dup9 => transfer_dup(state, 9),
+        Instruction::Dup10 => transfer_dup(state, 10),
+        Instruction::Dup11 => transfer_dup(state, 11),
+        Instruction::Dup12 => transfer_dup(state, 12),
+        Instruction::Dup13 => transfer_dup(state, 13),
+        Instruction::Dup14 => transfer_dup(state, 14),
+        Instruction::Dup15 => transfer_dup(state, 15),
+
+        Instruction::Swap1 => {
+            state.swap(0, 1);
+            None
+        }
+        Instruction::Swap2 => {
+            state.swap(0, 2);
+            None
+        }
+        Instruction::Swap3 => {
+            state.swap(0, 3);
+            None
+        }
+        Instruction::Swap4 => {
+            state.swap(0, 4);
+            None
+        }
+        Instruction::Swap5 => {
+            state.swap(0, 5);
+            None
+        }
+        Instruction::Swap6 => {
+            state.swap(0, 6);
+            None
+        }
+        Instruction::Swap7 => {
+            state.swap(0, 7);
+            None
+        }
+        Instruction::Swap8 => {
+            state.swap(0, 8);
+            None
+        }
+        Instruction::Swap9 => {
+            state.swap(0, 9);
+            None
+        }
+        Instruction::Swap10 => {
+            state.swap(0, 10);
+            None
+        }
+        Instruction::Swap11 => {
+            state.swap(0, 11);
+            None
+        }
+        Instruction::Swap12 => {
+            state.swap(0, 12);
+            None
+        }
+        Instruction::Swap13 => {
+            state.swap(0, 13);
+            None
+        }
+        Instruction::Swap14 => {
+            state.swap(0, 14);
+            None
+        }
+        Instruction::Swap15 => {
+            state.swap(0, 15);
+            None
+        }
+
+        Instruction::MovUp2 => {
+            state.movup(2);
+            None
+        }
+        Instruction::MovUp3 => {
+            state.movup(3);
+            None
+        }
+        Instruction::MovUp4 => {
+            state.movup(4);
+            None
+        }
+        Instruction::MovUp5 => {
+            state.movup(5);
+            None
+        }
+        Instruction::MovUp6 => {
+            state.movup(6);
+            None
+        }
+        Instruction::MovUp7 => {
+            state.movup(7);
+            None
+        }
+        Instruction::MovUp8 => {
+            state.movup(8);
+            None
+        }
+        Instruction::MovUp9 => {
+            state.movup(9);
+            None
+        }
+        Instruction::MovUp10 => {
+            state.movup(10);
+            None
+        }
+        Instruction::MovUp11 => {
+            state.movup(11);
+            None
+        }
+        Instruction::MovUp12 => {
+            state.movup(12);
+            None
+        }
+        Instruction::MovUp13 => {
+            state.movup(13);
+            None
+        }
+        Instruction::MovUp14 => {
+            state.movup(14);
+            None
+        }
+        Instruction::MovUp15 => {
+            state.movup(15);
+            None
+        }
+
+        Instruction::MovDn2 => {
+            state.movdn(2);
+            None
+        }
+        Instruction::MovDn3 => {
+            state.movdn(3);
+            None
+        }
+        Instruction::MovDn4 => {
+            state.movdn(4);
+            None
+        }
+        Instruction::MovDn5 => {
+            state.movdn(5);
+            None
+        }
+        Instruction::MovDn6 => {
+            state.movdn(6);
+            None
+        }
+        Instruction::MovDn7 => {
+            state.movdn(7);
+            None
+        }
+        Instruction::MovDn8 => {
+            state.movdn(8);
+            None
+        }
+        Instruction::MovDn9 => {
+            state.movdn(9);
+            None
+        }
+        Instruction::MovDn10 => {
+            state.movdn(10);
+            None
+        }
+        Instruction::MovDn11 => {
+            state.movdn(11);
+            None
+        }
+        Instruction::MovDn12 => {
+            state.movdn(12);
+            None
+        }
+        Instruction::MovDn13 => {
+            state.movdn(13);
+            None
+        }
+        Instruction::MovDn14 => {
+            state.movdn(14);
+            None
+        }
+        Instruction::MovDn15 => {
+            state.movdn(15);
+            None
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Arithmetic operations
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::Add => transfer_binary_op(state, BinaryOpKind::Add),
+        Instruction::Sub => transfer_binary_op(state, BinaryOpKind::Sub),
+        Instruction::Mul => transfer_binary_op(state, BinaryOpKind::Mul),
+        Instruction::Div => transfer_binary_op(state, BinaryOpKind::Div),
+        Instruction::Neg => transfer_unary_op(state, UnaryOpKind::Neg),
+        Instruction::Inv => transfer_unary_op(state, UnaryOpKind::Inv),
+
+        Instruction::Incr => {
+            let a = state.pop();
+            let result = SymbolicExpr::binary(BinaryOpKind::Add, a.clone(), SymbolicExpr::Constant(1));
+            state.push(result.clone());
+            Some(TransferResult::Assignment {
+                target: result.to_pseudocode("i"),
+                source: format!("{} + 1", a.to_pseudocode("i")),
+            })
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Comparison operations
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::Eq => transfer_binary_op(state, BinaryOpKind::Eq),
+        Instruction::Neq => transfer_binary_op(state, BinaryOpKind::Neq),
+        Instruction::Lt => transfer_binary_op(state, BinaryOpKind::Lt),
+        Instruction::Lte => transfer_binary_op(state, BinaryOpKind::Lte),
+        Instruction::Gt => transfer_binary_op(state, BinaryOpKind::Gt),
+        Instruction::Gte => transfer_binary_op(state, BinaryOpKind::Gte),
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Boolean operations
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::And => transfer_binary_op(state, BinaryOpKind::And),
+        Instruction::Or => transfer_binary_op(state, BinaryOpKind::Or),
+        Instruction::Xor => transfer_binary_op(state, BinaryOpKind::Xor),
+        Instruction::Not => transfer_unary_op(state, UnaryOpKind::Not),
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Push operations
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::Push(imm) => {
+            use miden_assembly_syntax::parser::PushValue;
+            let value = match imm {
+                miden_assembly_syntax::ast::Immediate::Value(span) => match span.inner() {
+                    PushValue::Int(int_val) => {
+                        use miden_assembly_syntax::parser::IntValue;
+                        match int_val {
+                            IntValue::U8(v) => *v as u64,
+                            IntValue::U16(v) => *v as u64,
+                            IntValue::U32(v) => *v as u64,
+                            IntValue::Felt(f) => f.as_int(),
+                        }
+                    }
+                    PushValue::Word(_) => 0, // Word push handled elsewhere
+                },
+                _ => 0,
+            };
+            let expr = SymbolicExpr::Constant(value);
+            state.push(expr);
+            Some(TransferResult::Push { value })
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Advice operations
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::AdvPush(n) => {
+            let count = match n {
+                miden_assembly_syntax::ast::Immediate::Value(v) => v.into_inner() as usize,
+                _ => 1,
+            };
+            for _ in 0..count {
+                state.push(SymbolicExpr::Advice);
+            }
+            Some(TransferResult::Advice { count })
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Memory operations
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::MemLoad => {
+            let addr = state.pop();
+            let result = SymbolicExpr::MemoryLoad {
+                address: Box::new(addr.clone()),
+            };
+            state.push(result);
+            Some(TransferResult::MemLoad {
+                address: addr.to_pseudocode("i"),
+            })
+        }
+
+        Instruction::MemStore => {
+            let addr = state.pop();
+            let value = state.pop();
+            Some(TransferResult::MemStore {
+                address: addr.to_pseudocode("i"),
+                value: value.to_pseudocode("i"),
+            })
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Dynamic calls - fail tracking
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::DynExec | Instruction::DynCall => {
+            state.fail("dynamic call has unknown stack effect");
+            None
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Default - many instructions not yet implemented
+        // ─────────────────────────────────────────────────────────────────────
+        _ => {
+            // For unhandled instructions, push Top to indicate unknown result
+            // This is conservative but sound
+            state.push(SymbolicExpr::Top);
+            None
+        }
+    }
+}
+
+/// Helper for dup transfer function.
+fn transfer_dup(state: &mut AbstractState, n: usize) -> Option<TransferResult> {
+    state.dup(n);
+    let expr = state.peek(0).cloned().unwrap_or(SymbolicExpr::Top);
+    Some(TransferResult::Dup {
+        source_pos: n,
+        value: expr.to_pseudocode("i"),
+    })
+}
+
+/// Helper for binary operation transfer functions.
+fn transfer_binary_op(state: &mut AbstractState, op: BinaryOpKind) -> Option<TransferResult> {
+    let b = state.pop();
+    let a = state.pop();
+    let result = SymbolicExpr::binary(op, a.clone(), b.clone());
+    state.push(result.clone());
+
+    let op_str = match op {
+        BinaryOpKind::Add => "+",
+        BinaryOpKind::Sub => "-",
+        BinaryOpKind::Mul => "*",
+        BinaryOpKind::Div => "/",
+        BinaryOpKind::And => "&",
+        BinaryOpKind::Or => "|",
+        BinaryOpKind::Xor => "^",
+        BinaryOpKind::Eq => "==",
+        BinaryOpKind::Neq => "!=",
+        BinaryOpKind::Lt => "<",
+        BinaryOpKind::Lte => "<=",
+        BinaryOpKind::Gt => ">",
+        BinaryOpKind::Gte => ">=",
+    };
+
+    Some(TransferResult::BinaryOp {
+        result: result.to_pseudocode("i"),
+        left: a.to_pseudocode("i"),
+        op: op_str.to_string(),
+        right: b.to_pseudocode("i"),
+    })
+}
+
+/// Helper for unary operation transfer functions.
+fn transfer_unary_op(state: &mut AbstractState, op: UnaryOpKind) -> Option<TransferResult> {
+    let operand = state.pop();
+    let result = SymbolicExpr::UnaryOp {
+        op,
+        operand: Box::new(operand.clone()),
+    };
+    state.push(result.clone());
+
+    let op_str = match op {
+        UnaryOpKind::Neg => "-",
+        UnaryOpKind::Not => "!",
+        UnaryOpKind::Inv => "1/",
+    };
+
+    Some(TransferResult::UnaryOp {
+        result: result.to_pseudocode("i"),
+        op: op_str.to_string(),
+        operand: operand.to_pseudocode("i"),
+    })
+}
+
+/// Result of a transfer function for pseudocode generation.
+#[derive(Clone, Debug)]
+pub enum TransferResult {
+    Assignment {
+        target: String,
+        source: String,
+    },
+    BinaryOp {
+        result: String,
+        left: String,
+        op: String,
+        right: String,
+    },
+    UnaryOp {
+        result: String,
+        op: String,
+        operand: String,
+    },
+    Push {
+        value: u64,
+    },
+    Dup {
+        source_pos: usize,
+        value: String,
+    },
+    Advice {
+        count: usize,
+    },
+    MemLoad {
+        address: String,
+    },
+    MemStore {
+        address: String,
+        value: String,
+    },
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Loop Analysis: Fixed-Point Computation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Result of analyzing a loop body.
+#[derive(Clone, Debug)]
+pub struct LoopAnalysis {
+    /// Minimum number of inputs required before the loop.
+    pub min_inputs_required: usize,
+
+    /// Net stack effect per iteration (negative = consuming, positive = producing).
+    pub net_effect_per_iteration: i32,
+
+    /// Total inputs needed for the entire loop (for bounded loops).
+    pub total_inputs_for_loop: Option<usize>,
+
+    /// Whether the loop body has consistent stack behavior.
+    pub is_consistent: bool,
+
+    /// Description of the loop's computation pattern.
+    pub pattern_description: Option<String>,
+
+    /// Failure reason if analysis failed.
+    pub failure_reason: Option<String>,
+}
+
+/// Analyze a repeat loop body to determine its stack effect.
+///
+/// This uses abstract interpretation with fixed-point computation to determine:
+/// - The minimum inputs required before the loop
+/// - The net stack effect per iteration
+/// - The total inputs needed for the entire loop
+pub fn analyze_repeat_loop(body: &Block, iteration_count: usize) -> LoopAnalysis {
+    // Phase 1: Discover inputs by running one iteration from empty state
+    let mut discovery_state = AbstractState::empty();
+    execute_block_abstract(body, &mut discovery_state);
+
+    if discovery_state.has_failed() {
+        return LoopAnalysis {
+            min_inputs_required: 0,
+            net_effect_per_iteration: 0,
+            total_inputs_for_loop: None,
+            is_consistent: false,
+            pattern_description: None,
+            failure_reason: discovery_state.failure_reason().map(String::from),
+        };
+    }
+
+    let discovered_inputs = discovery_state.inputs_discovered();
+    let _post_first_depth = discovery_state.depth();
+
+    // Phase 2: Run with discovered inputs to get stable behavior
+    let mut stable_state = AbstractState::new(discovered_inputs);
+    let pre_second_depth = stable_state.depth();
+    execute_block_abstract(body, &mut stable_state);
+    let post_second_depth = stable_state.depth();
+
+    // Calculate net effect from the stable iteration
+    let net_effect = post_second_depth as i32 - pre_second_depth as i32;
+
+    // Phase 3: Calculate total inputs needed for the full loop
+    let total_inputs = if net_effect < 0 {
+        // Consuming loop: needs more inputs for later iterations
+        // Each iteration consumes |net_effect| elements
+        // For N iterations, we need: initial_inputs + (N-1) * |net_effect|
+        // But we also need to account for what the first iteration discovers
+        let additional_per_iteration = (-net_effect) as usize;
+        discovered_inputs + (iteration_count - 1) * additional_per_iteration
+    } else {
+        // Producing or neutral loop: discovered inputs are sufficient
+        discovered_inputs
+    };
+
+    // Phase 4: Verify consistency by running two iterations from a fresh state
+    // with enough inputs to avoid discovering new inputs during verification.
+    // This gives us a clean comparison of net effects.
+    let verify_inputs = if net_effect < 0 {
+        // For consuming loops, we need enough inputs for 2 full iterations
+        discovered_inputs + 2 * ((-net_effect) as usize)
+    } else {
+        // For neutral/producing loops, discovered inputs are sufficient
+        discovered_inputs
+    };
+
+    let mut verify_state = AbstractState::new(verify_inputs);
+    let pre_verify1_depth = verify_state.depth();
+    execute_block_abstract(body, &mut verify_state);
+    let post_verify1_depth = verify_state.depth();
+    let verify1_effect = post_verify1_depth as i32 - pre_verify1_depth as i32;
+
+    let pre_verify2_depth = verify_state.depth();
+    execute_block_abstract(body, &mut verify_state);
+    let post_verify2_depth = verify_state.depth();
+    let verify2_effect = post_verify2_depth as i32 - pre_verify2_depth as i32;
+
+    // Consistent if both verification iterations have the same effect as our calculated net_effect
+    let is_consistent = verify1_effect == net_effect && verify2_effect == net_effect;
+
+    // Generate pattern description
+    let pattern_description = if is_consistent && net_effect != 0 {
+        Some(format!(
+            "Loop consumes {} element(s) per iteration",
+            -net_effect
+        ))
+    } else if is_consistent && net_effect == 0 {
+        Some("Loop preserves stack depth".to_string())
+    } else {
+        None
+    };
+
+    LoopAnalysis {
+        min_inputs_required: discovered_inputs,
+        net_effect_per_iteration: net_effect,
+        total_inputs_for_loop: Some(total_inputs),
+        is_consistent,
+        pattern_description,
+        failure_reason: None,
+    }
+}
+
+/// Analyze a while loop body.
+///
+/// For while loops, we can't determine the exact iteration count,
+/// so we analyze a single iteration to determine the stack effect pattern.
+///
+/// # While loop semantics in Miden
+///
+/// ```text
+/// while.true
+///     <body>        # Body must push a boolean condition
+/// end
+/// ```
+///
+/// - Entry: condition is on top of stack (consumed by while.true)
+/// - Body executes if condition was true
+/// - Body must push a new condition for the next iteration check
+/// - Loop exits when condition is false (condition is consumed, not replaced)
+///
+/// # Net effect calculation
+///
+/// The "useful" net effect is the stack change excluding the condition mechanics:
+/// - `body_effect = post_depth - pre_depth` (raw body effect)
+/// - `net_effect = body_effect - 1` (subtract the condition the body must push)
+///
+/// If net_effect == 0, the loop is "stack-neutral" (preserves depth after exit)
+/// If net_effect < 0, the loop consumes stack elements each iteration
+/// If net_effect > 0, the loop produces stack elements each iteration
+pub fn analyze_while_loop(body: &Block) -> LoopAnalysis {
+    // Phase 1: Discover inputs by running one iteration from empty state
+    let mut discovery_state = AbstractState::empty();
+    execute_block_abstract(body, &mut discovery_state);
+
+    if discovery_state.has_failed() {
+        return LoopAnalysis {
+            min_inputs_required: 0,
+            net_effect_per_iteration: 0,
+            total_inputs_for_loop: None,
+            is_consistent: false,
+            pattern_description: None,
+            failure_reason: discovery_state.failure_reason().map(String::from),
+        };
+    }
+
+    let discovered_inputs = discovery_state.inputs_discovered();
+
+    // Phase 2: Run with discovered inputs to get stable behavior
+    let mut stable_state = AbstractState::new(discovered_inputs);
+    let pre_depth = stable_state.depth();
+    execute_block_abstract(body, &mut stable_state);
+    let post_depth = stable_state.depth();
+
+    // Calculate raw body effect
+    let body_effect = post_depth as i32 - pre_depth as i32;
+
+    // The body should push exactly 1 element (the condition) for a well-formed while loop.
+    // The "useful" net effect excludes this condition:
+    // - If body_effect == 1, net_effect == 0 (stack-neutral)
+    // - If body_effect == 0, net_effect == -1 (consumes 1 element per iteration)
+    // - If body_effect == 2, net_effect == 1 (produces 1 element per iteration)
+    let net_effect = body_effect - 1;
+
+    // Generate pattern description
+    let pattern_description = if body_effect != 1 {
+        Some(format!(
+            "While body has unusual effect: {} (expected 1 for condition)",
+            body_effect
+        ))
+    } else {
+        Some("While loop is stack-neutral".to_string())
+    };
+
+    LoopAnalysis {
+        min_inputs_required: discovered_inputs,
+        net_effect_per_iteration: net_effect,
+        total_inputs_for_loop: None, // Unknown for while loops (depends on iteration count)
+        is_consistent: true,
+        pattern_description,
+        failure_reason: None,
+    }
+}
+
+/// Execute a block of operations on an abstract state.
+fn execute_block_abstract(block: &Block, state: &mut AbstractState) {
+    for op in block.iter() {
+        if state.has_failed() {
+            return;
+        }
+        execute_op_abstract(op, state);
+    }
+}
+
+/// Execute a single operation on an abstract state.
+fn execute_op_abstract(op: &Op, state: &mut AbstractState) {
+    match op {
+        Op::Inst(inst) => {
+            transfer_instruction(inst.inner(), state);
+        }
+        Op::If {
+            then_blk,
+            else_blk,
+            ..
+        } => {
+            // Pop condition
+            state.pop();
+
+            // For abstract interpretation, we need to join both branches
+            let entry_snapshot = state.snapshot();
+
+            // Execute then branch
+            execute_block_abstract(then_blk, state);
+            let then_snapshot = state.snapshot();
+
+            // Execute else branch from entry state
+            state.restore(&entry_snapshot);
+            if !else_blk.is_empty() {
+                execute_block_abstract(else_blk, state);
+            }
+
+            // Join the two exit states
+            // For simplicity, we just ensure depths match
+            let else_depth = state.depth();
+            let then_depth = then_snapshot.depth();
+
+            if else_depth != then_depth {
+                // Branches have different stack effects - lose precision
+                state.fail("if branches have different stack effects");
+            }
+        }
+        Op::While { body, .. } => {
+            // Pop initial condition
+            state.pop();
+
+            // For while loops inside other loops, analyze conservatively
+            let analysis = analyze_while_loop(body);
+
+            if analysis.net_effect_per_iteration != 0 {
+                // While loop modifies stack depth - be conservative
+                state.fail("nested while loop with non-zero stack effect");
+            } else {
+                // Execute once to update state
+                execute_block_abstract(body, state);
+                // Pop the condition that would be pushed at end
+                state.pop();
+            }
+        }
+        Op::Repeat { count, body, .. } => {
+            // For nested repeat loops, execute all iterations symbolically
+            // This is expensive but precise for bounded loops
+            for _ in 0..*count {
+                if state.has_failed() {
+                    return;
+                }
+                execute_block_abstract(body, state);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pre-analysis for Procedure Input Discovery
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Pre-analyze a procedure body to discover the total inputs needed.
+///
+/// This walks through the procedure, analyzing all loops to determine
+/// the maximum inputs that will be accessed.
+pub fn pre_analyze_procedure(body: &Block) -> ProcedureAnalysis {
+    let mut state = AbstractState::empty();
+    pre_analyze_block(body, &mut state);
+
+    ProcedureAnalysis {
+        total_inputs_required: state.inputs_discovered(),
+        has_dynamic_stack: state.has_failed(),
+        failure_reason: state.failure_reason().map(String::from),
+    }
+}
+
+/// Result of pre-analyzing a procedure.
+#[derive(Clone, Debug)]
+pub struct ProcedureAnalysis {
+    /// Total number of inputs the procedure will access.
+    pub total_inputs_required: usize,
+
+    /// Whether the procedure has dynamic stack effects (e.g., while loops).
+    pub has_dynamic_stack: bool,
+
+    /// Failure reason if pre-analysis failed.
+    pub failure_reason: Option<String>,
+}
+
+/// Pre-analyze a block to discover inputs.
+fn pre_analyze_block(block: &Block, state: &mut AbstractState) {
+    for op in block.iter() {
+        if state.has_failed() {
+            return;
+        }
+        pre_analyze_op(op, state);
+    }
+}
+
+/// Pre-analyze a single operation.
+fn pre_analyze_op(op: &Op, state: &mut AbstractState) {
+    match op {
+        Op::Inst(inst) => {
+            transfer_instruction(inst.inner(), state);
+        }
+        Op::If {
+            then_blk,
+            else_blk,
+            ..
+        } => {
+            state.pop(); // condition
+            let snapshot = state.snapshot();
+
+            pre_analyze_block(then_blk, state);
+            let then_inputs = state.inputs_discovered();
+
+            state.restore(&snapshot);
+            if !else_blk.is_empty() {
+                pre_analyze_block(else_blk, state);
+            }
+
+            // Take maximum of both branches
+            if then_inputs > state.inputs_discovered() {
+                // Force discovery of additional inputs
+                state.ensure_depth(state.depth() + (then_inputs - state.inputs_discovered()));
+            }
+        }
+        Op::While { body, .. } => {
+            state.pop(); // condition
+
+            // Analyze the while loop body
+            let analysis = analyze_while_loop(body);
+
+            // Execute once to update state
+            pre_analyze_block(body, state);
+            state.pop(); // condition at end
+
+            // If while loop has non-zero effect, mark as dynamic
+            if analysis.net_effect_per_iteration != 0 {
+                state.fail("while loop with variable stack effect");
+            }
+        }
+        Op::Repeat { count, body, .. } => {
+            // Analyze the repeat loop
+            let analysis = analyze_repeat_loop(body, *count as usize);
+
+            // Ensure we have enough inputs for the entire loop
+            if let Some(total) = analysis.total_inputs_for_loop {
+                state.ensure_depth(total);
+            }
+
+            // Execute the loop to update state properly
+            for _ in 0..*count {
+                if state.has_failed() {
+                    return;
+                }
+                pre_analyze_block(body, state);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_symbolic_expr_display() {
+        assert_eq!(SymbolicExpr::Input(0).to_string(), "a_0");
+        assert_eq!(SymbolicExpr::Input(5).to_string(), "a_5");
+        assert_eq!(SymbolicExpr::Constant(42).to_string(), "42");
+
+        let add = SymbolicExpr::binary(
+            BinaryOpKind::Add,
+            SymbolicExpr::Input(0),
+            SymbolicExpr::Input(5),
+        );
+        assert_eq!(add.to_string(), "a_0 + a_5");
+    }
+
+    #[test]
+    fn test_parametric_expr_display() {
+        // a_i
+        let expr = SymbolicExpr::parametric(0, 1, 0);
+        assert_eq!(expr.to_pseudocode("i"), "a_i");
+
+        // a_(5+i)
+        let expr = SymbolicExpr::parametric(5, 1, 0);
+        assert_eq!(expr.to_pseudocode("i"), "a_(5+i)");
+
+        // a_(i*2)
+        let expr = SymbolicExpr::parametric(0, 2, 0);
+        assert_eq!(expr.to_pseudocode("i"), "a_(i*2)");
+
+        // a_(3+i*2)
+        let expr = SymbolicExpr::parametric(3, 2, 0);
+        assert_eq!(expr.to_pseudocode("i"), "a_(3+i*2)");
+    }
+
+    #[test]
+    fn test_abstract_state_basic_ops() {
+        let mut state = AbstractState::new(3);
+        assert_eq!(state.depth(), 3);
+
+        // Stack should be [a_2, a_1, a_0] with a_0 on top
+        assert_eq!(state.peek(0).unwrap().as_input(), Some(0));
+        assert_eq!(state.peek(1).unwrap().as_input(), Some(1));
+        assert_eq!(state.peek(2).unwrap().as_input(), Some(2));
+
+        // Pop should return a_0
+        let popped = state.pop();
+        assert_eq!(popped.as_input(), Some(0));
+        assert_eq!(state.depth(), 2);
+
+        // Pop from empty should discover new input
+        state.pop();
+        state.pop();
+        let discovered = state.pop();
+        assert_eq!(discovered.as_input(), Some(3));
+        assert_eq!(state.inputs_discovered(), 4);
+    }
+
+    #[test]
+    fn test_abstract_state_movup() {
+        let mut state = AbstractState::new(6);
+        // Stack: [a_5, a_4, a_3, a_2, a_1, a_0] (a_0 on top)
+
+        state.movup(5);
+        // After movup.5: a_5 moves to top
+        // Stack: [a_4, a_3, a_2, a_1, a_0, a_5]
+
+        assert_eq!(state.peek(0).unwrap().as_input(), Some(5));
+        assert_eq!(state.peek(1).unwrap().as_input(), Some(0));
+    }
+
+    #[test]
+    fn test_abstract_state_movdn() {
+        let mut state = AbstractState::new(5);
+        // Stack: [a_4, a_3, a_2, a_1, a_0] (a_0 on top)
+
+        state.movdn(4);
+        // After movdn.4: a_0 moves to position 4
+        // Stack: [a_0, a_4, a_3, a_2, a_1]
+
+        assert_eq!(state.peek(0).unwrap().as_input(), Some(1));
+        assert_eq!(state.peek(4).unwrap().as_input(), Some(0));
+    }
+
+    #[test]
+    fn test_lift_to_parametric() {
+        let expr = SymbolicExpr::Input(3);
+        let lifted = expr.lift_to_parametric(-1, 0);
+
+        // a_3 with net_effect=-1 should become a_(3+i)
+        match lifted {
+            SymbolicExpr::ParametricInput {
+                base,
+                stride,
+                loop_depth,
+            } => {
+                assert_eq!(base, 3);
+                assert_eq!(stride, 1); // -(-1) = 1
+                assert_eq!(loop_depth, 0);
+            }
+            _ => panic!("Expected ParametricInput"),
+        }
+    }
+
+    #[test]
+    fn test_join_inputs() {
+        let a = SymbolicExpr::Input(0);
+        let b = SymbolicExpr::Input(1);
+
+        // True lattice join of different inputs should be Top (sound approximation)
+        let joined = a.join(&b);
+        assert!(joined.is_top(), "Join of different inputs should be Top, got {:?}", joined);
+
+        // Same inputs should join to themselves
+        let same_join = a.join(&a);
+        assert_eq!(same_join.as_input(), Some(0));
+    }
+
+    #[test]
+    fn test_infer_pattern() {
+        let a = SymbolicExpr::Input(0);
+        let b = SymbolicExpr::Input(1);
+
+        // Pattern inference can create a parametric pattern
+        let pattern = a.infer_pattern(&b, 0);
+        match pattern {
+            SymbolicExpr::ParametricInput { base, stride, .. } => {
+                assert_eq!(base, 0);
+                assert_eq!(stride, 1);
+            }
+            _ => panic!("Expected ParametricInput, got {:?}", pattern),
+        }
+    }
+}

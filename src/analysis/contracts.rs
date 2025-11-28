@@ -8,41 +8,17 @@ use std::ops::ControlFlow;
 
 use miden_assembly_syntax::ast::{
     visit::{self, Visit},
-    Block, Immediate, Instruction, InvocationTarget, Module, Op, Procedure,
+    Block, Instruction, InvocationTarget, Module, Op, Procedure,
 };
 use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned};
 use tower_lsp::lsp_types::{Position, Range};
 
 use crate::symbol_path::SymbolPath;
 
+use super::stack_ops::static_effect;
 use super::types::Bounds;
+use super::utils::push_imm_to_u64;
 use super::while_loops::infer_while_bound;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helper for extracting values from immediates
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Try to extract a u64 value from a push immediate.
-fn push_imm_to_u64(imm: &Immediate<miden_assembly_syntax::parser::PushValue>) -> Option<u64> {
-    use miden_assembly_syntax::parser::{IntValue, PushValue};
-
-    match imm {
-        Immediate::Value(span) => match span.inner() {
-            PushValue::Int(int_val) => {
-                let val = match int_val {
-                    IntValue::U8(v) => *v as u64,
-                    IntValue::U16(v) => *v as u64,
-                    IntValue::U32(v) => *v as u64,
-                    IntValue::Felt(f) => f.as_int(),
-                };
-                Some(val)
-            }
-            PushValue::Word(_) => None, // Word pushes multiple values, can't extract single u64
-        },
-        _ => None,
-    }
-}
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Signature Parsing
@@ -633,26 +609,43 @@ impl<'a> ProcedureAnalyzer<'a> {
             _ => {}
         }
 
-        // Track stack effects
+        // Track stack effects - handle special cases first, then use static_effect()
         match inst {
             // Procedure calls - handled via handle_procedure_call with transitive effects
             Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
                 self.handle_procedure_call(target);
+                return;
             }
 
-            // Push operations - also track bounds for while loop analysis
+            // Dynamic procedure calls - mark as unknown
+            Instruction::DynExec | Instruction::DynCall => {
+                self.apply_pop_push(4, 0);
+                self.unknown_effect = true;
+                return;
+            }
+
+            // STARK/complex operations - mark as unknown
+            Instruction::FriExt2Fold4 | Instruction::HornerBase | Instruction::HornerExt |
+            Instruction::EvalCircuit | Instruction::LogPrecompile | Instruction::SysEvent(_) => {
+                self.unknown_effect = true;
+                return;
+            }
+
+            // Push operations - need to track bounds for while loop analysis
             Instruction::Push(imm) => {
                 self.apply_stack_change(1);
                 let bounds = push_imm_to_u64(imm)
                     .map(Bounds::Const)
                     .unwrap_or(Bounds::Field);
                 self.push_bounds(bounds);
+                return;
             }
             Instruction::PushFeltList(values) => {
                 self.apply_stack_change(values.len() as i32);
                 for _ in values {
                     self.push_bounds(Bounds::Field);
                 }
+                return;
             }
             Instruction::AdvPush(n) => {
                 let count = match n {
@@ -663,446 +656,104 @@ impl<'a> ProcedureAnalyzer<'a> {
                 for _ in 0..count {
                     self.push_bounds(Bounds::Field);
                 }
+                return;
             }
             Instruction::AdvLoadW => {
-                self.apply_stack_change(0); // pops 4, pushes 4
+                // pops 4, pushes 4 - track bounds
                 for _ in 0..4 {
                     self.pop_bounds();
                 }
                 for _ in 0..4 {
                     self.push_bounds(Bounds::Field);
                 }
+                // Fall through to use static_effect for stack tracking
             }
             Instruction::AdvPipe => {
-                self.apply_stack_change(0); // pops 8, pushes 8
+                // pops 8, pushes 8 - track bounds
                 for _ in 0..8 {
                     self.pop_bounds();
                 }
                 for _ in 0..8 {
                     self.push_bounds(Bounds::Field);
                 }
+                // Fall through to use static_effect for stack tracking
             }
 
-            // Pop/drop operations
+            // Drop operations - need to pop bounds
             Instruction::Drop => {
                 self.apply_stack_change(-1);
                 self.pop_bounds();
+                return;
             }
             Instruction::DropW => {
                 self.apply_stack_change(-4);
                 for _ in 0..4 {
                     self.pop_bounds();
                 }
+                return;
             }
 
-            // Dup operations (push 1)
-            Instruction::Dup0 | Instruction::Dup1 | Instruction::Dup2 | Instruction::Dup3
-            | Instruction::Dup4 | Instruction::Dup5 | Instruction::Dup6 | Instruction::Dup7
-            | Instruction::Dup8 | Instruction::Dup9 | Instruction::Dup10 | Instruction::Dup11
-            | Instruction::Dup12 | Instruction::Dup13 | Instruction::Dup14 | Instruction::Dup15 => {
-                self.apply_stack_change(1);
-            }
-            Instruction::DupW0 | Instruction::DupW1 | Instruction::DupW2 | Instruction::DupW3 => {
-                self.apply_stack_change(4);
-            }
+            // All other instructions - use static_effect()
+            _ => {}
+        }
 
-            // Swap/move operations (no net change, but need elements on stack)
-            Instruction::Swap1 => self.require_stack_depth(2),
-            Instruction::Swap2 | Instruction::Swap3 | Instruction::Swap4
-            | Instruction::Swap5 | Instruction::Swap6 | Instruction::Swap7 | Instruction::Swap8
-            | Instruction::Swap9 | Instruction::Swap10 | Instruction::Swap11 | Instruction::Swap12
-            | Instruction::Swap13 | Instruction::Swap14 | Instruction::Swap15 => {
-                // SwapN needs N+1 elements on stack
-                let inst_str = inst.to_string();
-                if let Some(n) = inst_str.strip_prefix("swap.") {
-                    if let Ok(n) = n.parse::<i32>() {
-                        self.require_stack_depth(n + 1);
-                    }
+        // Use static_effect() for all remaining instructions
+        if let Some(effect) = static_effect(inst) {
+            let pops = effect.pops as i32;
+            let pushes = effect.pushes as i32;
+
+            if pops == 0 && pushes == 0 {
+                // No net effect, but might need stack depth for operations like swap
+                // Calculate required depth from instruction type
+                let required = self.get_required_depth(inst);
+                if required > 0 {
+                    self.require_stack_depth(required);
                 }
+            } else {
+                self.apply_pop_push(pops, pushes);
             }
+        }
+        // If static_effect returns None, it's a dynamic instruction we should have handled above
+    }
 
-            Instruction::MovUp2 => self.require_stack_depth(3),
-            Instruction::MovUp3 => self.require_stack_depth(4),
-            Instruction::MovUp4 => self.require_stack_depth(5),
-            Instruction::MovUp5 => self.require_stack_depth(6),
-            Instruction::MovUp6 => self.require_stack_depth(7),
-            Instruction::MovUp7 => self.require_stack_depth(8),
-            Instruction::MovUp8 => self.require_stack_depth(9),
-            Instruction::MovUp9 => self.require_stack_depth(10),
-            Instruction::MovUp10 => self.require_stack_depth(11),
-            Instruction::MovUp11 => self.require_stack_depth(12),
-            Instruction::MovUp12 => self.require_stack_depth(13),
-            Instruction::MovUp13 => self.require_stack_depth(14),
-            Instruction::MovUp14 => self.require_stack_depth(15),
-            Instruction::MovUp15 => self.require_stack_depth(16),
-
-            Instruction::MovDn2 => self.require_stack_depth(3),
-            Instruction::MovDn3 => self.require_stack_depth(4),
-            Instruction::MovDn4 => self.require_stack_depth(5),
-            Instruction::MovDn5 => self.require_stack_depth(6),
-            Instruction::MovDn6 => self.require_stack_depth(7),
-            Instruction::MovDn7 => self.require_stack_depth(8),
-            Instruction::MovDn8 => self.require_stack_depth(9),
-            Instruction::MovDn9 => self.require_stack_depth(10),
-            Instruction::MovDn10 => self.require_stack_depth(11),
-            Instruction::MovDn11 => self.require_stack_depth(12),
-            Instruction::MovDn12 => self.require_stack_depth(13),
-            Instruction::MovDn13 => self.require_stack_depth(14),
-            Instruction::MovDn14 => self.require_stack_depth(15),
-            Instruction::MovDn15 => self.require_stack_depth(16),
-
-            // Pad operations
-            Instruction::PadW => self.apply_stack_change(4),
-
-            // Binary arithmetic: pop 2, push 1
-            Instruction::Add | Instruction::Sub
-            | Instruction::Mul | Instruction::Div
-            | Instruction::Eq | Instruction::Neq
-            | Instruction::Lt | Instruction::Lte | Instruction::Gt | Instruction::Gte
-            | Instruction::And | Instruction::Or | Instruction::Xor => {
-                self.apply_pop_push(2, 1);
-            }
-
-            // Immediate arithmetic: pop 1, push 1 (operand from immediate)
-            Instruction::AddImm(_) | Instruction::SubImm(_)
-            | Instruction::MulImm(_) | Instruction::DivImm(_)
-            | Instruction::EqImm(_) | Instruction::NeqImm(_) => {
-                self.apply_pop_push(1, 1);
-            }
-
-            // Unary operations: pop 1, push 1
-            Instruction::Neg | Instruction::Inv | Instruction::Not | Instruction::IsOdd | Instruction::Incr => {
-                self.apply_pop_push(1, 1);
-            }
-
-            // Other math operations
-            Instruction::Exp => {
-                self.apply_pop_push(2, 1); // pop base + exp, push result
-            }
-            Instruction::ExpImm(_) | Instruction::ExpBitLength(_) => {
-                self.apply_pop_push(1, 1); // pop base, push result
-            }
-            Instruction::ILog2 | Instruction::Pow2 => {
-                self.apply_pop_push(1, 1);
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Memory operations - single element
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::MemLoad => {
-                self.apply_pop_push(1, 1); // pop addr, push value
-            }
-            Instruction::MemLoadImm(_) => {
-                self.apply_stack_change(1); // push value (addr from immediate)
-            }
-            Instruction::MemStore => {
-                self.apply_pop_push(2, 0); // pop addr + value
-            }
-            Instruction::MemStoreImm(_) => {
-                self.apply_pop_push(1, 0); // pop value (addr from immediate)
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Memory operations - word level (4 elements)
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
-                self.apply_pop_push(1, 4); // pop addr, push 4 values
-            }
-            Instruction::MemLoadWBeImm(_) | Instruction::MemLoadWLeImm(_) => {
-                self.apply_stack_change(4); // push 4 values (addr from immediate)
-            }
-            Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
-                self.apply_pop_push(5, 0); // pop addr + 4 values
-            }
-            Instruction::MemStoreWBeImm(_) | Instruction::MemStoreWLeImm(_) => {
-                self.apply_pop_push(4, 0); // pop 4 values (addr from immediate)
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Local memory operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::LocLoad(_) => {
-                self.apply_stack_change(1); // push 1 value
-            }
-            Instruction::LocLoadWBe(_) | Instruction::LocLoadWLe(_) => {
-                self.apply_stack_change(4); // push 4 values
-            }
-            Instruction::LocStore(_) => {
-                self.apply_pop_push(1, 0); // pop 1 value
-            }
-            Instruction::LocStoreWBe(_) | Instruction::LocStoreWLe(_) => {
-                self.apply_pop_push(4, 0); // pop 4 values
-            }
-            Instruction::Locaddr(_) => {
-                self.apply_stack_change(1); // push address
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Memory streaming
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::MemStream => {
-                self.apply_pop_push(12, 12); // pops 12, pushes 12
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Merkle operations - known stack effects
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::MTreeGet => {
-                // Stack: [d, i, R, ...] -> [V, R, ...]
-                // Pops depth + index (2), root word stays, pushes value word
-                // Net: pops 2, pushes 4 (value word replaces nothing, root stays)
-                // Actually: [d, i, R0, R1, R2, R3] -> [V0, V1, V2, V3, R0, R1, R2, R3]
-                // That's pop 2, push 4
-                self.apply_pop_push(2, 4);
-            }
-            Instruction::MTreeSet => {
-                // Stack: [d, i, R, V, ...] -> [R', V, ...]
-                // Pops d, i (2), keeps R (4), keeps V (4), pushes new R' (4)
-                // Net: pops 2, pushes 4 (new root)
-                self.apply_pop_push(2, 4);
-            }
-            Instruction::MTreeMerge => {
-                // Stack: [R, L, ...] -> [M, ...]
-                // Pops 8 (two words), pushes 4 (merged hash)
-                self.apply_pop_push(8, 4);
-            }
-            Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
-                // Stack: [d, i, R, V] -> [d, i, R, V] (unchanged, just verifies)
-                // No stack change
-                self.require_stack_depth(10); // needs d, i, R(4), V(4)
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Cryptographic operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Hash => {
-                self.apply_pop_push(4, 4); // pop word, push hash
-            }
-            Instruction::HMerge => {
-                self.apply_pop_push(8, 4); // pop 2 words, push merged hash
-            }
-            Instruction::HPerm => {
-                self.apply_pop_push(12, 12); // permutation on 12 elements
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Extension field operations (ext2 - 2 field elements per value)
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Ext2Add | Instruction::Ext2Sub | Instruction::Ext2Mul | Instruction::Ext2Div => {
-                self.apply_pop_push(4, 2); // pop 2 ext2 values (4 felts), push 1 ext2 (2 felts)
-            }
-            Instruction::Ext2Neg | Instruction::Ext2Inv => {
-                self.apply_pop_push(2, 2); // pop 1 ext2, push 1 ext2
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Conditional operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::CSwap => {
-                self.apply_pop_push(3, 2); // pop cond + 2 values, push 2 values
-            }
-            Instruction::CSwapW => {
-                self.apply_pop_push(9, 8); // pop cond + 2 words, push 2 words
-            }
-            Instruction::CDrop => {
-                self.apply_pop_push(3, 1); // pop cond + 2 values, push 1 value
-            }
-            Instruction::CDropW => {
-                self.apply_pop_push(9, 4); // pop cond + 2 words, push 1 word
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Assertion operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Assert | Instruction::AssertWithError(_) => {
-                self.apply_pop_push(1, 0); // pop condition
-            }
-            Instruction::AssertEq | Instruction::AssertEqWithError(_) => {
-                self.apply_pop_push(2, 0); // pop 2 values to compare
-            }
-            Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
-                self.apply_pop_push(8, 0); // pop 2 words to compare
-            }
-            Instruction::Assertz | Instruction::AssertzWithError(_) => {
-                self.apply_pop_push(1, 0); // pop value to check
-            }
-            Instruction::Eqw => {
-                self.apply_pop_push(8, 1); // pop 2 words, push bool
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Input/environment operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Sdepth => {
-                self.apply_stack_change(1); // push stack depth
-            }
-            Instruction::Caller => {
-                self.apply_stack_change(4); // push caller hash (4 elements)
-            }
-            Instruction::Clk => {
-                self.apply_stack_change(1); // push clock cycle
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Word-level stack manipulation
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::SwapW1 => self.require_stack_depth(8),
-            Instruction::SwapW2 => self.require_stack_depth(12),
-            Instruction::SwapW3 => self.require_stack_depth(16),
-            Instruction::SwapDw => self.require_stack_depth(16),
-
-            Instruction::MovUpW2 => self.require_stack_depth(12),
-            Instruction::MovUpW3 => self.require_stack_depth(16),
-            Instruction::MovDnW2 => self.require_stack_depth(12),
-            Instruction::MovDnW3 => self.require_stack_depth(16),
-
-            Instruction::Reversew => self.require_stack_depth(4),
-            Instruction::Reversedw => self.require_stack_depth(8),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Dynamic procedure calls
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::DynExec | Instruction::DynCall => {
-                // Pop target hash (4 elements), unknown effect after
-                self.apply_pop_push(4, 0);
-                self.unknown_effect = true;
-            }
-            Instruction::ProcRef(_) => {
-                self.apply_stack_change(4); // push procedure hash
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // u32 operations - explicit handling for each variant
-            // ─────────────────────────────────────────────────────────────────────
-
-            // u32 assertions - no stack change
-            Instruction::U32Assert | Instruction::U32AssertWithError(_) |
-            Instruction::U32Assert2 | Instruction::U32Assert2WithError(_) |
-            Instruction::U32AssertW | Instruction::U32AssertWWithError(_) => {
-                // No stack change, just validation
-            }
-
-            // u32 test - pushes bool without popping
-            Instruction::U32Test => {
-                self.apply_stack_change(1);
-            }
-            Instruction::U32TestW => {
-                self.apply_stack_change(1);
-            }
-
-            // u32 split/cast
-            Instruction::U32Split => {
-                self.apply_pop_push(1, 2); // pop 1 felt, push hi + lo
-            }
-            Instruction::U32Cast => {
-                self.apply_pop_push(1, 1); // pop 1, push truncated
-            }
-
-            // u32 wrapping binary ops: pop 2, push 1
-            Instruction::U32WrappingAdd | Instruction::U32WrappingSub | Instruction::U32WrappingMul => {
-                self.apply_pop_push(2, 1);
-            }
-            // u32 wrapping with immediate: pop 1, push 1
-            Instruction::U32WrappingAddImm(_) | Instruction::U32WrappingSubImm(_) | Instruction::U32WrappingMulImm(_) => {
-                self.apply_pop_push(1, 1);
-            }
-
-            // u32 overflowing binary ops: pop 2, push 2 (result + overflow flag)
-            Instruction::U32OverflowingAdd | Instruction::U32OverflowingSub | Instruction::U32OverflowingMul => {
-                self.apply_pop_push(2, 2);
-            }
-            // u32 overflowing with immediate: pop 1, push 2
-            Instruction::U32OverflowingAddImm(_) | Instruction::U32OverflowingSubImm(_) | Instruction::U32OverflowingMulImm(_) => {
-                self.apply_pop_push(1, 2);
-            }
-
-            // u32 ternary ops: pop 3
-            Instruction::U32OverflowingAdd3 => {
-                self.apply_pop_push(3, 2); // pop 3, push result + carry
-            }
-            Instruction::U32WrappingAdd3 => {
-                self.apply_pop_push(3, 1); // pop 3, push wrapped result
-            }
-            Instruction::U32OverflowingMadd => {
-                self.apply_pop_push(3, 2); // pop 3, push result + overflow
-            }
-            Instruction::U32WrappingMadd => {
-                self.apply_pop_push(3, 1); // pop 3, push wrapped result
-            }
-
-            // u32 division: pop 2, push 1
-            Instruction::U32Div | Instruction::U32Mod => {
-                self.apply_pop_push(2, 1);
-            }
-            // u32 division with immediate: pop 1, push 1
-            Instruction::U32DivImm(_) | Instruction::U32ModImm(_) => {
-                self.apply_pop_push(1, 1);
-            }
-            // u32 divmod: pop 2, push 2 (quotient + remainder)
-            Instruction::U32DivMod => {
-                self.apply_pop_push(2, 2);
-            }
-            Instruction::U32DivModImm(_) => {
-                self.apply_pop_push(1, 2);
-            }
-
-            // u32 bitwise binary: pop 2, push 1
-            Instruction::U32And | Instruction::U32Or | Instruction::U32Xor => {
-                self.apply_pop_push(2, 1);
-            }
-            // u32 bitwise not: pop 1, push 1
-            Instruction::U32Not => {
-                self.apply_pop_push(1, 1);
-            }
-
-            // u32 shift/rotate: pop 2, push 1
-            Instruction::U32Shl | Instruction::U32Shr | Instruction::U32Rotl | Instruction::U32Rotr => {
-                self.apply_pop_push(2, 1);
-            }
-            // u32 shift/rotate with immediate: pop 1, push 1
-            Instruction::U32ShlImm(_) | Instruction::U32ShrImm(_) |
-            Instruction::U32RotlImm(_) | Instruction::U32RotrImm(_) => {
-                self.apply_pop_push(1, 1);
-            }
-
-            // u32 bit counting: pop 1, push 1
-            Instruction::U32Popcnt | Instruction::U32Clz | Instruction::U32Ctz |
-            Instruction::U32Clo | Instruction::U32Cto => {
-                self.apply_pop_push(1, 1);
-            }
-
-            // u32 comparison: pop 2, push 1 (bool)
-            Instruction::U32Lt | Instruction::U32Lte | Instruction::U32Gt | Instruction::U32Gte => {
-                self.apply_pop_push(2, 1);
-            }
-
-            // u32 min/max: pop 2, push 1
-            Instruction::U32Min | Instruction::U32Max => {
-                self.apply_pop_push(2, 1);
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Push slice
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::PushSlice(_, range) => {
-                self.apply_stack_change(range.len() as i32);
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Debug/trace/nop - no stack effect
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Nop | Instruction::Breakpoint | Instruction::Debug(_) |
-            Instruction::Emit | Instruction::EmitImm(_) | Instruction::Trace(_) => {
-                // No stack effect
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // STARK/complex operations - mark as unknown
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::FriExt2Fold4 | Instruction::HornerBase | Instruction::HornerExt |
-            Instruction::EvalCircuit | Instruction::LogPrecompile | Instruction::SysEvent(_) => {
-                self.unknown_effect = true;
-            }
+    /// Get the required stack depth for swap/move operations that don't change stack size.
+    fn get_required_depth(&self, inst: &Instruction) -> i32 {
+        match inst {
+            Instruction::Swap1 => 2,
+            Instruction::Swap2 => 3,
+            Instruction::Swap3 => 4,
+            Instruction::Swap4 => 5,
+            Instruction::Swap5 => 6,
+            Instruction::Swap6 => 7,
+            Instruction::Swap7 => 8,
+            Instruction::Swap8 => 9,
+            Instruction::Swap9 => 10,
+            Instruction::Swap10 => 11,
+            Instruction::Swap11 => 12,
+            Instruction::Swap12 => 13,
+            Instruction::Swap13 => 14,
+            Instruction::Swap14 => 15,
+            Instruction::Swap15 => 16,
+            Instruction::MovUp2 | Instruction::MovDn2 => 3,
+            Instruction::MovUp3 | Instruction::MovDn3 => 4,
+            Instruction::MovUp4 | Instruction::MovDn4 => 5,
+            Instruction::MovUp5 | Instruction::MovDn5 => 6,
+            Instruction::MovUp6 | Instruction::MovDn6 => 7,
+            Instruction::MovUp7 | Instruction::MovDn7 => 8,
+            Instruction::MovUp8 | Instruction::MovDn8 => 9,
+            Instruction::MovUp9 | Instruction::MovDn9 => 10,
+            Instruction::MovUp10 | Instruction::MovDn10 => 11,
+            Instruction::MovUp11 | Instruction::MovDn11 => 12,
+            Instruction::MovUp12 | Instruction::MovDn12 => 13,
+            Instruction::MovUp13 | Instruction::MovDn13 => 14,
+            Instruction::MovUp14 | Instruction::MovDn14 => 15,
+            Instruction::MovUp15 | Instruction::MovDn15 => 16,
+            Instruction::SwapW1 => 8,
+            Instruction::SwapW2 | Instruction::MovUpW2 | Instruction::MovDnW2 => 12,
+            Instruction::SwapW3 | Instruction::SwapDw | Instruction::MovUpW3 | Instruction::MovDnW3 => 16,
+            Instruction::Reversew => 4,
+            Instruction::Reversedw => 8,
+            _ => 0,
         }
     }
 }
