@@ -1,7 +1,7 @@
 pub mod analysis;
 pub mod client;
+pub mod decompiler;
 pub mod diagnostics;
-pub mod disassembler;
 pub mod index;
 pub mod inlay_hints;
 pub mod instruction_hints;
@@ -20,9 +20,9 @@ pub use symbol_path::SymbolPath;
 pub enum InlayHintType {
     /// Show instruction descriptions.
     Description,
-    /// Show disassembly pseudocode (default behavior).
+    /// Show decompiled pseudocode (default behavior).
     #[default]
-    Disassembly,
+    Decompilation,
     /// Disable inlay hints.
     None,
 }
@@ -58,8 +58,8 @@ impl Default for ServerConfig {
             instruction_hovers_enabled: false,
             // Taint analysis is enabled by default.
             taint_analysis_enabled: true,
-            // Disassembly hints are shown by default.
-            inlay_hint_type: InlayHintType::Disassembly,
+            // Decompilation hints are shown by default.
+            inlay_hint_type: InlayHintType::Decompilation,
         }
     }
 }
@@ -121,7 +121,7 @@ impl ServerConfigBuilder {
             library_paths: self.library_paths.unwrap_or_else(default_library_paths),
             instruction_hovers_enabled: self.instruction_hovers_enabled.unwrap_or(false),
             taint_analysis_enabled: self.taint_analysis_enabled.unwrap_or(true),
-            inlay_hint_type: self.inlay_hint_type.unwrap_or(InlayHintType::Disassembly),
+            inlay_hint_type: self.inlay_hint_type.unwrap_or(InlayHintType::Decompilation),
         }
     }
 }

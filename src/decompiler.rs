@@ -1,4 +1,4 @@
-//! Disassembler for generating pseudocode from Miden assembly.
+//! Decompiler for generating pseudocode from Miden assembly.
 //!
 //! This module converts Miden assembly instructions into readable pseudocode
 //! by tracking a symbolic stack with named variables.
@@ -26,12 +26,35 @@ struct NamedValue {
     name: String,
 }
 
-/// State for disassembling a procedure.
+/// Saved stack state for control flow merge points.
+#[derive(Clone, Debug)]
+struct SavedStackState {
+    /// The stack contents at the save point
+    stack: Vec<NamedValue>,
+    /// The next_var_id at the save point
+    next_var_id: usize,
+    /// The next_input_id at the save point
+    next_input_id: usize,
+}
+
+/// Information about an active loop for counter-indexed variable access.
+#[derive(Clone, Debug)]
+struct LoopContext {
+    /// The counter variable name (c1, c2, etc.)
+    counter: String,
+    /// Net stack effect per iteration (negative = consuming, positive = producing)
+    /// None if not yet determined (still in first pass of body)
+    net_effect: Option<i32>,
+    /// Stack depth at loop entry (after condition pop for while loops)
+    entry_depth: usize,
+}
+
+/// State for decompiling a procedure.
 ///
 /// Supports dynamic input discovery: when an operation tries to access a stack
 /// position that doesn't exist, a new input variable is automatically created.
 #[derive(Debug)]
-struct DisassemblerState {
+struct DecompilerState {
     /// The symbolic stack with named values
     stack: Vec<NamedValue>,
     /// Counter for generating variable names (v1, v2, ...)
@@ -47,46 +70,136 @@ struct DisassemblerState {
     failure_span: Option<SourceSpan>,
     /// The reason tracking failed
     failure_reason: Option<String>,
+    /// Counter for generating loop counter names (c1, c2, ...)
+    next_counter_id: usize,
+    /// Stack of active loop contexts (for nested loops)
+    loop_contexts: Vec<LoopContext>,
+    /// Span of a loop that produced a dynamic/unknown number of stack items.
+    /// When set, subsequent loops with non-zero net effect cannot be decompiled
+    /// because we don't know the exact stack contents.
+    dynamic_stack_source: Option<SourceSpan>,
 }
 
-impl DisassemblerState {
+/// Loop counter names in order of nesting depth.
+const LOOP_COUNTER_NAMES: &[&str] = &["i", "j", "k", "l", "m", "n", "o", "p", "q"];
+
+impl DecompilerState {
     /// Create a new state with procedure inputs on the stack.
     fn new(input_count: usize) -> Self {
         let mut stack = Vec::new();
-        // Push inputs in reverse order so a1 is on top after all pushes
-        // Actually, inputs are already on stack with a1 at top (position 0)
-        // So we push them in order: aN first (bottom), then ... a2, a1 (top)
-        for i in (1..=input_count).rev() {
+        // Push inputs in reverse order so a_0 is on top after all pushes
+        // Inputs are on stack with a_0 at top (position 0)
+        // So we push them in order: a_(N-1) first (bottom), then ... a_1, a_0 (top)
+        for i in (0..input_count).rev() {
             stack.push(NamedValue {
-                name: format!("a{}", i),
+                name: format!("a_{}", i),
             });
         }
         Self {
             stack,
-            next_var_id: 1,
-            next_input_id: input_count + 1,
+            next_var_id: 0,
+            next_input_id: input_count,
             initial_input_count: input_count,
             tracking_failed: false,
             failure_span: None,
             failure_reason: None,
+            next_counter_id: 0,
+            loop_contexts: Vec::new(),
+            dynamic_stack_source: None,
         }
+    }
+
+    /// Generate a new loop counter name (i, j, k, ...).
+    fn new_counter(&mut self) -> String {
+        let name = if self.next_counter_id < LOOP_COUNTER_NAMES.len() {
+            LOOP_COUNTER_NAMES[self.next_counter_id].to_string()
+        } else {
+            // Fallback for deeply nested loops
+            format!("i{}", self.next_counter_id - LOOP_COUNTER_NAMES.len())
+        };
+        self.next_counter_id += 1;
+        name
+    }
+
+    /// Push a new loop context onto the stack.
+    fn push_loop_context(&mut self, counter: String, net_effect: Option<i32>) {
+        self.loop_contexts.push(LoopContext {
+            counter,
+            net_effect,
+            entry_depth: self.stack.len(),
+        });
+    }
+
+    /// Pop the current loop context.
+    fn pop_loop_context(&mut self) -> Option<LoopContext> {
+        self.loop_contexts.pop()
+    }
+
+    /// Get the current innermost loop context, if any.
+    fn current_loop(&self) -> Option<&LoopContext> {
+        self.loop_contexts.last()
+    }
+
+    /// Check if we're inside a loop that needs counter-indexed variables.
+    /// This is true when the loop has a non-zero net stack effect per iteration.
+    fn needs_counter_indexing(&self) -> bool {
+        self.loop_contexts.last()
+            .and_then(|ctx| ctx.net_effect)
+            .map(|effect| effect != 0)
+            .unwrap_or(false)
+    }
+
+    /// Format a variable name with counter indexing if needed.
+    /// For variables inside counter-indexed loops, shows the position relative to loop entry
+    /// with the counter offset.
+    fn format_indexed_var(&self, base_name: &str, position_from_top: usize) -> String {
+        if let Some(ctx) = self.current_loop() {
+            if let Some(net_effect) = ctx.net_effect {
+                if net_effect != 0 {
+                    // Extract the numeric part from the base name (e.g., "a1" -> 1)
+                    if let Some(num_str) = base_name.strip_prefix('a') {
+                        if let Ok(num) = num_str.parse::<i32>() {
+                            // For consuming loops (negative effect), positions shift
+                            // Position from top at iteration c is: original_pos + c * |effect|
+                            if net_effect < 0 {
+                                let effect_abs = (-net_effect) as i32;
+                                if effect_abs == 1 {
+                                    return format!("a({}+{})", num, ctx.counter);
+                                } else {
+                                    return format!("a({}+{}*{})", num, ctx.counter, effect_abs);
+                                }
+                            } else {
+                                // For producing loops, positions shift the other way
+                                let effect = net_effect as i32;
+                                if effect == 1 {
+                                    return format!("a({}-{})", num, ctx.counter);
+                                } else {
+                                    return format!("a({}-{}*{})", num, ctx.counter, effect);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        base_name.to_string()
     }
 
     /// Get the total number of inputs discovered (initial + dynamically discovered).
     fn total_inputs(&self) -> usize {
-        self.next_input_id - 1
+        self.next_input_id
     }
 
-    /// Generate a new variable name.
+    /// Generate a new variable name (v_0, v_1, ...).
     fn new_var(&mut self) -> String {
-        let name = format!("v{}", self.next_var_id);
+        let name = format!("v_{}", self.next_var_id);
         self.next_var_id += 1;
         name
     }
 
     /// Generate a new input variable name (for dynamic discovery).
     fn new_input(&mut self) -> String {
-        let name = format!("a{}", self.next_input_id);
+        let name = format!("a_{}", self.next_input_id);
         self.next_input_id += 1;
         name
     }
@@ -227,6 +340,56 @@ impl DisassemblerState {
         }
         self.stack.clear();
     }
+
+    /// Save the current stack state for later restoration or comparison.
+    fn save_state(&self) -> SavedStackState {
+        SavedStackState {
+            stack: self.stack.clone(),
+            next_var_id: self.next_var_id,
+            next_input_id: self.next_input_id,
+        }
+    }
+
+    /// Restore state from a saved snapshot.
+    fn restore_state(&mut self, saved: &SavedStackState) {
+        self.stack = saved.stack.clone();
+        // Note: we intentionally DON'T restore next_var_id and next_input_id
+        // because we want variable names to remain unique across branches
+    }
+
+    /// Get a mapping from current variable names to saved variable names at corresponding positions.
+    ///
+    /// This is used at control flow merge points to rename variables so that
+    /// the same stack positions have consistent names.
+    ///
+    /// Returns a list of (current_name, target_name) pairs for variables that need renaming.
+    fn get_rename_map(&self, saved: &SavedStackState) -> Vec<(String, String)> {
+        let mut renames = Vec::new();
+        let min_len = self.stack.len().min(saved.stack.len());
+
+        // Compare positions from bottom of stack (oldest values) to top (newest)
+        // Position 0 in the Vec is the bottom of the stack
+        for i in 0..min_len {
+            let current_name = &self.stack[i].name;
+            let saved_name = &saved.stack[i].name;
+            if current_name != saved_name {
+                renames.push((current_name.clone(), saved_name.clone()));
+            }
+        }
+        renames
+    }
+
+    /// Apply a rename map to the current stack state.
+    fn apply_renames(&mut self, renames: &[(String, String)]) {
+        for value in &mut self.stack {
+            for (from, to) in renames {
+                if &value.name == from {
+                    value.name = to.clone();
+                    break;
+                }
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -239,7 +402,7 @@ impl DisassemblerState {
 /// or `None` for instructions that just manipulate the stack.
 fn generate_pseudocode(
     inst: &Instruction,
-    state: &mut DisassemblerState,
+    state: &mut DecompilerState,
     span: SourceSpan,
     contracts: Option<&ContractStore>,
 ) -> Option<String> {
@@ -1139,14 +1302,14 @@ fn generate_pseudocode(
 // Helper functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn dup_pseudocode(state: &mut DisassemblerState, n: usize) -> Option<String> {
+fn dup_pseudocode(state: &mut DecompilerState, n: usize) -> Option<String> {
     let src_name = state.dup(n);
     let var = state.new_var();
     state.push(var.clone());
     Some(format!("{} = {}", var, src_name))
 }
 
-fn dupw_pseudocode(state: &mut DisassemblerState, word_idx: usize) -> Option<String> {
+fn dupw_pseudocode(state: &mut DecompilerState, word_idx: usize) -> Option<String> {
     // DupW duplicates a word (4 elements) at word position word_idx
     // Word 0 = positions 0-3, Word 1 = positions 4-7, etc.
     let base = word_idx * 4;
@@ -1171,7 +1334,7 @@ fn dupw_pseudocode(state: &mut DisassemblerState, word_idx: usize) -> Option<Str
     ))
 }
 
-fn binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
+fn binary_op_pseudocode(state: &mut DecompilerState, op: &str) -> Option<String> {
     let b = state.pop();
     let a = state.pop();
     let var = state.new_var();
@@ -1179,7 +1342,7 @@ fn binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<Strin
     Some(format!("{} = {} {} {}", var, a, op, b))
 }
 
-fn binary_imm_op_pseudocode(state: &mut DisassemblerState, op: &str, imm: String) -> Option<String> {
+fn binary_imm_op_pseudocode(state: &mut DecompilerState, op: &str, imm: String) -> Option<String> {
     let a = state.pop();
     let var = state.new_var();
     state.push(var.clone());
@@ -1187,7 +1350,7 @@ fn binary_imm_op_pseudocode(state: &mut DisassemblerState, op: &str, imm: String
 }
 
 /// Like binary_op_pseudocode but wraps the expression in parentheses for boolean comparisons.
-fn comparison_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
+fn comparison_pseudocode(state: &mut DecompilerState, op: &str) -> Option<String> {
     let b = state.pop();
     let a = state.pop();
     let var = state.new_var();
@@ -1196,21 +1359,21 @@ fn comparison_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<Stri
 }
 
 /// Like binary_imm_op_pseudocode but wraps the expression in parentheses for boolean comparisons.
-fn comparison_imm_pseudocode(state: &mut DisassemblerState, op: &str, imm: String) -> Option<String> {
+fn comparison_imm_pseudocode(state: &mut DecompilerState, op: &str, imm: String) -> Option<String> {
     let a = state.pop();
     let var = state.new_var();
     state.push(var.clone());
     Some(format!("{} = ({} {} {})", var, a, op, imm))
 }
 
-fn unary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
+fn unary_op_pseudocode(state: &mut DecompilerState, op: &str) -> Option<String> {
     let a = state.pop();
     let var = state.new_var();
     state.push(var.clone());
     Some(format!("{} = {}{}", var, op, a))
 }
 
-fn unary_fn_pseudocode(state: &mut DisassemblerState, fn_name: &str) -> Option<String> {
+fn unary_fn_pseudocode(state: &mut DecompilerState, fn_name: &str) -> Option<String> {
     let a = state.pop();
     let var = state.new_var();
     state.push(var.clone());
@@ -1218,7 +1381,7 @@ fn unary_fn_pseudocode(state: &mut DisassemblerState, fn_name: &str) -> Option<S
 }
 
 // Extension field (ext2) operations - work on 2-element values
-fn ext2_binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
+fn ext2_binary_op_pseudocode(state: &mut DecompilerState, op: &str) -> Option<String> {
     // Pop 4 elements (2 ext2 values), push 2 (1 ext2 result)
     let b1 = state.pop();
     let b0 = state.pop();
@@ -1231,7 +1394,7 @@ fn ext2_binary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<
     Some(format!("({}, {}) = ({}, {}) {} ({}, {})", var0, var1, a0, a1, op, b0, b1))
 }
 
-fn ext2_unary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<String> {
+fn ext2_unary_op_pseudocode(state: &mut DecompilerState, op: &str) -> Option<String> {
     // Pop 2, push 2
     let a1 = state.pop();
     let a0 = state.pop();
@@ -1242,7 +1405,7 @@ fn ext2_unary_op_pseudocode(state: &mut DisassemblerState, op: &str) -> Option<S
     Some(format!("({}, {}) = {}({}, {})", var0, var1, op, a0, a1))
 }
 
-fn ext2_unary_fn_pseudocode(state: &mut DisassemblerState, fn_name: &str) -> Option<String> {
+fn ext2_unary_fn_pseudocode(state: &mut DecompilerState, fn_name: &str) -> Option<String> {
     // Pop 2, push 2
     let a1 = state.pop();
     let a0 = state.pop();
@@ -1285,17 +1448,17 @@ fn format_invocation_target(target: &InvocationTarget) -> String {
 ///
 /// Examples:
 /// - `proc foo()` - no inputs, unknown outputs
-/// - `pub proc foo(a1, a2)` - 2 inputs, unknown outputs
-/// - `export.bar(a1, a2) -> r1` - 2 inputs, 1 output
-/// - `proc foo(a1) -> r1, r2, r3` - 1 input, 3 outputs
+/// - `pub proc foo(a_0, a_1)` - 2 inputs, unknown outputs
+/// - `export.bar(a_0, a_1) -> r_0` - 2 inputs, 1 output
+/// - `proc foo(a_0) -> r_0, r_1, r_2` - 1 input, 3 outputs
 fn format_procedure_signature(
     prefix: &str,
     name: &str,
     inputs: usize,
     outputs: Option<usize>,
 ) -> String {
-    // Format input arguments: a1, a2, a3, ...
-    let args: Vec<String> = (1..=inputs).map(|i| format!("a{}", i)).collect();
+    // Format input arguments: a_0, a_1, a_2, ... (0-indexed)
+    let args: Vec<String> = (0..inputs).map(|i| format!("a_{}", i)).collect();
     let args_str = args.join(", ");
 
     // Build the full signature with prefix
@@ -1305,11 +1468,11 @@ fn format_procedure_signature(
         format!("{} {}", prefix, name)
     };
 
-    // Format return values: r1, r2, r3, ...
+    // Format return values: r_0, r_1, r_2, ... (0-indexed)
     match outputs {
         Some(0) => format!("{}({})", full_name, args_str),
         Some(n) => {
-            let returns: Vec<String> = (1..=n).map(|i| format!("r{}", i)).collect();
+            let returns: Vec<String> = (0..n).map(|i| format!("r_{}", i)).collect();
             format!("{}({}) -> {}", full_name, args_str, returns.join(", "))
         }
         None => {
@@ -1398,14 +1561,93 @@ fn lookup_contract_for_target<'a>(
     }
 }
 
+/// Apply counter indexing to input variables in a hint string.
+///
+/// For loops with non-zero net stack effect, input variable references like `a_0`, `a_1`
+/// need to be converted to indexed form like `a_(0+i)`, `a_(1+i)` to show that
+/// different iterations access different stack positions.
+///
+/// `net_effect` is the per-iteration change: negative means consuming, positive means producing.
+fn apply_counter_indexing(text: &str, counter: &str, net_effect: i32) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // Look for 'a_' followed by digits (input variable pattern: a_0, a_1, etc.)
+        if chars[i] == 'a' && i + 2 < chars.len() && chars[i + 1] == '_' && chars[i + 2].is_ascii_digit() {
+            // Check that this is a word boundary (not part of a larger identifier)
+            let before_ok = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+
+            if before_ok {
+                // Parse the number following 'a_'
+                let num_start = i + 2;
+                let mut num_end = num_start;
+                while num_end < chars.len() && chars[num_end].is_ascii_digit() {
+                    num_end += 1;
+                }
+
+                // Check word boundary after the number (must not be followed by alphanumeric)
+                let after_ok = num_end >= chars.len()
+                    || (!chars[num_end].is_alphanumeric());
+
+                if after_ok {
+                    let num_str: String = chars[num_start..num_end].iter().collect();
+                    if let Ok(num) = num_str.parse::<i32>() {
+                        // Generate indexed form using a_(...) notation
+                        // Simplify when base is 0: a_(0+i) -> a_i
+                        let indexed = if net_effect < 0 {
+                            // Consuming loop: positions shift forward each iteration
+                            let effect_abs = -net_effect;
+                            if num == 0 {
+                                // Simplify: a_(0+i) -> a_i, a_(0+i*2) -> a_(i*2)
+                                if effect_abs == 1 {
+                                    format!("a_{}", counter)
+                                } else {
+                                    format!("a_({}*{})", counter, effect_abs)
+                                }
+                            } else if effect_abs == 1 {
+                                format!("a_({}+{})", num, counter)
+                            } else {
+                                format!("a_({}+{}*{})", num, counter, effect_abs)
+                            }
+                        } else {
+                            // Producing loop: positions shift backward each iteration
+                            if num == 0 {
+                                // Simplify: a_(0-i) -> a_(-i)
+                                if net_effect == 1 {
+                                    format!("a_(-{})", counter)
+                                } else {
+                                    format!("a_(-{}*{})", counter, net_effect)
+                                }
+                            } else if net_effect == 1 {
+                                format!("a_({}-{})", num, counter)
+                            } else {
+                                format!("a_({}-{}*{})", num, counter, net_effect)
+                            }
+                        };
+                        result.push_str(&indexed);
+                        i = num_end;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Hint Collection
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Data for a procedure being disassembled.
+/// Data for a procedure being decompiled.
 #[allow(dead_code)]
-struct ProcedureDisassembly {
-    /// The procedure being disassembled
+struct ProcedureDecompilation {
+    /// The procedure being decompiled
     name: String,
     /// Number of inputs to the procedure
     input_count: usize,
@@ -1419,12 +1661,12 @@ struct TrackingFailure {
 }
 
 /// Collector that visits procedures and instructions.
-struct DisassemblyCollector<'a> {
+struct DecompilationCollector<'a> {
     /// Current procedure context
     #[allow(dead_code)]
-    current_proc: Option<ProcedureDisassembly>,
-    /// Current disassembler state
-    state: Option<DisassemblerState>,
+    current_proc: Option<ProcedureDecompilation>,
+    /// Current decompiler state
+    state: Option<DecompilerState>,
     /// Collected hints: (line, hint_text)
     hints: Vec<(u32, String)>,
     /// Index of the first hint for the current procedure (for renaming returns)
@@ -1445,7 +1687,7 @@ struct DisassemblyCollector<'a> {
     indent_level: usize,
 }
 
-impl<'a> DisassemblyCollector<'a> {
+impl<'a> DecompilationCollector<'a> {
     fn new(
         sources: &'a DefaultSourceManager,
         contracts: Option<&'a ContractStore>,
@@ -1498,10 +1740,13 @@ impl<'a> DisassemblyCollector<'a> {
                     .map(|v| v.name.clone())
                     .unwrap_or_else(|| "?".to_string());
 
-                // Pop the condition from the stack
-                if let Some(ref mut state) = self.state {
+                // Pop the condition from the stack and save state for else branch
+                let entry_state = if let Some(ref mut state) = self.state {
                     state.stack.pop();
-                }
+                    Some(state.save_state())
+                } else {
+                    None
+                };
 
                 // Generate hint for "if.true" with condition
                 if let Some(range) = span_to_range(self.sources, op.span()) {
@@ -1509,10 +1754,16 @@ impl<'a> DisassemblyCollector<'a> {
                     self.hints.push((range.start.line, hint));
                 }
 
+                // Track where then-branch hints start for potential renaming
+                let _then_hint_start = self.hints.len();
+
                 // Visit then block with increased indent
                 self.indent_level += 1;
                 self.visit_block(then_blk);
                 self.indent_level -= 1;
+
+                // Save then-branch exit state for merge
+                let then_exit_state = self.state.as_ref().map(|s| s.save_state());
 
                 // Generate hint for "else" if else block is non-empty
                 if !else_blk.is_empty() {
@@ -1523,9 +1774,36 @@ impl<'a> DisassemblyCollector<'a> {
                         self.hints.push((else_line, hint));
                     }
 
+                    // Restore entry state for else branch (crucial fix!)
+                    if let (Some(ref mut state), Some(ref saved)) = (&mut self.state, &entry_state) {
+                        state.restore_state(saved);
+                    }
+
+                    // Track where else-branch hints start for potential renaming
+                    let else_hint_start = self.hints.len();
+
                     self.indent_level += 1;
                     self.visit_block(else_blk);
                     self.indent_level -= 1;
+
+                    // At merge point: rename else-branch variables to match then-branch positions
+                    // This ensures consistent variable names after the if/else
+                    if let (Some(ref mut state), Some(ref then_state)) = (&mut self.state, &then_exit_state) {
+                        let renames = state.get_rename_map(then_state);
+                        if !renames.is_empty() {
+                            // Apply renames to else-branch hints
+                            for hint in &mut self.hints[else_hint_start..] {
+                                for (from, to) in &renames {
+                                    hint.1 = rename_variable(&hint.1, from, to);
+                                }
+                            }
+                            // Update state to use the then-branch variable names
+                            state.apply_renames(&renames);
+                        }
+                    }
+                } else {
+                    // No else branch - restore then-branch exit state as the merge state
+                    // (it's already there, but if we had modified state we'd need this)
                 }
 
                 // Generate hint for "end"
@@ -1536,22 +1814,100 @@ impl<'a> DisassemblyCollector<'a> {
             }
             Op::While { body, .. } => {
                 // Get condition variable from top of stack
-                // Note: while.true checks condition each iteration, we show the current top
+                // while.true checks and CONSUMES the condition each iteration
                 let condition = self.state.as_ref()
                     .and_then(|s| s.stack.last())
                     .map(|v| v.name.clone())
                     .unwrap_or_else(|| "?".to_string());
 
-                // Generate hint for "while.true" with condition
+                // Save the loop entry state (with condition on top)
+                // This represents the expected stack shape at each iteration start
+                let loop_entry_state = self.state.as_ref().map(|s| s.save_state());
+
+                // Pop the condition from the stack (while.true consumes it)
+                // and record entry depth (after condition pop) for net effect calculation
+                let entry_depth = if let Some(ref mut state) = self.state {
+                    state.stack.pop();
+                    state.stack.len()
+                } else {
+                    0
+                };
+
+                // Track where while loop hint will be (index for potential modification)
+                let while_hint_idx = self.hints.len();
+
+                // Generate hint for "while.true" with condition (may be updated later with counter init)
                 if let Some(range) = span_to_range(self.sources, op.span()) {
                     let hint = format!("{}while {}:", self.indent(), condition);
                     self.hints.push((range.start.line, hint));
                 }
 
+                // Track where loop body hints start for potential modification
+                let loop_body_hint_start = self.hints.len();
+
                 // Visit body with increased indent
                 self.indent_level += 1;
                 self.visit_block(body);
                 self.indent_level -= 1;
+
+                // Calculate net stack effect per iteration
+                // Note: at loop end, there's a new condition on top, so we compare to entry_depth + 1
+                let exit_depth = self.state.as_ref().map(|s| s.stack.len()).unwrap_or(0);
+                let net_effect = exit_depth as i32 - (entry_depth as i32 + 1); // +1 for the new condition
+
+                if net_effect != 0 {
+                    // Check if a previous loop produced dynamic stack content
+                    // If so, we can't reliably decompile this loop
+                    if let Some(ref state) = self.state {
+                        if state.dynamic_stack_source.is_some() {
+                            // Fail decompilation - we have dynamic stack content from a previous loop
+                            if let Some(ref mut state) = self.state {
+                                state.fail_tracking(
+                                    op.span(),
+                                    "loop with variable iteration count preceded by another loop that modified stack size"
+                                );
+                            }
+                            // Remove hints generated for this loop
+                            self.hints.truncate(while_hint_idx);
+                            return;
+                        }
+                    }
+
+                    // Non-zero net effect: stack positions shift each iteration
+                    // Generate a counter and apply indexing
+                    let counter = self.state.as_mut().map(|s| s.new_counter()).unwrap_or_else(|| "i".to_string());
+
+                    // Update the while hint to include counter initialization
+                    // Format: "while i = 0; condition:" instead of separate "i = 0" line
+                    if while_hint_idx < self.hints.len() {
+                        self.hints[while_hint_idx].1 = format!("{}while {} = 0; {}:", self.indent(), counter, condition);
+                    }
+
+                    // Apply counter indexing to input variable references in loop body
+                    for hint in &mut self.hints[loop_body_hint_start..] {
+                        hint.1 = apply_counter_indexing(&hint.1, &counter, net_effect);
+                    }
+
+                    // Mark stack as dynamic for subsequent loops
+                    if let Some(ref mut state) = self.state {
+                        state.dynamic_stack_source = Some(op.span());
+                    }
+                } else {
+                    // Zero net effect: stack shape is preserved, use renaming for consistency
+                    if let (Some(ref mut state), Some(ref entry_state)) = (&mut self.state, &loop_entry_state) {
+                        let renames = state.get_rename_map(entry_state);
+                        if !renames.is_empty() {
+                            // Apply renames to all hints generated in the loop body
+                            for hint in &mut self.hints[loop_body_hint_start..] {
+                                for (from, to) in &renames {
+                                    hint.1 = rename_variable(&hint.1, from, to);
+                                }
+                            }
+                            // Update state to use the entry variable names
+                            state.apply_renames(&renames);
+                        }
+                    }
+                }
 
                 // Generate hint for "end"
                 if let Some(range) = span_to_range(self.sources, op.span()) {
@@ -1560,16 +1916,78 @@ impl<'a> DisassemblyCollector<'a> {
                 }
             }
             Op::Repeat { count, body, .. } => {
-                // Generate hint for "repeat.N"
+                // Track where repeat loop hint will be (index for potential removal on failure)
+                let repeat_hint_idx = self.hints.len();
+
+                // Generate a loop counter for this repeat loop
+                let counter = self.state.as_mut().map(|s| s.new_counter()).unwrap_or_else(|| "i".to_string());
+
+                // Save the loop entry state for calculating net effect
+                let loop_entry_state = self.state.as_ref().map(|s| s.save_state());
+                let entry_depth = self.state.as_ref().map(|s| s.stack.len()).unwrap_or(0);
+
+                // Generate hint for "for c in 0..N:" (replaces "repeat N times:")
                 if let Some(range) = span_to_range(self.sources, op.span()) {
-                    let hint = format!("{}repeat {} times:", self.indent(), count);
+                    let hint = format!("{}for {} in 0..{}:", self.indent(), counter, count);
                     self.hints.push((range.start.line, hint));
                 }
+
+                // Track where loop body hints start for potential modification
+                let loop_body_hint_start = self.hints.len();
 
                 // Visit body with increased indent
                 self.indent_level += 1;
                 self.visit_block(body);
                 self.indent_level -= 1;
+
+                // Calculate net stack effect per iteration
+                let exit_depth = self.state.as_ref().map(|s| s.stack.len()).unwrap_or(0);
+                let net_effect = exit_depth as i32 - entry_depth as i32;
+
+                if net_effect != 0 {
+                    // Check if a previous loop produced dynamic stack content
+                    // If so, we can't reliably decompile this loop
+                    if let Some(ref state) = self.state {
+                        if state.dynamic_stack_source.is_some() {
+                            // Fail decompilation - we have dynamic stack content from a previous loop
+                            if let Some(ref mut state) = self.state {
+                                state.fail_tracking(
+                                    op.span(),
+                                    "loop with non-zero stack effect preceded by another loop that modified stack size"
+                                );
+                            }
+                            // Remove hints generated for this loop
+                            self.hints.truncate(repeat_hint_idx);
+                            return;
+                        }
+                    }
+
+                    // Non-zero net effect: stack positions shift each iteration
+                    // Apply counter indexing to input variable references
+                    for hint in &mut self.hints[loop_body_hint_start..] {
+                        hint.1 = apply_counter_indexing(&hint.1, &counter, net_effect);
+                    }
+
+                    // Mark stack as dynamic for subsequent loops
+                    if let Some(ref mut state) = self.state {
+                        state.dynamic_stack_source = Some(op.span());
+                    }
+                } else {
+                    // Zero net effect: stack shape is preserved, use renaming for consistency
+                    if let (Some(ref mut state), Some(ref entry_state)) = (&mut self.state, &loop_entry_state) {
+                        let renames = state.get_rename_map(entry_state);
+                        if !renames.is_empty() {
+                            // Apply renames to all hints generated in the loop body
+                            for hint in &mut self.hints[loop_body_hint_start..] {
+                                for (from, to) in &renames {
+                                    hint.1 = rename_variable(&hint.1, from, to);
+                                }
+                            }
+                            // Update state to use the entry variable names
+                            state.apply_renames(&renames);
+                        }
+                    }
+                }
 
                 // Generate hint for "end"
                 if let Some(range) = span_to_range(self.sources, op.span()) {
@@ -1581,7 +1999,7 @@ impl<'a> DisassemblyCollector<'a> {
     }
 }
 
-impl<'a> Visit for DisassemblyCollector<'a> {
+impl<'a> Visit for DecompilationCollector<'a> {
     fn visit_procedure(&mut self, proc: &Procedure) -> core::ops::ControlFlow<()> {
         let proc_name = proc.name().as_str().to_string();
         let decl_range = span_to_range(self.sources, proc.name().span());
@@ -1628,11 +2046,11 @@ impl<'a> Visit for DisassemblyCollector<'a> {
             self.hints.push((line, signature));
         }
 
-        self.current_proc = Some(ProcedureDisassembly {
+        self.current_proc = Some(ProcedureDecompilation {
             name: proc_name.clone(),
             input_count: initial_input_count,
         });
-        self.state = Some(DisassemblerState::new(initial_input_count));
+        self.state = Some(DecompilerState::new(initial_input_count));
 
         // Visit procedure body with indentation
         self.indent_level = 1;
@@ -1649,6 +2067,14 @@ impl<'a> Visit for DisassemblyCollector<'a> {
                         proc_name: proc_name.clone(),
                     });
                 }
+                // Remove all hints for this procedure when decompilation fails
+                self.hints.truncate(self.proc_hint_start);
+                // Clear state and return early - skip signature updates and return renaming
+                self.current_proc = None;
+                self.state = None;
+                self.proc_outputs = None;
+                self.proc_decl_line = None;
+                return core::ops::ControlFlow::Continue(());
             }
         }
 
@@ -1668,13 +2094,13 @@ impl<'a> Visit for DisassemblyCollector<'a> {
             }
         }
 
-        // Rename final stack values to r1, r2, ... if we know the output count
+        // Rename final stack values to r_0, r_1, ... if we know the output count
         if let (Some(ref state), Some(outputs)) = (&self.state, self.proc_outputs) {
             if !state.tracking_failed && outputs > 0 {
-                // Build a map from final stack variable names to return names
+                // Build a map from final stack variable names to return names (0-indexed)
                 let mut rename_map: Vec<(String, String)> = Vec::new();
                 for (i, named_value) in state.stack.iter().rev().take(outputs).enumerate() {
-                    let return_name = format!("r{}", i + 1);
+                    let return_name = format!("r_{}", i);
                     if named_value.name != return_name {
                         rename_map.push((named_value.name.clone(), return_name));
                     }
@@ -1700,24 +2126,24 @@ impl<'a> Visit for DisassemblyCollector<'a> {
     }
 }
 
-/// Result of disassembly hint collection.
-pub struct DisassemblyResult {
+/// Result of decompilation hint collection.
+pub struct DecompilationResult {
     /// Inlay hints for pseudocode
     pub hints: Vec<InlayHint>,
     /// Diagnostics for tracking failures
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Collect disassembly hints for all procedures in a module.
-pub fn collect_disassembly_hints(
+/// Collect decompilation hints for all procedures in a module.
+pub fn collect_decompilation_hints(
     module: &Module,
     sources: &DefaultSourceManager,
     visible_range: &Range,
     tab_count: usize,
     source_text: &str,
     contracts: Option<&ContractStore>,
-) -> DisassemblyResult {
-    let mut collector = DisassemblyCollector::new(sources, contracts, source_text);
+) -> DecompilationResult {
+    let mut collector = DecompilationCollector::new(sources, contracts, source_text);
     let _ = visit::visit_module(&mut collector, module);
 
     // Fixed padding (in columns) between instruction end and hint.
@@ -1780,7 +2206,7 @@ pub fn collect_disassembly_hints(
                 severity: Some(DiagnosticSeverity::HINT),
                 code: None,
                 code_description: None,
-                source: Some("masm-disassembler".to_string()),
+                source: Some("masm-decompiler".to_string()),
                 message: format!(
                     "Pseudocode unavailable beyond this point in '{}': {}",
                     failure.proc_name, failure.reason
@@ -1792,7 +2218,7 @@ pub fn collect_disassembly_hints(
         })
         .collect();
 
-    DisassemblyResult { hints, diagnostics }
+    DecompilationResult { hints, diagnostics }
 }
 
 #[cfg(test)]
@@ -1800,90 +2226,90 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_disassembler_state_new() {
-        let state = DisassemblerState::new(3);
+    fn test_decompiler_state_new() {
+        let state = DecompilerState::new(3);
         assert_eq!(state.stack.len(), 3);
-        assert_eq!(state.peek(0), "a1");
-        assert_eq!(state.peek(1), "a2");
-        assert_eq!(state.peek(2), "a3");
+        assert_eq!(state.peek(0), "a_0");
+        assert_eq!(state.peek(1), "a_1");
+        assert_eq!(state.peek(2), "a_2");
     }
 
     #[test]
-    fn test_disassembler_push_pop() {
-        let mut state = DisassemblerState::new(1);
-        assert_eq!(state.peek(0), "a1");
+    fn test_decompiler_push_pop() {
+        let mut state = DecompilerState::new(1);
+        assert_eq!(state.peek(0), "a_0");
 
-        state.push("v1".to_string());
-        assert_eq!(state.peek(0), "v1");
-        assert_eq!(state.peek(1), "a1");
+        state.push("v_0".to_string());
+        assert_eq!(state.peek(0), "v_0");
+        assert_eq!(state.peek(1), "a_0");
 
-        assert_eq!(state.pop(), "v1");
-        assert_eq!(state.peek(0), "a1");
+        assert_eq!(state.pop(), "v_0");
+        assert_eq!(state.peek(0), "a_0");
     }
 
     #[test]
-    fn test_disassembler_dup() {
-        let mut state = DisassemblerState::new(2);
-        // Stack: [a2, a1] (a1 on top)
+    fn test_decompiler_dup() {
+        let mut state = DecompilerState::new(2);
+        // Stack: [a_1, a_0] (a_0 on top)
         let duped = state.dup(1);
-        assert_eq!(duped, "a2");
+        assert_eq!(duped, "a_1");
     }
 
     #[test]
-    fn test_disassembler_swap() {
-        let mut state = DisassemblerState::new(2);
-        // Stack: [a2, a1] (a1 on top)
+    fn test_decompiler_swap() {
+        let mut state = DecompilerState::new(2);
+        // Stack: [a_1, a_0] (a_0 on top)
         state.swap(0, 1);
-        assert_eq!(state.peek(0), "a2");
-        assert_eq!(state.peek(1), "a1");
+        assert_eq!(state.peek(0), "a_1");
+        assert_eq!(state.peek(1), "a_0");
     }
 
     #[test]
     fn test_binary_op_pseudocode() {
-        let mut state = DisassemblerState::new(2);
-        // Stack: [a2, a1] (a1 on top)
+        let mut state = DecompilerState::new(2);
+        // Stack: [a_1, a_0] (a_0 on top)
         let result = binary_op_pseudocode(&mut state, "+");
-        assert_eq!(result, Some("v1 = a2 + a1".to_string()));
-        assert_eq!(state.peek(0), "v1");
+        assert_eq!(result, Some("v_0 = a_1 + a_0".to_string()));
+        assert_eq!(state.peek(0), "v_0");
     }
 
     #[test]
     fn test_dynamic_input_discovery_pop() {
-        let mut state = DisassemblerState::new(0); // Start with no inputs
+        let mut state = DecompilerState::new(0); // Start with no inputs
         assert_eq!(state.total_inputs(), 0);
 
         // Pop from empty stack - should discover inputs
         let a = state.pop();
-        assert_eq!(a, "a1");
+        assert_eq!(a, "a_0");
         assert_eq!(state.total_inputs(), 1);
 
         let b = state.pop();
-        assert_eq!(b, "a2");
+        assert_eq!(b, "a_1");
         assert_eq!(state.total_inputs(), 2);
     }
 
     #[test]
     fn test_dynamic_input_discovery_dup() {
-        let mut state = DisassemblerState::new(1); // Start with 1 input
+        let mut state = DecompilerState::new(1); // Start with 1 input
         assert_eq!(state.total_inputs(), 1);
 
         // Dup beyond current stack - should discover inputs
         let duped = state.dup(2); // Access position 2, but stack only has 1 element
-        assert_eq!(duped, "a3"); // Should be third input
+        assert_eq!(duped, "a_2"); // Should be third input (0-indexed)
         assert_eq!(state.total_inputs(), 3);
     }
 
     #[test]
     fn test_dynamic_input_discovery_swap() {
-        let mut state = DisassemblerState::new(1); // Start with 1 input
-        // Stack: [a1]
+        let mut state = DecompilerState::new(1); // Start with 1 input
+        // Stack: [a_0]
         assert_eq!(state.total_inputs(), 1);
 
         // Swap beyond current stack - should discover inputs
         state.swap(0, 1);
         assert_eq!(state.total_inputs(), 2);
-        assert_eq!(state.peek(0), "a2");
-        assert_eq!(state.peek(1), "a1");
+        assert_eq!(state.peek(0), "a_1");
+        assert_eq!(state.peek(1), "a_0");
     }
 
     #[test]
@@ -1898,7 +2324,7 @@ mod tests {
     fn test_format_procedure_signature_with_args() {
         assert_eq!(
             format_procedure_signature("proc", "bar", 3, None),
-            "proc bar(a1, a2, a3)"
+            "proc bar(a_0, a_1, a_2)"
         );
     }
 
@@ -1906,7 +2332,7 @@ mod tests {
     fn test_format_procedure_signature_with_return() {
         assert_eq!(
             format_procedure_signature("pub proc", "baz", 2, Some(1)),
-            "pub proc baz(a1, a2) -> r1"
+            "pub proc baz(a_0, a_1) -> r_0"
         );
     }
 
@@ -1914,7 +2340,7 @@ mod tests {
     fn test_format_procedure_signature_multiple_returns() {
         assert_eq!(
             format_procedure_signature("proc", "maj", 3, Some(2)),
-            "proc maj(a1, a2, a3) -> r1, r2"
+            "proc maj(a_0, a_1, a_2) -> r_0, r_1"
         );
     }
 
@@ -1922,7 +2348,7 @@ mod tests {
     fn test_format_procedure_signature_no_args_with_return() {
         assert_eq!(
             format_procedure_signature("export", "get_value", 0, Some(1)),
-            "export get_value() -> r1"
+            "export get_value() -> r_0"
         );
     }
 
@@ -1930,7 +2356,7 @@ mod tests {
     fn test_format_procedure_signature_no_prefix() {
         assert_eq!(
             format_procedure_signature("", "internal", 1, Some(1)),
-            "internal(a1) -> r1"
+            "internal(a_0) -> r_0"
         );
     }
 
@@ -1959,28 +2385,227 @@ mod tests {
 
     #[test]
     fn test_rename_variable_simple() {
-        assert_eq!(rename_variable("v1 = a1", "v1", "r1"), "r1 = a1");
+        assert_eq!(rename_variable("v_0 = a_0", "v_0", "r_0"), "r_0 = a_0");
     }
 
     #[test]
     fn test_rename_variable_in_expression() {
         assert_eq!(
-            rename_variable("v2 = a1 + v1", "v2", "r1"),
-            "r1 = a1 + v1"
+            rename_variable("v_1 = a_0 + v_0", "v_1", "r_0"),
+            "r_0 = a_0 + v_0"
         );
     }
 
     #[test]
     fn test_rename_variable_whole_word_only() {
-        // Should not rename v1 inside v12
-        assert_eq!(rename_variable("v12 = v1", "v1", "r1"), "v12 = r1");
+        // Should not rename v_1 inside v_12
+        assert_eq!(rename_variable("v_12 = v_1", "v_1", "r_0"), "v_12 = r_0");
     }
 
     #[test]
     fn test_rename_variable_multiple_occurrences() {
         assert_eq!(
-            rename_variable("v1 = v1 + v1", "v1", "r1"),
-            "r1 = r1 + r1"
+            rename_variable("v_0 = v_0 + v_0", "v_0", "r_0"),
+            "r_0 = r_0 + r_0"
         );
+    }
+
+    #[test]
+    fn test_save_and_restore_state() {
+        let mut state = DecompilerState::new(2);
+        // Initial stack: [a_1, a_0] (a_0 on top)
+        assert_eq!(state.peek(0), "a_0");
+        assert_eq!(state.peek(1), "a_1");
+
+        // Save the state
+        let saved = state.save_state();
+
+        // Modify the state by pushing a new variable
+        let v = state.new_var();
+        state.push(v);
+        assert_eq!(state.peek(0), "v_0");
+        assert_eq!(state.stack.len(), 3);
+
+        // Restore the state
+        state.restore_state(&saved);
+        assert_eq!(state.peek(0), "a_0");
+        assert_eq!(state.stack.len(), 2);
+    }
+
+    #[test]
+    fn test_get_rename_map_matching_stacks() {
+        let mut state = DecompilerState::new(2);
+        let saved = state.save_state();
+
+        // No changes, should produce empty rename map
+        let renames = state.get_rename_map(&saved);
+        assert!(renames.is_empty());
+    }
+
+    #[test]
+    fn test_get_rename_map_different_stacks() {
+        let mut state = DecompilerState::new(2);
+        let saved = state.save_state();
+
+        // Pop and push new variable at same position
+        state.pop();
+        let v = state.new_var();
+        state.push(v);
+
+        // Now state has [a_1, v_0] but saved has [a_1, a_0]
+        // Position 1 (top) should need renaming: v_0 -> a_0
+        let renames = state.get_rename_map(&saved);
+        assert_eq!(renames.len(), 1);
+        assert_eq!(renames[0], ("v_0".to_string(), "a_0".to_string()));
+    }
+
+    #[test]
+    fn test_apply_renames() {
+        let mut state = DecompilerState::new(0);
+        state.push("v_0".to_string());
+        state.push("v_1".to_string());
+
+        let renames = vec![
+            ("v_0".to_string(), "a_0".to_string()),
+            ("v_1".to_string(), "a_1".to_string()),
+        ];
+        state.apply_renames(&renames);
+
+        assert_eq!(state.peek(0), "a_1");
+        assert_eq!(state.peek(1), "a_0");
+    }
+
+    #[test]
+    fn test_loop_variable_consistency_simulation() {
+        // Simulate what happens in a while loop:
+        // Entry state: [cond, counter, result] where cond is on top
+        // After body: [new_cond, new_counter, new_result]
+        // We want to rename new_* to the original names
+
+        let mut state = DecompilerState::new(0);
+        state.push("result".to_string());
+        state.push("counter".to_string());
+        state.push("cond".to_string());
+
+        // Save loop entry state (with condition)
+        let loop_entry_state = state.save_state();
+
+        // Pop condition (simulating while.true consuming it)
+        state.pop();
+
+        // Simulate loop body: modify counter and result, push new condition
+        state.pop(); // pop counter
+        state.push("v_0".to_string()); // new counter value
+        state.pop(); // pop old result (now at top)
+        state.push("v_1".to_string()); // new result
+        // Swap to restore order
+        state.swap(0, 1);
+        // Push new condition
+        state.push("v_2".to_string());
+
+        // Stack is now: [result=v_1, counter=v_0, cond=v_2]
+        // We want to rename to: [result, counter, cond]
+
+        let renames = state.get_rename_map(&loop_entry_state);
+
+        // Should have 3 renames: v_1->result, v_0->counter, v_2->cond
+        assert_eq!(renames.len(), 3);
+
+        // Apply renames to state
+        state.apply_renames(&renames);
+
+        // Verify stack has consistent names
+        assert_eq!(state.peek(0), "cond");
+        assert_eq!(state.peek(1), "counter");
+        assert_eq!(state.peek(2), "result");
+    }
+
+    #[test]
+    fn test_if_else_branch_state_isolation() {
+        // Simulate if/else where each branch gets the same entry state
+        let mut state = DecompilerState::new(2);
+
+        // Pop condition (simulating if.true consuming it)
+        state.pop();
+
+        // Save entry state (after condition popped)
+        let entry_state = state.save_state();
+        assert_eq!(state.peek(0), "a_1");
+
+        // Simulate then-branch: push a new value
+        let v_then = state.new_var();
+        state.push(v_then);
+        assert_eq!(state.peek(0), "v_0");
+
+        // Save then-exit state
+        let then_exit_state = state.save_state();
+
+        // Restore entry state for else-branch
+        state.restore_state(&entry_state);
+        assert_eq!(state.peek(0), "a_1"); // Should be back to entry state
+
+        // Simulate else-branch: push a new value (gets different name because next_var_id wasn't reset)
+        let v_else = state.new_var();
+        state.push(v_else);
+        assert_eq!(state.peek(0), "v_1"); // Gets v_1, not v_0
+
+        // Get rename map to make else-branch consistent with then-branch
+        let renames = state.get_rename_map(&then_exit_state);
+        assert_eq!(renames.len(), 1);
+        assert_eq!(renames[0], ("v_1".to_string(), "v_0".to_string()));
+
+        // Apply renames
+        state.apply_renames(&renames);
+        assert_eq!(state.peek(0), "v_0"); // Now consistent with then-branch
+    }
+
+    #[test]
+    fn test_counter_generation() {
+        let mut state = DecompilerState::new(0);
+        assert_eq!(state.new_counter(), "i");
+        assert_eq!(state.new_counter(), "j");
+        assert_eq!(state.new_counter(), "k");
+    }
+
+    #[test]
+    fn test_apply_counter_indexing_consuming_loop() {
+        // For a consuming loop (net effect -1), a_0 -> a_i (simplified), a_5 -> a_(5+i)
+        let result = apply_counter_indexing("v_0 = a_0 + a_5", "i", -1);
+        assert_eq!(result, "v_0 = a_i + a_(5+i)");
+    }
+
+    #[test]
+    fn test_apply_counter_indexing_consuming_loop_larger_effect() {
+        // For a loop that consumes 2 per iteration: a_0 -> a_(i*2), a_5 -> a_(5+i*2)
+        let result = apply_counter_indexing("v_0 = a_0 + a_5", "i", -2);
+        assert_eq!(result, "v_0 = a_(i*2) + a_(5+i*2)");
+    }
+
+    #[test]
+    fn test_apply_counter_indexing_producing_loop() {
+        // For a producing loop (net effect +1), a_0 -> a_(-i), a_5 -> a_(5-i)
+        let result = apply_counter_indexing("v_0 = a_0 + a_5", "i", 1);
+        assert_eq!(result, "v_0 = a_(-i) + a_(5-i)");
+    }
+
+    #[test]
+    fn test_apply_counter_indexing_preserves_non_input_vars() {
+        // Should not modify v_0, r_0, etc. - only a_{N} patterns
+        let result = apply_counter_indexing("v_0 = a_0 + v_1", "i", -1);
+        assert_eq!(result, "v_0 = a_i + v_1");
+    }
+
+    #[test]
+    fn test_apply_counter_indexing_word_boundaries() {
+        // Should not match 'a_' in the middle of other patterns
+        let result = apply_counter_indexing("data = a_0", "i", -1);
+        assert_eq!(result, "data = a_i");
+    }
+
+    #[test]
+    fn test_apply_counter_indexing_nested_counter() {
+        // With nested loops, use appropriate counter
+        let result = apply_counter_indexing("v_0 = a_0 + a_1", "j", -1);
+        assert_eq!(result, "v_0 = a_j + a_(1+j)");
     }
 }

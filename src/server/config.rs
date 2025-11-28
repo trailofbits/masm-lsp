@@ -71,11 +71,11 @@ pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<Library
 ///
 /// Expects settings in the format:
 /// ```json
-/// { "masm": { "inlayHints": { "type": "disassembly" } } }
+/// { "masm": { "inlayHints": { "type": "decompilation" } } }
 /// ```
 ///
 /// Valid values for `type`:
-/// - `"disassembly"` - Show pseudocode disassembly (default)
+/// - `"decompilation"` - Show decompiled pseudocode (default)
 /// - `"description"` - Show instruction descriptions
 /// - `"none"` - Disable inlay hints
 pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHintType> {
@@ -86,7 +86,7 @@ pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHint
         .and_then(|v| v.as_str())?;
 
     match hint_type.to_lowercase().as_str() {
-        "disassembly" => Some(InlayHintType::Disassembly),
+        "decompilation" => Some(InlayHintType::Decompilation),
         "description" => Some(InlayHintType::Description),
         "none" | "disabled" | "off" => Some(InlayHintType::None),
         _ => None,
@@ -184,17 +184,17 @@ mod tests {
     }
 
     #[test]
-    fn extract_inlay_hint_type_disassembly() {
+    fn extract_inlay_hint_type_decompilation() {
         let settings = json!({
             "masm": {
                 "inlayHints": {
-                    "type": "disassembly"
+                    "type": "decompilation"
                 }
             }
         });
         assert_eq!(
             extract_inlay_hint_type(&settings),
-            Some(InlayHintType::Disassembly)
+            Some(InlayHintType::Decompilation)
         );
     }
 
@@ -248,13 +248,13 @@ mod tests {
         let settings = json!({
             "masm": {
                 "inlayHints": {
-                    "type": "DISASSEMBLY"
+                    "type": "DECOMPILATION"
                 }
             }
         });
         assert_eq!(
             extract_inlay_hint_type(&settings),
-            Some(InlayHintType::Disassembly)
+            Some(InlayHintType::Decompilation)
         );
     }
 

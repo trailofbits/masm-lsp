@@ -846,11 +846,11 @@ where
                 config.inlay_hint_tabs,
                 source.as_str(),
             ),
-            InlayHintType::Disassembly => {
+            InlayHintType::Decompilation => {
                 // Get contracts from workspace for inter-procedural analysis
                 let workspace = self.workspace.read().await;
                 let contracts = workspace.contracts();
-                let result = crate::disassembler::collect_disassembly_hints(
+                let result = crate::decompiler::collect_decompilation_hints(
                     &doc.module,
                     self.sources.as_ref(),
                     &params.range,
