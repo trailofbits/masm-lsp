@@ -26,6 +26,27 @@ use super::pseudocode::{
 use super::state::DecompilerState;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Helper Functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Extract just the header span from a loop's full span.
+///
+/// For `while.true`, this returns a span covering "while.true" (10 chars).
+/// For `repeat.N`, this returns a span covering "repeat.N" (7 + digit count chars).
+fn loop_header_span(op: &Op) -> SourceSpan {
+    let span = op.span();
+    let header_len = match op {
+        Op::While { .. } => 10, // "while.true"
+        Op::Repeat { count, .. } => {
+            // "repeat." (7) + digits
+            7 + if *count == 0 { 1 } else { (*count as f64).log10().floor() as u32 + 1 }
+        }
+        _ => return span, // Not a loop, return full span
+    };
+    SourceSpan::new(span.source_id(), span.start()..span.start() + header_len)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Hint Collection Types
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -250,7 +271,7 @@ impl<'a> DecompilationCollector<'a> {
                             // Fail decompilation - we have dynamic stack content from a previous loop
                             if let Some(ref mut state) = self.state {
                                 state.fail_tracking(
-                                    op.span(),
+                                    loop_header_span(op),
                                     "loop with variable iteration count preceded by another loop that modified stack size"
                                 );
                             }
@@ -278,7 +299,7 @@ impl<'a> DecompilationCollector<'a> {
 
                     // Mark stack as dynamic for subsequent loops
                     if let Some(ref mut state) = self.state {
-                        state.dynamic_stack_source = Some(op.span());
+                        state.dynamic_stack_source = Some(loop_header_span(op));
                     }
                 } else {
                     // Zero net effect: stack shape is preserved, use renaming for consistency
@@ -365,7 +386,7 @@ impl<'a> DecompilationCollector<'a> {
                             // Fail decompilation - we have dynamic stack content from a previous loop
                             if let Some(ref mut state) = self.state {
                                 state.fail_tracking(
-                                    op.span(),
+                                    loop_header_span(op),
                                     "loop with non-zero stack effect preceded by another loop that modified stack size"
                                 );
                             }
@@ -384,7 +405,7 @@ impl<'a> DecompilationCollector<'a> {
 
                     // Mark stack as dynamic for subsequent loops
                     if let Some(ref mut state) = self.state {
-                        state.dynamic_stack_source = Some(op.span());
+                        state.dynamic_stack_source = Some(loop_header_span(op));
                     }
                 } else {
                     // Zero net effect: stack shape is preserved, use renaming for consistency
