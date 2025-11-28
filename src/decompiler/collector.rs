@@ -661,7 +661,7 @@ pub fn collect_decompilation_hints(
                 severity: Some(DiagnosticSeverity::WARNING),
                 code: None,
                 code_description: None,
-                source: Some("masm-lsp".to_string()),
+                source: Some("masm-lsp/decompilation".to_string()),
                 message: format!(
                     "Pseudocode unavailable in `{}`: {}",
                     failure.proc_name, failure.reason
