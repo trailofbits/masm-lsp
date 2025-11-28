@@ -54,6 +54,13 @@ struct DocumentState {
     version: i32,
 }
 
+/// Cached document symbols with version tracking.
+#[derive(Debug, Clone)]
+struct CachedSymbols {
+    symbols: DocumentSymbols,
+    version: i32,
+}
+
 /// Cache for document state and parsed symbols.
 ///
 /// This type encapsulates the management of open documents and their parsed
@@ -63,8 +70,8 @@ struct DocumentState {
 pub struct DocumentCache {
     /// Tracks the version of each open document.
     state: Arc<RwLock<HashMap<Url, DocumentState>>>,
-    /// Caches parsed symbols for each document.
-    symbols: Arc<RwLock<HashMap<Url, DocumentSymbols>>>,
+    /// Caches parsed symbols for each document with version tracking.
+    symbols: Arc<RwLock<HashMap<Url, CachedSymbols>>>,
 }
 
 impl DocumentCache {
@@ -92,16 +99,29 @@ impl DocumentCache {
         // Note: symbols are kept for potential fallback during re-parsing
     }
 
-    /// Get parsed symbols for a document.
-    pub async fn get_symbols(&self, uri: &Url) -> Option<DocumentSymbols> {
+    /// Get parsed symbols for a document if they match the current version.
+    /// Returns None if no cached symbols exist or if they're from an older version.
+    pub async fn get_symbols_if_current(&self, uri: &Url) -> Option<DocumentSymbols> {
+        let current_version = self.get_version(uri).await?;
         let symbols = self.symbols.read().await;
-        symbols.get(uri).cloned()
+        let cached = symbols.get(uri)?;
+        if cached.version == current_version {
+            Some(cached.symbols.clone())
+        } else {
+            None
+        }
     }
 
-    /// Store parsed symbols for a document.
-    pub async fn set_symbols(&self, uri: Url, doc_symbols: DocumentSymbols) {
+    /// Get parsed symbols for a document regardless of version (for fallback).
+    pub async fn get_symbols(&self, uri: &Url) -> Option<DocumentSymbols> {
+        let symbols = self.symbols.read().await;
+        symbols.get(uri).map(|c| c.symbols.clone())
+    }
+
+    /// Store parsed symbols for a document with version tracking.
+    pub async fn set_symbols(&self, uri: Url, doc_symbols: DocumentSymbols, version: i32) {
         let mut symbols = self.symbols.write().await;
-        symbols.insert(uri, doc_symbols);
+        symbols.insert(uri, CachedSymbols { symbols: doc_symbols, version });
     }
 }
 
@@ -377,8 +397,10 @@ where
         let module = self.parse_module(uri).await?;
         let doc_symbols = build_document_symbols(module, self.sources.as_ref());
 
+        // Store symbols with the current document version
+        let version = self.documents.get_version(uri).await.unwrap_or(0);
         self.documents
-            .set_symbols(uri.clone(), doc_symbols.clone())
+            .set_symbols(uri.clone(), doc_symbols.clone(), version)
             .await;
 
         {
@@ -396,7 +418,8 @@ where
     }
 
     async fn get_or_parse_document(&self, uri: &Url) -> Option<DocumentSymbols> {
-        if let Some(doc) = self.documents.get_symbols(uri).await {
+        // Only use cached symbols if they match the current document version
+        if let Some(doc) = self.documents.get_symbols_if_current(uri).await {
             return Some(doc);
         }
         self.parse_and_index(uri).await.ok()
