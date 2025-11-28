@@ -658,7 +658,7 @@ pub fn collect_decompilation_hints(
 
             Some(Diagnostic {
                 range,
-                severity: Some(DiagnosticSeverity::WARNING),
+                severity: Some(DiagnosticSeverity::HINT),
                 code: None,
                 code_description: None,
                 source: Some("masm-lsp".to_string()),
