@@ -24,6 +24,15 @@ pub struct SavedStackState {
     pub stack: Vec<NamedValue>,
 }
 
+/// Related information for a decompilation failure.
+#[derive(Debug, Clone)]
+pub struct FailureRelatedInfo {
+    /// The span of the related location
+    pub span: SourceSpan,
+    /// Message explaining the related location
+    pub message: String,
+}
+
 /// State for decompiling a procedure.
 ///
 /// Supports dynamic input discovery: when an operation tries to access a stack
@@ -43,6 +52,8 @@ pub struct DecompilerState {
     pub failure_span: Option<SourceSpan>,
     /// The reason tracking failed
     pub failure_reason: Option<String>,
+    /// Related information for the failure (e.g., root cause in called procedure)
+    pub failure_related: Option<FailureRelatedInfo>,
     /// Counter for generating loop counter names (c_1, c_2, ...)
     pub next_counter_id: usize,
     /// Span of a loop that produced a dynamic/unknown number of stack items.
@@ -73,6 +84,7 @@ impl DecompilerState {
             tracking_failed: false,
             failure_span: None,
             failure_reason: None,
+            failure_related: None,
             next_counter_id: 0,
             dynamic_stack_source: None,
         }
@@ -150,11 +162,25 @@ impl DecompilerState {
 
     /// Mark tracking as failed (e.g., after unknown procedure call).
     pub fn fail_tracking(&mut self, span: SourceSpan, reason: &str) {
+        self.fail_tracking_with_related(span, reason, None);
+    }
+
+    /// Mark tracking as failed with optional related information.
+    ///
+    /// The related information can point to the root cause of the failure,
+    /// such as a called procedure that couldn't be decompiled.
+    pub fn fail_tracking_with_related(
+        &mut self,
+        span: SourceSpan,
+        reason: &str,
+        related: Option<FailureRelatedInfo>,
+    ) {
         if !self.tracking_failed {
             // Only record the first failure
             self.tracking_failed = true;
             self.failure_span = Some(span);
             self.failure_reason = Some(reason.to_string());
+            self.failure_related = related;
         }
         self.stack.clear();
     }

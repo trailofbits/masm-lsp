@@ -762,7 +762,7 @@ pub fn generate_pseudocode(
                 }
                 _ => {
                     // Unknown stack effect - fail tracking
-                    state.fail_tracking(span, &format!("procedure call to '{}' has unknown stack effect", name));
+                    state.fail_tracking(span, &format!("procedure call to `{}` has unknown stack effect", name));
                     Some(format!("call {}", name))
                 }
             }
@@ -773,7 +773,7 @@ pub fn generate_pseudocode(
             for _ in 0..4 {
                 state.pop_name();
             }
-            state.fail_tracking(span, "dynamic call has unknown stack effect");
+            state.fail_tracking(span, "dynamic call `dyn` has unknown stack effect");
             Some("call <dynamic>".to_string())
         }
 
@@ -910,7 +910,7 @@ pub fn generate_pseudocode(
         // Complex STARK operations - fail tracking (unknown effects)
         Instruction::FriExt2Fold4 | Instruction::HornerBase | Instruction::HornerExt |
         Instruction::EvalCircuit | Instruction::LogPrecompile => {
-            state.fail_tracking(span, &format!("complex STARK operation: {}", inst));
+            state.fail_tracking(span, &format!("complex STARK operation `{}`", inst));
             Some(format!("{}", inst))
         }
     }

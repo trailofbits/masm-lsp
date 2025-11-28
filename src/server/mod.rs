@@ -19,9 +19,9 @@ use tower_lsp::{
         request::{GotoImplementationParams, GotoImplementationResponse},
         Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
         HoverParams, InitializeParams, InitializeResult, InitializedParams, InlayHint,
-        InlayHintParams, Location, MarkupContent, MarkupKind, ReferenceParams, ServerCapabilities,
-        SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-        TextDocumentSyncKind, Url, WorkspaceSymbolParams,
+        InlayHintParams, Location, MarkupContent, MarkupKind, Position, Range, ReferenceParams,
+        ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
     },
     LanguageServer,
 };
@@ -246,8 +246,11 @@ where
             None
         };
 
-        // Check if taint analysis is enabled
-        let taint_enabled = self.config.read().await.taint_analysis_enabled;
+        // Check configuration
+        let config = self.config.read().await;
+        let taint_enabled = config.taint_analysis_enabled;
+        let decompilation_enabled = config.inlay_hint_type == InlayHintType::Decompilation;
+        drop(config);
 
         // Then acquire a read lock on the workspace after parsing is done
         let workspace = self.workspace.read().await;
@@ -267,6 +270,27 @@ where
                     diags.extend(taint_diags);
                 }
 
+                // Run decompilation and collect failure diagnostics when decompilation hints are enabled
+                if decompilation_enabled {
+                    if let Some(source) = self.sources.get_by_uri(&to_miden_uri(&uri)) {
+                        // Use full document range for diagnostics
+                        let full_range = Range {
+                            start: Position { line: 0, character: 0 },
+                            end: Position { line: u32::MAX, character: 0 },
+                        };
+                        let decompilation_result = crate::decompiler::collect_decompilation_hints(
+                            &doc.module,
+                            self.sources.as_ref(),
+                            &uri,
+                            &full_range,
+                            0, // tab_count doesn't matter for diagnostics
+                            source.as_str(),
+                            Some(workspace.contracts()),
+                        );
+                        diags.extend(decompilation_result.diagnostics);
+                    }
+                }
+
                 diags
             }
             Err(report) => {
@@ -283,6 +307,26 @@ where
                             Some(workspace.contracts()),
                         );
                         diags.extend(taint_diags);
+                    }
+
+                    // Run decompilation on fallback doc if enabled
+                    if decompilation_enabled {
+                        if let Some(source) = self.sources.get_by_uri(&to_miden_uri(&uri)) {
+                            let full_range = Range {
+                                start: Position { line: 0, character: 0 },
+                                end: Position { line: u32::MAX, character: 0 },
+                            };
+                            let decompilation_result = crate::decompiler::collect_decompilation_hints(
+                                &doc.module,
+                                self.sources.as_ref(),
+                                &uri,
+                                &full_range,
+                                0,
+                                source.as_str(),
+                                Some(workspace.contracts()),
+                            );
+                            diags.extend(decompilation_result.diagnostics);
+                        }
                     }
                 }
                 diags
@@ -876,15 +920,15 @@ where
                 let result = crate::decompiler::collect_decompilation_hints(
                     &doc.module,
                     self.sources.as_ref(),
+                    &uri,
                     &params.range,
                     config.inlay_hint_tabs,
                     source.as_str(),
                     Some(contracts),
                 );
                 drop(workspace);
-                // Note: We could publish diagnostics here, but that would require
-                // storing them and publishing on document open/change. For now,
-                // the hints simply stop when tracking fails.
+                // Note: Decompilation failure diagnostics are published via
+                // publish_diagnostics when decompilation hints are enabled.
                 result.hints
             }
             InlayHintType::None => vec![],

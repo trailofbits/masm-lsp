@@ -9,7 +9,8 @@ use miden_assembly_syntax::ast::visit::{self, Visit};
 use miden_assembly_syntax::ast::{Block, Module, Op, Procedure};
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Spanned};
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, Position, Range,
+    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, InlayHint, InlayHintKind,
+    InlayHintLabel, Location, Position, Range, Url,
 };
 
 use crate::analysis::{
@@ -28,11 +29,25 @@ use super::state::DecompilerState;
 // Hint Collection Types
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Related information for a tracking failure diagnostic.
+#[derive(Clone)]
+pub struct RelatedInfo {
+    /// The span of the related location
+    pub span: SourceSpan,
+    /// Message explaining the related location
+    pub message: String,
+}
+
 /// A tracking failure that should be reported as a diagnostic.
 pub(crate) struct TrackingFailure {
+    /// The span where decompilation failed
     pub span: SourceSpan,
+    /// The reason for the failure
     pub reason: String,
+    /// The name of the procedure where failure occurred
     pub proc_name: String,
+    /// Optional related information (e.g., the root cause in another procedure)
+    pub related: Option<RelatedInfo>,
 }
 
 /// Collector that visits procedures and instructions.
@@ -466,10 +481,16 @@ impl<'a> Visit for DecompilationCollector<'a> {
         if let Some(ref state) = self.state {
             if state.tracking_failed {
                 if let (Some(span), Some(reason)) = (state.failure_span, state.failure_reason.clone()) {
+                    // Convert state's related info to TrackingFailure's related info
+                    let related = state.failure_related.as_ref().map(|r| RelatedInfo {
+                        span: r.span,
+                        message: r.message.clone(),
+                    });
                     self.failures.push(TrackingFailure {
                         span,
                         reason,
                         proc_name: proc_name.clone(),
+                        related,
                     });
                 }
                 // Remove all hints for this procedure when decompilation fails
@@ -558,6 +579,7 @@ pub struct DecompilationResult {
 pub fn collect_decompilation_hints(
     module: &Module,
     sources: &DefaultSourceManager,
+    uri: &Url,
     visible_range: &Range,
     tab_count: usize,
     source_text: &str,
@@ -621,17 +643,30 @@ pub fn collect_decompilation_hints(
         .into_iter()
         .filter_map(|failure| {
             let range = span_to_range(sources, failure.span)?;
+
+            // Convert related info to DiagnosticRelatedInformation
+            let related_information = failure.related.and_then(|related| {
+                let related_range = span_to_range(sources, related.span)?;
+                Some(vec![DiagnosticRelatedInformation {
+                    location: Location {
+                        uri: uri.clone(),
+                        range: related_range,
+                    },
+                    message: related.message,
+                }])
+            });
+
             Some(Diagnostic {
                 range,
-                severity: Some(DiagnosticSeverity::HINT),
+                severity: Some(DiagnosticSeverity::WARNING),
                 code: None,
                 code_description: None,
-                source: Some("masm-decompiler".to_string()),
+                source: Some("masm-lsp".to_string()),
                 message: format!(
-                    "Pseudocode unavailable beyond this point in '{}': {}",
+                    "Pseudocode unavailable in `{}`: {}",
                     failure.proc_name, failure.reason
                 ),
-                related_information: None,
+                related_information,
                 tags: None,
                 data: None,
             })
