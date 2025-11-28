@@ -1077,10 +1077,10 @@ pub fn format_invocation_target(target: &InvocationTarget) -> String {
 /// Format a procedure signature for the declaration hint.
 ///
 /// Examples:
-/// - `proc foo()` - no inputs, unknown outputs
-/// - `pub proc foo(a_0, a_1)` - 2 inputs, unknown outputs
-/// - `export.bar(a_0, a_1) -> r_0` - 2 inputs, 1 output
-/// - `proc foo(a_0) -> r_0, r_1, r_2` - 1 input, 3 outputs
+/// - `proc foo():` - no inputs, unknown outputs
+/// - `pub proc foo(a_0, a_1):` - 2 inputs, unknown outputs
+/// - `export.bar(a_0, a_1) -> r_0:` - 2 inputs, 1 output
+/// - `proc foo(a_0) -> (r_0, r_1, r_2):` - 1 input, 3 outputs (parenthesized)
 pub fn format_procedure_signature(
     prefix: &str,
     name: &str,
@@ -1099,15 +1099,17 @@ pub fn format_procedure_signature(
     };
 
     // Format return values: r_0, r_1, r_2, ... (0-indexed)
+    // Multiple returns are parenthesized, single returns are not
     match outputs {
-        Some(0) => format!("{}({})", full_name, args_str),
+        Some(0) => format!("{}({}):", full_name, args_str),
+        Some(1) => format!("{}({}) -> r_0:", full_name, args_str),
         Some(n) => {
             let returns: Vec<String> = (0..n).map(|i| format!("r_{}", i)).collect();
-            format!("{}({}) -> {}", full_name, args_str, returns.join(", "))
+            format!("{}({}) -> ({}):", full_name, args_str, returns.join(", "))
         }
         None => {
             // Unknown outputs - just show inputs
-            format!("{}({})", full_name, args_str)
+            format!("{}({}):", full_name, args_str)
         }
     }
 }
@@ -1283,7 +1285,7 @@ mod tests {
     fn test_format_procedure_signature_no_args() {
         assert_eq!(
             format_procedure_signature("proc", "foo", 0, Some(0)),
-            "proc foo()"
+            "proc foo():"
         );
     }
 
@@ -1291,7 +1293,7 @@ mod tests {
     fn test_format_procedure_signature_with_args() {
         assert_eq!(
             format_procedure_signature("proc", "bar", 3, None),
-            "proc bar(a_0, a_1, a_2)"
+            "proc bar(a_0, a_1, a_2):"
         );
     }
 
@@ -1299,7 +1301,7 @@ mod tests {
     fn test_format_procedure_signature_with_return() {
         assert_eq!(
             format_procedure_signature("pub proc", "baz", 2, Some(1)),
-            "pub proc baz(a_0, a_1) -> r_0"
+            "pub proc baz(a_0, a_1) -> r_0:"
         );
     }
 
@@ -1307,7 +1309,7 @@ mod tests {
     fn test_format_procedure_signature_multiple_returns() {
         assert_eq!(
             format_procedure_signature("proc", "maj", 3, Some(2)),
-            "proc maj(a_0, a_1, a_2) -> r_0, r_1"
+            "proc maj(a_0, a_1, a_2) -> (r_0, r_1):"
         );
     }
 
@@ -1315,7 +1317,7 @@ mod tests {
     fn test_format_procedure_signature_no_args_with_return() {
         assert_eq!(
             format_procedure_signature("export", "get_value", 0, Some(1)),
-            "export get_value() -> r_0"
+            "export get_value() -> r_0:"
         );
     }
 
@@ -1323,7 +1325,7 @@ mod tests {
     fn test_format_procedure_signature_no_prefix() {
         assert_eq!(
             format_procedure_signature("", "internal", 1, Some(1)),
-            "internal(a_0) -> r_0"
+            "internal(a_0) -> r_0:"
         );
     }
 

@@ -504,6 +504,19 @@ impl<'a> Visit for DecompilationCollector<'a> {
             }
         }
 
+        // Add "end" hint for procedure by finding the "end" keyword in source
+        if let Some(body_range) = span_to_range(self.sources, proc.body().span()) {
+            // Scan source lines starting from body end to find "end" keyword
+            let start_line = body_range.end.line as usize;
+            for (offset, line_text) in self.source_text.lines().skip(start_line).enumerate() {
+                if line_text.trim() == "end" {
+                    let end_line = (start_line + offset) as u32;
+                    self.hints.push((end_line, "end".to_string()));
+                    break;
+                }
+            }
+        }
+
         // Clear state for next procedure
         self.state = None;
         self.proc_outputs = None;
