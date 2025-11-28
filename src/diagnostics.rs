@@ -76,7 +76,6 @@ pub fn unresolved_to_diagnostics(
 }
 
 /// Map a byte range in a source file to an LSP range.
-#[allow(dead_code)]
 pub fn byte_range_to_range(
     source: &miden_debug_types::SourceFile,
     start: usize,

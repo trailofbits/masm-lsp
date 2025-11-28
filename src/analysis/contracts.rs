@@ -265,6 +265,19 @@ impl ContractStore {
             .and_then(|path| self.contracts.get(path))
     }
 
+    /// Get contract by exact path string (e.g., "module::proc_name").
+    ///
+    /// This is more precise than `get_by_suffix` as it requires the full path to match,
+    /// avoiding ambiguity when multiple modules have procedures with the same suffix.
+    pub fn get_by_path(&self, path_str: &str) -> Option<&ProcContract> {
+        let name = path_str.rsplit("::").next()?;
+        self.by_name
+            .get(name)?
+            .iter()
+            .find(|p| p.as_ref() == path_str)
+            .and_then(|path| self.contracts.get(path))
+    }
+
     /// Get all contracts (for iteration).
     pub fn iter(&self) -> impl Iterator<Item = (&SymbolPath, &ProcContract)> {
         self.contracts.iter()

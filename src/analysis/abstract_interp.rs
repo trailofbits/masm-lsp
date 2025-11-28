@@ -33,6 +33,8 @@ use std::fmt;
 
 use miden_assembly_syntax::ast::{Block, Instruction, Op};
 
+use super::stack_ops::StackLike;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Abstract Domain: Symbolic Stack Values
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -453,87 +455,8 @@ impl AbstractState {
         self.failure_reason.as_deref()
     }
 
-    /// Push a symbolic expression onto the stack.
-    pub fn push(&mut self, expr: SymbolicExpr) {
-        self.stack.push(expr);
-    }
-
-    /// Pop a symbolic expression from the stack.
-    ///
-    /// If the stack is empty, discovers a new input.
-    pub fn pop(&mut self) -> SymbolicExpr {
-        if let Some(expr) = self.stack.pop() {
-            expr
-        } else {
-            // Stack underflow - discover a new input
-            let input_id = self.discovered_inputs;
-            self.discovered_inputs += 1;
-            SymbolicExpr::Input(input_id)
-        }
-    }
-
-    /// Peek at the expression at position n (0 = top).
-    pub fn peek(&self, n: usize) -> Option<&SymbolicExpr> {
-        if n < self.stack.len() {
-            Some(&self.stack[self.stack.len() - 1 - n])
-        } else {
-            None
-        }
-    }
-
-    /// Ensure the stack has at least `needed` elements.
-    ///
-    /// Discovers new inputs if necessary.
-    pub fn ensure_depth(&mut self, needed: usize) {
-        while self.stack.len() < needed {
-            let input_id = self.discovered_inputs;
-            self.discovered_inputs += 1;
-            // Insert at the bottom (older inputs have higher indices)
-            self.stack.insert(0, SymbolicExpr::Input(input_id));
-        }
-    }
-
-    /// Duplicate the value at position n onto the top.
-    pub fn dup(&mut self, n: usize) {
-        self.ensure_depth(n + 1);
-        let expr = self.stack[self.stack.len() - 1 - n].clone();
-        self.stack.push(expr);
-    }
-
-    /// Swap values at positions a and b (0 = top).
-    pub fn swap(&mut self, a: usize, b: usize) {
-        let max_pos = a.max(b);
-        self.ensure_depth(max_pos + 1);
-        let len = self.stack.len();
-        let idx_a = len - 1 - a;
-        let idx_b = len - 1 - b;
-        self.stack.swap(idx_a, idx_b);
-    }
-
-    /// Move the element at position n to the top.
-    pub fn movup(&mut self, n: usize) {
-        if n == 0 {
-            return;
-        }
-        self.ensure_depth(n + 1);
-        let len = self.stack.len();
-        let idx = len - 1 - n;
-        let elem = self.stack.remove(idx);
-        self.stack.push(elem);
-    }
-
-    /// Move the top element to position n.
-    pub fn movdn(&mut self, n: usize) {
-        if n == 0 {
-            return;
-        }
-        self.ensure_depth(n + 1);
-        let elem = self.stack.pop().unwrap();
-        let len = self.stack.len();
-        // Position n from top in final stack (len+1 elements) = index (len - n)
-        let idx = len - n;
-        self.stack.insert(idx, elem);
-    }
+    // Note: push, pop, peek, ensure_depth, dup, swap, movup, movdn are provided
+    // by the StackLike trait implementation below.
 
     /// Mark tracking as failed with a reason.
     pub fn fail(&mut self, reason: &str) {
@@ -609,6 +532,79 @@ impl AbstractState {
     pub fn restore(&mut self, snapshot: &AbstractStateSnapshot) {
         self.stack = snapshot.stack.clone();
         // Don't restore discovered_inputs - we want to keep tracking new discoveries
+    }
+}
+
+// Implement StackLike trait for AbstractState
+impl super::stack_ops::StackLike for AbstractState {
+    type Element = SymbolicExpr;
+
+    fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn push(&mut self, elem: SymbolicExpr) {
+        self.stack.push(elem);
+    }
+
+    fn pop(&mut self) -> SymbolicExpr {
+        if let Some(expr) = self.stack.pop() {
+            expr
+        } else {
+            // Stack underflow - discover a new input
+            let input_id = self.discovered_inputs;
+            self.discovered_inputs += 1;
+            SymbolicExpr::Input(input_id)
+        }
+    }
+
+    fn peek(&self, n: usize) -> Option<&SymbolicExpr> {
+        if n < self.stack.len() {
+            Some(&self.stack[self.stack.len() - 1 - n])
+        } else {
+            None
+        }
+    }
+
+    fn ensure_depth(&mut self, needed: usize) {
+        while self.stack.len() < needed {
+            let input_id = self.discovered_inputs;
+            self.discovered_inputs += 1;
+            // Insert at the bottom (older inputs have higher indices)
+            self.stack.insert(0, SymbolicExpr::Input(input_id));
+        }
+    }
+
+    fn swap(&mut self, a: usize, b: usize) {
+        let max_pos = a.max(b);
+        self.ensure_depth(max_pos + 1);
+        let len = self.stack.len();
+        let idx_a = len - 1 - a;
+        let idx_b = len - 1 - b;
+        self.stack.swap(idx_a, idx_b);
+    }
+
+    fn movup(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_depth(n + 1);
+        let len = self.stack.len();
+        let idx = len - 1 - n;
+        let elem = self.stack.remove(idx);
+        self.stack.push(elem);
+    }
+
+    fn movdn(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_depth(n + 1);
+        let elem = self.stack.pop().unwrap();
+        let len = self.stack.len();
+        // Position n from top in final stack (len+1 elements) = index (len - n)
+        let idx = len - n;
+        self.stack.insert(idx, elem);
     }
 }
 
@@ -962,13 +958,25 @@ pub fn transfer_instruction(
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Default - many instructions not yet implemented
+        // Default - use static stack effect if available
         // ─────────────────────────────────────────────────────────────────────
         _ => {
-            // For unhandled instructions, push Top to indicate unknown result
-            // This is conservative but sound
-            state.push(SymbolicExpr::Top);
-            None
+            // Try to get static stack effect for the instruction
+            if let Some(effect) = super::stack_ops::static_effect(inst) {
+                // Pop the correct number of inputs
+                for _ in 0..effect.pops {
+                    state.pop();
+                }
+                // Push Top for each output (we don't track the semantic meaning)
+                for _ in 0..effect.pushes {
+                    state.push(SymbolicExpr::Top);
+                }
+                None
+            } else {
+                // No static effect - instruction has dynamic stack effect
+                state.fail(&format!("instruction {:?} has unknown stack effect", inst));
+                None
+            }
         }
     }
 }

@@ -57,7 +57,6 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Add a custom checker to the analyzer.
-    #[allow(dead_code)]
     pub fn with_checker(mut self, checker: Box<dyn Checker>) -> Self {
         self.checkers.push(checker);
         self
