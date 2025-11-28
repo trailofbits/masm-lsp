@@ -19,8 +19,8 @@ use crate::analysis::{
 use crate::diagnostics::span_to_range;
 
 use super::pseudocode::{
-    apply_counter_indexing, extract_declaration_prefix, format_procedure_signature,
-    generate_pseudocode, rename_variable,
+    apply_counter_indexing, apply_output_indexing, extract_declaration_prefix,
+    format_procedure_signature, generate_pseudocode, rename_variable,
 };
 use super::state::DecompilerState;
 
@@ -198,6 +198,9 @@ impl<'a> DecompilationCollector<'a> {
                     0
                 };
 
+                // Track start_var_id before visiting loop body (for output indexing)
+                let start_var_id = self.state.as_ref().map(|s| s.next_var_id).unwrap_or(0);
+
                 // Track where while loop hint will be (index for potential modification)
                 let while_hint_idx = self.hints.len();
 
@@ -214,6 +217,10 @@ impl<'a> DecompilationCollector<'a> {
                 self.indent_level += 1;
                 self.visit_block(body);
                 self.indent_level -= 1;
+
+                // Calculate vars_per_iteration (for output indexing)
+                let end_var_id = self.state.as_ref().map(|s| s.next_var_id).unwrap_or(0);
+                let vars_per_iteration = end_var_id.saturating_sub(start_var_id);
 
                 // Calculate net stack effect per iteration
                 // Note: at loop end, there's a new condition on top, so we compare to entry_depth + 1
@@ -248,9 +255,10 @@ impl<'a> DecompilationCollector<'a> {
                         self.hints[while_hint_idx].1 = format!("{}while {} = 0; {}:", self.indent(), counter, condition);
                     }
 
-                    // Apply counter indexing to input variable references in loop body
+                    // Apply counter indexing to both input and output variable references in loop body
                     for hint in &mut self.hints[loop_body_hint_start..] {
                         hint.1 = apply_counter_indexing(&hint.1, &counter, net_effect);
+                        hint.1 = apply_output_indexing(&hint.1, &counter, start_var_id, vars_per_iteration);
                     }
 
                     // Mark stack as dynamic for subsequent loops
@@ -294,6 +302,9 @@ impl<'a> DecompilationCollector<'a> {
                 let loop_entry_state = self.state.as_ref().map(|s| s.save_state());
                 let entry_depth = self.state.as_ref().map(|s| s.stack.len()).unwrap_or(0);
 
+                // Track start_var_id before visiting loop body (for output indexing)
+                let start_var_id = self.state.as_ref().map(|s| s.next_var_id).unwrap_or(0);
+
                 // If pre-analysis discovered we need more inputs, ensure we have them
                 if let Some(ref mut state) = self.state {
                     if let Some(total_inputs) = loop_analysis.total_inputs_for_loop {
@@ -315,6 +326,10 @@ impl<'a> DecompilationCollector<'a> {
                 self.indent_level += 1;
                 self.visit_block(body);
                 self.indent_level -= 1;
+
+                // Calculate vars_per_iteration (for output indexing)
+                let end_var_id = self.state.as_ref().map(|s| s.next_var_id).unwrap_or(0);
+                let vars_per_iteration = end_var_id.saturating_sub(start_var_id);
 
                 // Use the pre-analyzed net effect (more accurate than measuring after dynamic discovery)
                 let net_effect = loop_analysis.net_effect_per_iteration;
@@ -346,9 +361,10 @@ impl<'a> DecompilationCollector<'a> {
                     }
 
                     // Non-zero net effect: stack positions shift each iteration
-                    // Apply counter indexing to input variable references
+                    // Apply counter indexing to both input and output variable references
                     for hint in &mut self.hints[loop_body_hint_start..] {
                         hint.1 = apply_counter_indexing(&hint.1, &counter, net_effect);
+                        hint.1 = apply_output_indexing(&hint.1, &counter, start_var_id, vars_per_iteration);
                     }
 
                     // Mark stack as dynamic for subsequent loops

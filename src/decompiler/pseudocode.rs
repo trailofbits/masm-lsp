@@ -1207,7 +1207,7 @@ fn lookup_contract_for_target<'a>(
 /// `net_effect` is the per-iteration change: negative means consuming, positive means producing.
 ///
 /// FIX: Now uses proper word boundary detection to avoid false matches like `data_a_0`.
-pub fn apply_counter_indexing(text: &str, counter: &str, net_effect: i32) -> String {
+pub fn apply_input_indexing(text: &str, counter: &str, net_effect: i32) -> String {
     let mut result = String::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -1275,6 +1275,104 @@ pub fn apply_counter_indexing(text: &str, counter: &str, net_effect: i32) -> Str
     }
 
     result
+}
+
+/// Apply counter indexing to output variables in a hint string.
+///
+/// For loops with non-zero net stack effect, output variable references like `v_3`, `v_4`
+/// (where those variables were created during the loop body) need to be converted to
+/// indexed form like `v_(3+i)`, `v_(4+i)` to show that different iterations produce
+/// results at different stack positions.
+///
+/// # Arguments
+/// * `text` - The hint string to transform
+/// * `counter` - The loop counter variable name (e.g., "i", "j")
+/// * `start_var_id` - The first variable ID created during the loop body
+/// * `vars_per_iteration` - Number of variables created per iteration
+///
+/// # Formula
+/// For `v_N` where `N >= start_var_id`:
+/// - Transform to `v_(N + i*K)` where K = vars_per_iteration
+/// - Simplifies `v_(0+i)` to `v_i`, `v_(N+i*1)` to `v_(N+i)`, etc.
+pub fn apply_output_indexing(
+    text: &str,
+    counter: &str,
+    start_var_id: usize,
+    vars_per_iteration: usize,
+) -> String {
+    if vars_per_iteration == 0 {
+        return text.to_string();
+    }
+
+    let mut result = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // Check for word boundary before 'v_'
+        let before_ok = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+
+        // Look for 'v_' followed by digits (output variable pattern: v_0, v_1, etc.)
+        if before_ok && chars[i] == 'v' && i + 2 < chars.len() && chars[i + 1] == '_' && chars[i + 2].is_ascii_digit() {
+            // Parse the number following 'v_'
+            let num_start = i + 2;
+            let mut num_end = num_start;
+            while num_end < chars.len() && chars[num_end].is_ascii_digit() {
+                num_end += 1;
+            }
+
+            // Check word boundary after the number
+            let after_ok = num_end >= chars.len()
+                || (!chars[num_end].is_alphanumeric() && chars[num_end] != '_');
+
+            if after_ok {
+                let num_str: String = chars[num_start..num_end].iter().collect();
+                if let Ok(var_id) = num_str.parse::<usize>() {
+                    // Only transform variables created during the loop (var_id >= start_var_id)
+                    if var_id >= start_var_id {
+                        // Generate indexed form: v_(N + i*K)
+                        let indexed = format_indexed_var(var_id, counter, vars_per_iteration);
+                        result.push_str(&indexed);
+                        i = num_end;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
+/// Format an indexed variable name with simplification.
+///
+/// Generates `v_(base + counter*stride)` with simplifications:
+/// - `v_(0+i)` -> `v_i`
+/// - `v_(N+i*1)` -> `v_(N+i)`
+/// - `v_(i*1)` -> `v_i`
+fn format_indexed_var(base: usize, counter: &str, stride: usize) -> String {
+    if stride == 1 {
+        // Simplify: v_(N+i*1) -> v_(N+i) or v_i
+        if base == 0 {
+            format!("v_{}", counter)
+        } else {
+            format!("v_({}+{})", base, counter)
+        }
+    } else {
+        // Full form: v_(N+i*K)
+        if base == 0 {
+            format!("v_({}*{})", counter, stride)
+        } else {
+            format!("v_({}+{}*{})", base, counter, stride)
+        }
+    }
+}
+
+/// Legacy wrapper for apply_input_indexing (backwards compatibility).
+pub fn apply_counter_indexing(text: &str, counter: &str, net_effect: i32) -> String {
+    apply_input_indexing(text, counter, net_effect)
 }
 
 #[cfg(test)]
@@ -1419,5 +1517,88 @@ mod tests {
         // With nested loops, use appropriate counter
         let result = apply_counter_indexing("v_0 = a_0 + a_1", "j", -1);
         assert_eq!(result, "v_0 = a_j + a_(1+j)");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Tests for apply_output_indexing
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_output_indexing_single_var() {
+        // Single variable created in loop, start_var_id = 0
+        // v_0 -> v_i (simplified from v_(0+i))
+        let result = apply_output_indexing("v_0 = a_0 + a_5", "i", 0, 1);
+        assert_eq!(result, "v_i = a_0 + a_5");
+    }
+
+    #[test]
+    fn test_apply_output_indexing_with_offset() {
+        // Variable created in loop with prior variables existing
+        // start_var_id = 3, so v_3 -> v_(3+i)
+        let result = apply_output_indexing("v_3 = a_0 + a_5", "i", 3, 1);
+        assert_eq!(result, "v_(3+i) = a_0 + a_5");
+    }
+
+    #[test]
+    fn test_apply_output_indexing_preserves_prior_vars() {
+        // Variables before the loop (v_0, v_1, v_2) should not be transformed
+        // Only v_3 (>= start_var_id) should be transformed
+        let result = apply_output_indexing("v_3 = v_0 + v_1", "i", 3, 1);
+        assert_eq!(result, "v_(3+i) = v_0 + v_1");
+    }
+
+    #[test]
+    fn test_apply_output_indexing_multiple_vars_per_iteration() {
+        // Two variables created per iteration: v_0 and v_1
+        // v_0 -> v_(i*2), v_1 -> v_(1+i*2)
+        let result = apply_output_indexing("(v_0, v_1) = something", "i", 0, 2);
+        assert_eq!(result, "(v_(i*2), v_(1+i*2)) = something");
+    }
+
+    #[test]
+    fn test_apply_output_indexing_with_offset_and_stride() {
+        // start_var_id = 2, vars_per_iteration = 2
+        // v_2 -> v_(2+i*2), v_3 -> v_(3+i*2)
+        let result = apply_output_indexing("(v_2, v_3) = something", "i", 2, 2);
+        assert_eq!(result, "(v_(2+i*2), v_(3+i*2)) = something");
+    }
+
+    #[test]
+    fn test_apply_output_indexing_different_counter() {
+        // With nested loops, use the appropriate counter
+        let result = apply_output_indexing("v_0 = a_0", "j", 0, 1);
+        assert_eq!(result, "v_j = a_0");
+    }
+
+    #[test]
+    fn test_apply_output_indexing_word_boundaries() {
+        // Should not match 'v_' in the middle of other patterns
+        let result = apply_output_indexing("prev_0 = v_0", "i", 0, 1);
+        assert_eq!(result, "prev_0 = v_i");
+    }
+
+    #[test]
+    fn test_apply_output_indexing_zero_vars() {
+        // When vars_per_iteration is 0, should return unchanged
+        let result = apply_output_indexing("v_0 = a_0", "i", 0, 0);
+        assert_eq!(result, "v_0 = a_0");
+    }
+
+    #[test]
+    fn test_combined_input_and_output_indexing() {
+        // Test the full transformation for a consuming loop
+        let text = "v_0 = a_0 + a_5";
+        let with_input = apply_input_indexing(text, "i", -1);
+        let with_output = apply_output_indexing(&with_input, "i", 0, 1);
+        assert_eq!(with_output, "v_i = a_i + a_(5+i)");
+    }
+
+    #[test]
+    fn test_combined_indexing_with_prior_vars() {
+        // Prior variables (v_0, v_1) exist, loop creates v_2
+        let text = "v_2 = v_0 + a_0 + a_5";
+        let with_input = apply_input_indexing(text, "i", -1);
+        let with_output = apply_output_indexing(&with_input, "i", 2, 1);
+        assert_eq!(with_output, "v_(2+i) = v_0 + a_i + a_(5+i)");
     }
 }

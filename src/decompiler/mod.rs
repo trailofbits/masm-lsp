@@ -109,4 +109,38 @@ mod tests {
         state.apply_renames(&renames);
         assert_eq!(state.peek_name(0), "v_0"); // Now consistent with then-branch
     }
+
+    #[test]
+    fn test_consuming_loop_output_indexing() {
+        // Test the combined input and output indexing for the add loop example:
+        // repeat.5
+        //     movup.5
+        //     add
+        //     movdn.4
+        // end
+        //
+        // This loop has net_effect = -1 (consuming), and creates 1 variable per iteration.
+        // The pseudocode for "add" should be transformed from:
+        //   "v_0 = a_0 + a_5"
+        // to:
+        //   "v_i = a_i + a_(5+i)"
+        //
+        // This shows that each iteration produces a distinct output (v_i) from distinct inputs.
+
+        use super::pseudocode::{apply_counter_indexing, apply_output_indexing};
+
+        let original = "v_0 = a_0 + a_5";
+        let counter = "i";
+        let net_effect = -1;
+        let start_var_id = 0;
+        let vars_per_iteration = 1;
+
+        // Apply input indexing first
+        let with_inputs = apply_counter_indexing(original, counter, net_effect);
+        assert_eq!(with_inputs, "v_0 = a_i + a_(5+i)");
+
+        // Then apply output indexing
+        let with_outputs = apply_output_indexing(&with_inputs, counter, start_var_id, vars_per_iteration);
+        assert_eq!(with_outputs, "v_i = a_i + a_(5+i)");
+    }
 }
