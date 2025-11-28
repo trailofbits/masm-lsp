@@ -37,7 +37,7 @@ pub use contracts::{
 };
 
 // Re-export core types for external use
-pub use types::{AnalysisState, Bounds, Source, Taint};
+pub use types::{AnalysisState, Bounds, Source, Taint, FIELD_MODULUS, U32_MAX};
 
 // Re-export abstract interpretation types for decompilation
 pub use abstract_interp::{

@@ -251,4 +251,40 @@ impl TestHarness {
         let position = find_position(text, needle);
         self.hover(uri, position).await
     }
+
+    /// Get inlay hints for a document within a range.
+    pub async fn inlay_hints(
+        &self,
+        uri: &Url,
+        range: tower_lsp::lsp_types::Range,
+    ) -> Vec<tower_lsp::lsp_types::InlayHint> {
+        use tower_lsp::lsp_types::{InlayHintParams, TextDocumentIdentifier};
+        use tower_lsp::LanguageServer;
+
+        let params = InlayHintParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range,
+            work_done_progress_params: Default::default(),
+        };
+        self.backend
+            .inlay_hint(params)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// Enable decompilation inlay hints.
+    pub async fn enable_decompilation_hints(&self) {
+        let mut config = self.backend.snapshot_config().await;
+        config.inlay_hint_type = masm_lsp::InlayHintType::Decompilation;
+        self.backend.update_config(config).await;
+    }
+
+    /// Disable inlay hints.
+    pub async fn disable_inlay_hints(&self) {
+        let mut config = self.backend.snapshot_config().await;
+        config.inlay_hint_type = masm_lsp::InlayHintType::None;
+        self.backend.update_config(config).await;
+    }
 }
