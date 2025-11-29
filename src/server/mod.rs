@@ -226,7 +226,9 @@ where
 
     async fn handle_close(&self, uri: Url) {
         self.documents.remove(&uri).await;
-        self.client.publish_diagnostics(uri, vec![], None).await;
+        // NOTE: We intentionally do NOT clear diagnostics here. The LSP client
+        // should persist diagnostics for closed files until they are explicitly
+        // updated (e.g., when the file is reopened and re-analyzed).
     }
 
     async fn set_document_version(&self, uri: Url, version: i32) {
