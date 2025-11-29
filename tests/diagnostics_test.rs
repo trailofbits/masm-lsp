@@ -46,7 +46,7 @@ end
 
     harness.assert_has_diagnostics(&uri).await;
     harness
-        .assert_diagnostic_contains(&uri, "unresolved")
+        .assert_diagnostic_contains(&uri, "Unresolved")
         .await;
 }
 

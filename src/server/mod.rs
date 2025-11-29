@@ -1293,7 +1293,7 @@ end
         );
         // The diagnostic should indicate a syntax/semantic error
         let has_error_diag = diags.iter().any(|d| {
-            d.message.contains("syntax error")
+            d.message.contains("Syntax error")
                 || d.message.contains("undefined")
                 || d.message.contains("foo")
         });

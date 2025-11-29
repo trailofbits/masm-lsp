@@ -198,7 +198,7 @@ impl<'a> LocalsAnalyzer<'a> {
         match state.get(idx) {
             LocalState::Uninitialized => {
                 self.findings.push(LocalsFinding {
-                    message: format!("read from uninitialized local {}", idx),
+                    message: format!("Read from uninitialized local {}.", idx),
                     span,
                     severity: DiagnosticSeverity::WARNING,
                 });
@@ -206,7 +206,7 @@ impl<'a> LocalsAnalyzer<'a> {
             LocalState::MaybeInitialized => {
                 self.findings.push(LocalsFinding {
                     message: format!(
-                        "local {} may not be initialized on all code paths",
+                        "Local {} may not be initialized on all code paths.",
                         idx
                     ),
                     span,
@@ -226,7 +226,7 @@ impl<'a> LocalsAnalyzer<'a> {
                 LocalState::Uninitialized => {
                     self.findings.push(LocalsFinding {
                         message: format!(
-                            "read from uninitialized local {} (in word starting at {})",
+                            "Read from uninitialized local {} (in word starting at {}).",
                             idx, base_idx
                         ),
                         span,
@@ -236,7 +236,7 @@ impl<'a> LocalsAnalyzer<'a> {
                 LocalState::MaybeInitialized => {
                     self.findings.push(LocalsFinding {
                         message: format!(
-                            "local {} may not be initialized on all code paths (in word starting at {})",
+                            "Local {} may not be initialized on all code paths (in word starting at {}).",
                             idx, base_idx
                         ),
                         span,
@@ -260,7 +260,7 @@ impl<'a> LocalsAnalyzer<'a> {
             LocalState::Uninitialized => {
                 self.findings.push(LocalsFinding {
                     message: format!(
-                        "taking address of uninitialized local {}; if passed to another procedure, it may read garbage",
+                        "Taking address of uninitialized local {}. If passed to another procedure, it may read garbage.",
                         idx
                     ),
                     span,
@@ -270,7 +270,7 @@ impl<'a> LocalsAnalyzer<'a> {
             LocalState::MaybeInitialized => {
                 self.findings.push(LocalsFinding {
                     message: format!(
-                        "taking address of local {} which may not be initialized on all code paths",
+                        "Taking address of local {} which may not be initialized on all code paths.",
                         idx
                     ),
                     span,
@@ -435,7 +435,7 @@ end
 "#;
         let diags = analyze_source(source);
         assert_eq!(count_warnings(&diags), 1, "Should warn when reading uninitialized local");
-        assert!(diags[0].message.contains("uninitialized local 0"));
+        assert!(diags[0].message.contains("uninitialized local 0."));
     }
 
     #[test]
@@ -454,7 +454,7 @@ end
 "#;
         let diags = analyze_source(source);
         assert_eq!(count_warnings(&diags), 1, "Should warn when word contains uninitialized locals");
-        assert!(diags[0].message.contains("local 2") || diags[0].message.contains("local 3"));
+        assert!(diags[0].message.contains("local 2") || diags[0].message.contains("local 3"), "message: {}", diags[0].message);
     }
 
     #[test]
@@ -511,7 +511,7 @@ end
 "#;
         let diags = analyze_source(source);
         assert_eq!(count_warnings(&diags), 1, "Should warn when only one branch initializes");
-        assert!(diags[0].message.contains("may not be initialized"));
+        assert!(diags[0].message.contains("may not be initialized"), "message: {}", diags[0].message);
     }
 
     #[test]
@@ -531,7 +531,7 @@ end
 "#;
         let diags = analyze_source(source);
         assert_eq!(count_warnings(&diags), 1, "Should warn when init is only in while loop body");
-        assert!(diags[0].message.contains("may not be initialized"));
+        assert!(diags[0].message.contains("may not be initialized"), "message: {}", diags[0].message);
     }
 
     #[test]
@@ -562,7 +562,7 @@ end
 "#;
         let diags = analyze_source(source);
         assert_eq!(count_warnings(&diags), 1, "Should warn when taking address of uninitialized local");
-        assert!(diags[0].message.contains("taking address"));
+        assert!(diags[0].message.contains("Taking address"), "message: {}", diags[0].message);
     }
 
     #[test]
@@ -614,6 +614,6 @@ end
 "#;
         let diags = analyze_source(source);
         assert_eq!(count_warnings(&diags), 1, "Should warn for uninitialized local 1");
-        assert!(diags[0].message.contains("local 1"));
+        assert!(diags[0].message.contains("local 1"), "message: {}", diags[0].message);
     }
 }
