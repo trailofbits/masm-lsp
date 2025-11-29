@@ -4,6 +4,7 @@
 //! - Unvalidated advice values used in u32 operations
 //! - Missing range checks before Merkle operations
 //! - Untrusted values passed to procedures requiring u32 inputs
+//! - Reads from uninitialized local variables
 //!
 //! The analysis is structured as:
 //! - `types`: Core types (Bounds, Source, Taint, AnalysisState)
@@ -15,12 +16,14 @@
 //! - `contracts`: Workspace-wide procedure contract inference
 //! - `while_loops`: Loop bound inference for while loops with counter patterns
 //! - `abstract_interp`: Abstract interpretation framework for decompilation
+//! - `locals`: Uninitialized local variable detection
 
 pub mod abstract_interp;
 pub mod analyzer;
 pub mod checker;
 pub mod checkers;
 pub mod contracts;
+pub mod locals;
 pub mod stack_effects;
 pub mod stack_ops;
 pub mod types;
@@ -50,3 +53,6 @@ pub use stack_ops::{
     analyze_procedure_simple, analyze_procedure_tiered, static_effect, SimpleStackAnalysis,
     StackEffectResult, StackLike, StaticEffect,
 };
+
+// Re-export locals analysis for uninitialized variable detection
+pub use locals::analyze_locals;
