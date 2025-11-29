@@ -17,7 +17,7 @@ use crate::analysis::{
     analyze_repeat_loop, parse_procedure_signature, pre_analyze_procedure, ContractStore,
     StackEffect,
 };
-use crate::diagnostics::span_to_range;
+use crate::diagnostics::{span_to_range, SOURCE_DECOMPILATION};
 
 use super::pseudocode::{
     apply_counter_indexing, apply_output_indexing, extract_declaration_prefix,
@@ -661,7 +661,7 @@ pub fn collect_decompilation_hints(
                 severity: Some(DiagnosticSeverity::WARNING),
                 code: None,
                 code_description: None,
-                source: Some("masm-lsp/decompilation".to_string()),
+                source: Some(SOURCE_DECOMPILATION.to_string()),
                 message: format!(
                     "Pseudocode unavailable in `{}`: {}",
                     failure.proc_name, failure.reason

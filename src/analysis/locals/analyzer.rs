@@ -12,6 +12,8 @@ use miden_assembly_syntax::ast::{
 use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Span};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
+use crate::diagnostics::SOURCE_ANALYSIS;
+
 use super::state::{LocalState, LocalsState};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -300,7 +302,7 @@ impl<'a> LocalsAnalyzer<'a> {
             severity: Some(finding.severity),
             code: None,
             code_description: None,
-            source: Some("masm-lsp/uninitialized-locals".to_string()),
+            source: Some(SOURCE_ANALYSIS.to_string()),
             message: finding.message.clone(),
             related_information: None,
             tags: None,

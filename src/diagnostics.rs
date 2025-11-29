@@ -3,6 +3,16 @@ use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan};
 use miden_utils_diagnostics::{Diagnostic as Midiag, Severity};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
+/// Diagnostic source for syntax errors (parsing, unresolved references).
+pub const SOURCE_SYNTAX: &str = "masm-lsp/syntax";
+
+/// Diagnostic source for analysis findings (taint analysis, uninitialized locals, etc.).
+pub const SOURCE_ANALYSIS: &str = "masm-lsp/analysis";
+
+/// Diagnostic source for decompilation failures.
+/// Note: The VS Code extension depends on this exact value.
+pub const SOURCE_DECOMPILATION: &str = "masm-lsp/decompilation";
+
 /// Normalize a diagnostic message to title case and ensure it ends with a single period.
 pub fn normalize_message(msg: &str) -> String {
     let msg = msg.trim();
@@ -67,6 +77,7 @@ pub fn diagnostics_from_report(
                     .severity()
                     .map(map_severity)
                     .or(Some(DiagnosticSeverity::ERROR)),
+                source: Some(SOURCE_SYNTAX.to_string()),
                 message,
                 ..Default::default()
             });
@@ -317,6 +328,7 @@ pub fn unresolved_to_diagnostics(
         .map(|reference| Diagnostic {
             range: reference.range,
             severity: Some(DiagnosticSeverity::ERROR),
+            source: Some(SOURCE_SYNTAX.to_string()),
             message: format!("Unresolved invocation target `{}`.", reference.path.name()),
             ..Default::default()
         })
@@ -378,6 +390,7 @@ fn fallback_diag(message: String) -> Diagnostic {
     Diagnostic {
         range: Range::new(Position::new(0, 0), Position::new(0, 0)),
         severity: Some(DiagnosticSeverity::ERROR),
+        source: Some(SOURCE_SYNTAX.to_string()),
         message: normalize_message(&message),
         ..Default::default()
     }

@@ -17,6 +17,8 @@ use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticRelatedInformation, Location, Position, Range, Url,
 };
 
+use crate::diagnostics::SOURCE_ANALYSIS;
+
 use super::checker::{CheckContext, Checker, Finding};
 use super::checkers::default_checkers;
 use super::contracts::{ContractStore, StackEffect};
@@ -195,7 +197,7 @@ impl<'a> Analyzer<'a> {
             severity: Some(finding.severity.into()),
             code: None,
             code_description: None,
-            source: Some("masm-lsp".to_string()),
+            source: Some(SOURCE_ANALYSIS.to_string()),
             message: finding.message.clone(),
             related_information,
             tags: None,
