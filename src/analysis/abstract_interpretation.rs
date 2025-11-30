@@ -31,8 +31,9 @@
 
 use std::fmt;
 
-use miden_assembly_syntax::ast::{Block, Instruction, Op};
+use miden_assembly_syntax::ast::{Block, Instruction, InvocationTarget, Op};
 
+use super::contracts::{ContractStore, StackEffect};
 use super::stack_ops::StackLike;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -631,12 +632,41 @@ impl AbstractStateSnapshot {
 // Transfer Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Try to resolve a procedure call's stack effect from the contract store.
+///
+/// Returns `Some((inputs, outputs))` if the procedure has a known stack effect,
+/// `None` otherwise.
+fn resolve_procedure_call_effect(
+    target: &InvocationTarget,
+    contracts: Option<&ContractStore>,
+) -> Option<(usize, usize)> {
+    let store = contracts?;
+
+    let target_name = match target {
+        InvocationTarget::Symbol(ident) => ident.as_str(),
+        InvocationTarget::Path(path) => path.inner().as_str(),
+        InvocationTarget::MastRoot(_) => return None,
+    };
+
+    let contract = store.get_by_suffix(target_name)?;
+
+    match &contract.stack_effect {
+        StackEffect::Known { inputs, outputs } => Some((*inputs, *outputs)),
+        _ => None,
+    }
+}
+
 /// Apply the transfer function for an instruction to the abstract state.
 ///
 /// Returns a description of the operation for pseudocode generation, if any.
+///
+/// When a `ContractStore` is provided, procedure calls can be resolved to their
+/// stack effects, allowing the analysis to continue past call sites instead of
+/// failing with "unknown stack effect".
 pub fn transfer_instruction(
     inst: &Instruction,
     state: &mut AbstractState,
+    contracts: Option<&ContractStore>,
 ) -> Option<TransferResult> {
     if state.tracking_failed {
         return None;
@@ -947,6 +977,31 @@ pub fn transfer_instruction(
                 address: addr.to_pseudocode("i"),
                 value: value.to_pseudocode("i"),
             })
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Static procedure calls - resolve via ContractStore if available
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
+            if let Some(effect) = resolve_procedure_call_effect(target, contracts) {
+                // Apply the known stack effect
+                for _ in 0..effect.0 {
+                    state.pop();
+                }
+                for _ in 0..effect.1 {
+                    state.push(SymbolicExpr::Top);
+                }
+                None
+            } else {
+                // Can't resolve - fail tracking
+                let target_name = match target {
+                    InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
+                    InvocationTarget::Path(path) => path.inner().as_str().to_string(),
+                    InvocationTarget::MastRoot(_) => "<mast_root>".to_string(),
+                };
+                state.fail(&format!("procedure '{}' has unknown stack effect", target_name));
+                None
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1318,7 +1373,7 @@ fn execute_block_abstract(block: &Block, state: &mut AbstractState) {
 fn execute_op_abstract(op: &Op, state: &mut AbstractState) {
     match op {
         Op::Inst(inst) => {
-            transfer_instruction(inst.inner(), state);
+            transfer_instruction(inst.inner(), state, None);
         }
         Op::If {
             then_blk,
@@ -1438,7 +1493,7 @@ fn pre_analyze_block(block: &Block, state: &mut AbstractState) {
 fn pre_analyze_op(op: &Op, state: &mut AbstractState) {
     match op {
         Op::Inst(inst) => {
-            transfer_instruction(inst.inner(), state);
+            transfer_instruction(inst.inner(), state, None);
         }
         Op::If {
             then_blk,

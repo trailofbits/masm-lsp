@@ -144,6 +144,7 @@ mod tests {
             reads_advice: false,
             uses_merkle_ops: false,
             stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            signature: None,
             definition_range: None,
         }]);
 
@@ -173,6 +174,7 @@ mod tests {
             reads_advice: false,
             uses_merkle_ops: false,
             stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            signature: None,
             definition_range: None,
         }]);
 
@@ -225,6 +227,7 @@ mod tests {
             reads_advice: false,
             uses_merkle_ops: false,
             stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            signature: None,
             definition_range: None,
         }]);
 
@@ -261,6 +264,7 @@ mod tests {
             reads_advice: false,
             uses_merkle_ops: false,
             stack_effect: StackEffect::Known { inputs: 1, outputs: 1 },
+            signature: None,
             definition_range: None,
         }]);
 
@@ -295,6 +299,7 @@ mod tests {
             reads_advice: false,
             uses_merkle_ops: false,
             stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            signature: None,
             definition_range: None,
         }]);
 

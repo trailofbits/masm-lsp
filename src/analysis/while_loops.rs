@@ -16,7 +16,7 @@ use miden_assembly_syntax::ast::{
 
 use super::stack_ops::StackLike;
 use super::types::Bounds;
-use super::utils::{felt_imm_to_u64, push_imm_to_u64, u8_imm_to_u64};
+use super::utils::{felt_imm_to_u64, push_imm_to_u64, u8_imm_to_u64, u32_imm_to_u64};
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -158,7 +158,9 @@ impl StackLike for BoundsStack {
         self.ensure_depth(n + 1);
         let elem = self.elements.pop().unwrap();
         let len = self.elements.len();
-        let idx = len + 1 - n;
+        // Insert at (len - n): for movdn.2 with len=3, insert at index 1
+        // This places the element at position n from top (0-indexed)
+        let idx = len.saturating_sub(n);
         self.elements.insert(idx, elem);
     }
 }
@@ -303,9 +305,7 @@ impl WhileLoopAnalyzer {
                 self.stack.pop();
             }
             Instruction::DropW => {
-                for _ in 0..4 {
-                    self.stack.pop();
-                }
+                self.stack.pop_n(4);
             }
 
             // Dup operations
@@ -421,6 +421,44 @@ impl WhileLoopAnalyzer {
                 self.stack.push(a.mul(&b));
             }
 
+            // u32 wrapping arithmetic - detect loop counter patterns
+            Instruction::U32WrappingAdd => {
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+                // Detect increment pattern
+                if let (Bounds::Const(inc_amount), Some(_)) = (&b, self.initial_counter) {
+                    self.increment_pattern = Some((self.stack.depth(), *inc_amount));
+                }
+                self.stack.push(a.add(&b));
+            }
+            Instruction::U32WrappingAddImm(imm) => {
+                let a = self.stack.pop();
+                if let Some(inc_amount) = u32_imm_to_u64(imm) {
+                    self.increment_pattern = Some((self.stack.depth(), inc_amount));
+                    self.stack.push(a.add(&Bounds::Const(inc_amount)));
+                } else {
+                    self.stack.push(Bounds::u32());
+                }
+            }
+            Instruction::U32WrappingSub => {
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+                // Detect decrement pattern
+                if let (Bounds::Const(dec_amount), Some(_)) = (&b, self.initial_counter) {
+                    self.decrement_pattern = Some((self.stack.depth(), *dec_amount));
+                }
+                self.stack.push(a.sub(&b));
+            }
+            Instruction::U32WrappingSubImm(imm) => {
+                let a = self.stack.pop();
+                if let Some(dec_amount) = u32_imm_to_u64(imm) {
+                    self.decrement_pattern = Some((self.stack.depth(), dec_amount));
+                    self.stack.push(a.sub(&Bounds::Const(dec_amount)));
+                } else {
+                    self.stack.push(Bounds::u32());
+                }
+            }
+
             // Comparison operations
             Instruction::Eq => {
                 let b = self.stack.pop();
@@ -492,6 +530,44 @@ impl WhileLoopAnalyzer {
                     self.limit_inclusive = true;
                 }
 
+                self.stack.push(a.gte(&b));
+            }
+
+            // u32 comparison operations (same semantics as regular comparisons for loop detection)
+            Instruction::U32Lt => {
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+                if let Bounds::Const(limit) = &b {
+                    self.upper_limit = Some(*limit);
+                    self.limit_inclusive = false;
+                }
+                self.stack.push(a.lt(&b));
+            }
+            Instruction::U32Lte => {
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+                if let Bounds::Const(limit) = &b {
+                    self.upper_limit = Some(*limit);
+                    self.limit_inclusive = true;
+                }
+                self.stack.push(a.lte(&b));
+            }
+            Instruction::U32Gt => {
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+                if let Bounds::Const(limit) = &b {
+                    self.lower_limit = Some(*limit);
+                    self.limit_inclusive = false;
+                }
+                self.stack.push(a.gt(&b));
+            }
+            Instruction::U32Gte => {
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+                if let Bounds::Const(limit) = &b {
+                    self.lower_limit = Some(*limit);
+                    self.limit_inclusive = true;
+                }
                 self.stack.push(a.gte(&b));
             }
 

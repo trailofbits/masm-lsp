@@ -40,5 +40,5 @@
 mod analyzer;
 mod state;
 
-pub use analyzer::analyze_locals;
+pub use analyzer::{analyze_locals, analyze_locals_with_contracts};
 pub use state::{LocalState, LocalsState};

@@ -5,7 +5,7 @@
 //!
 //! # Module Structure
 //!
-//! - `types`: Core contract types (`ProcContract`, `StackEffect`, `ValidationBehavior`)
+//! - `types`: Core contract types (`ProcContract`, `StackEffect`, `ValidationBehavior`, `InputKind`, `InputSignature`)
 //! - `signature`: Procedure signature parsing for explicit type annotations
 //! - `store`: Workspace-wide contract storage (`ContractStore`)
 //! - `inference`: Contract inference from procedure implementations
@@ -19,4 +19,7 @@ pub mod types;
 pub use inference::{infer_module_contracts, infer_module_contracts_with_store};
 pub use signature::{extract_and_parse_signature, parse_procedure_signature, ParsedSignature};
 pub use store::ContractStore;
-pub use types::{ProcContract, StackEffect, ValidationBehavior};
+pub use types::{
+    InputKind, InputSignature, OutputKind, ProcContract, ProcSignature, StackEffect,
+    ValidationBehavior,
+};

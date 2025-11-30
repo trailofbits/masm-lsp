@@ -5,7 +5,9 @@
 //! - Static stack effect tables for fast-path analysis
 //! - Simple arithmetic stack analysis that doesn't require symbolic execution
 
-use miden_assembly_syntax::ast::{Block, Immediate, Instruction, Op};
+use miden_assembly_syntax::ast::{Block, Immediate, Instruction, InvocationTarget, Op};
+
+use super::contracts::{ContractStore, StackEffect};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Static Stack Effects
@@ -190,9 +192,11 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         MemStore => StaticEffect::new(2, 0),
         MemStoreImm(_) => StaticEffect::new(1, 0),
 
-        // Word load: pop 1 (addr), push 4 (word)
-        MemLoadWBe | MemLoadWLe => StaticEffect::new(1, 4),
-        MemLoadWBeImm(_) | MemLoadWLeImm(_) => StaticEffect::new(0, 4),
+        // Word load: [A, a, ...] -> [V, ...] where A is word to overwrite, a is addr, V is loaded
+        // Pop 5 (4 word elements + 1 addr), push 4 (loaded word)
+        MemLoadWBe | MemLoadWLe => StaticEffect::new(5, 4),
+        // Immediate: [A, ...] -> [V, ...] - pop 4 (word to overwrite), push 4 (loaded word)
+        MemLoadWBeImm(_) | MemLoadWLeImm(_) => StaticEffect::new(4, 4),
 
         // Word store: pop 5 (addr + word), push 0
         MemStoreWBe | MemStoreWLe => StaticEffect::new(5, 0),
@@ -335,8 +339,12 @@ pub enum StackEffectResult {
 /// Does not track symbolic values, just depths. This is much faster than
 /// full abstract interpretation and sufficient for determining stack effects
 /// of most code.
+///
+/// When a `ContractStore` is provided, procedure calls can be resolved to their
+/// stack effects, allowing the analysis to continue past call sites instead of
+/// falling back to `Dynamic`.
 #[derive(Clone, Debug)]
-pub struct SimpleStackAnalysis {
+pub struct SimpleStackAnalysis<'a> {
     /// Current stack depth relative to procedure entry.
     depth: i32,
     /// Minimum depth reached (negative = inputs discovered).
@@ -347,15 +355,17 @@ pub struct SimpleStackAnalysis {
     valid: bool,
     /// Reason for invalidity.
     invalid_reason: Option<String>,
+    /// Optional contract store for resolving procedure calls.
+    contract_store: Option<&'a ContractStore>,
 }
 
-impl Default for SimpleStackAnalysis {
+impl Default for SimpleStackAnalysis<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SimpleStackAnalysis {
+impl<'a> SimpleStackAnalysis<'a> {
     /// Create a new analysis state.
     pub fn new() -> Self {
         Self {
@@ -364,6 +374,19 @@ impl SimpleStackAnalysis {
             max_depth: 0,
             valid: true,
             invalid_reason: None,
+            contract_store: None,
+        }
+    }
+
+    /// Create analysis with a contract store for resolving procedure calls.
+    pub fn with_contracts(contract_store: &'a ContractStore) -> Self {
+        Self {
+            depth: 0,
+            min_depth: 0,
+            max_depth: 0,
+            valid: true,
+            invalid_reason: None,
+            contract_store: Some(contract_store),
         }
     }
 
@@ -375,6 +398,19 @@ impl SimpleStackAnalysis {
             max_depth: input_count as i32,
             valid: true,
             invalid_reason: None,
+            contract_store: None,
+        }
+    }
+
+    /// Create analysis with both inputs and a contract store.
+    pub fn with_inputs_and_contracts(input_count: usize, contract_store: &'a ContractStore) -> Self {
+        Self {
+            depth: input_count as i32,
+            min_depth: 0,
+            max_depth: input_count as i32,
+            valid: true,
+            invalid_reason: None,
+            contract_store: Some(contract_store),
         }
     }
 
@@ -424,8 +460,68 @@ impl SimpleStackAnalysis {
                 true
             }
             None => {
+                // Try to resolve procedure calls via contract store
+                if self.try_apply_procedure_call(inst) {
+                    return true;
+                }
                 // Dynamic effect - invalidate
                 self.invalidate(&format!("dynamic effect: {:?}", inst));
+                false
+            }
+        }
+    }
+
+    /// Try to apply a procedure call's stack effect from the contract store.
+    ///
+    /// Returns `true` if the call was resolved and the effect was applied,
+    /// `false` if the call couldn't be resolved.
+    fn try_apply_procedure_call(&mut self, inst: &Instruction) -> bool {
+        let contract_store = match self.contract_store {
+            Some(store) => store,
+            None => return false,
+        };
+
+        let target = match inst {
+            Instruction::Exec(t) | Instruction::Call(t) | Instruction::SysCall(t) => t,
+            _ => return false,
+        };
+
+        let target_name = match target {
+            InvocationTarget::Symbol(ident) => ident.as_str(),
+            InvocationTarget::Path(path) => path.inner().as_str(),
+            InvocationTarget::MastRoot(_) => return false, // Can't resolve MAST roots
+        };
+
+        // Look up the contract by suffix (handles both short names and full paths)
+        let contract = match contract_store.get_by_suffix(target_name) {
+            Some(c) => c,
+            None => return false, // Contract not found
+        };
+
+        match &contract.stack_effect {
+            StackEffect::Known { inputs, outputs } => {
+                self.depth -= *inputs as i32;
+                self.min_depth = self.min_depth.min(self.depth);
+                self.depth += *outputs as i32;
+                self.max_depth = self.max_depth.max(self.depth);
+                true
+            }
+            StackEffect::KnownInputs { inputs } => {
+                // We know inputs but not outputs - can't continue simple analysis
+                self.depth -= *inputs as i32;
+                self.min_depth = self.min_depth.min(self.depth);
+                // Mark as invalid since we don't know outputs
+                self.invalidate(&format!(
+                    "procedure '{}' has unknown output count",
+                    target_name
+                ));
+                false
+            }
+            StackEffect::Unknown => {
+                self.invalidate(&format!(
+                    "procedure '{}' has unknown stack effect",
+                    target_name
+                ));
                 false
             }
         }
@@ -617,7 +713,24 @@ impl SimpleStackAnalysis {
 /// Falls back to returning `Dynamic` if the procedure contains constructs
 /// that require abstract interpretation (while loops, procedure calls).
 pub fn analyze_procedure_simple(body: &Block) -> StackEffectResult {
-    let mut analysis = SimpleStackAnalysis::new();
+    analyze_procedure_simple_with_contracts(body, None)
+}
+
+/// Analyze a procedure's stack effect using the fast path with contract resolution.
+///
+/// When a `ContractStore` is provided, procedure calls can be resolved to their
+/// known stack effects, allowing the analysis to succeed for more procedures.
+///
+/// Falls back to returning `Dynamic` if the procedure contains constructs
+/// that require abstract interpretation (while loops, unresolved procedure calls).
+pub fn analyze_procedure_simple_with_contracts(
+    body: &Block,
+    contract_store: Option<&ContractStore>,
+) -> StackEffectResult {
+    let mut analysis = match contract_store {
+        Some(store) => SimpleStackAnalysis::with_contracts(store),
+        None => SimpleStackAnalysis::new(),
+    };
 
     match analysis.analyze_block(body) {
         Some(net_effect) => {
@@ -643,10 +756,30 @@ pub fn analyze_procedure_simple(body: &Block) -> StackEffectResult {
 ///
 /// Use this function when you need the most accurate analysis possible.
 pub fn analyze_procedure_tiered(body: &Block) -> StackEffectResult {
+    analyze_procedure_tiered_with_contracts(body, None)
+}
+
+/// Analyze a procedure's stack effect using tiered analysis with contract resolution.
+///
+/// When a `ContractStore` is provided, procedure calls can be resolved to their
+/// known stack effects during the fast path.
+///
+/// This function implements the two-tier analysis strategy:
+/// 1. First tries the fast arithmetic analysis (SimpleStackAnalysis)
+/// 2. Falls back to full abstract interpretation if needed
+///
+/// Use this function when you need the most accurate analysis possible.
+pub fn analyze_procedure_tiered_with_contracts(
+    body: &Block,
+    contract_store: Option<&ContractStore>,
+) -> StackEffectResult {
     use super::abstract_interpretation::pre_analyze_procedure;
 
     // Tier 1: Try fast path
-    let mut simple = SimpleStackAnalysis::new();
+    let mut simple = match contract_store {
+        Some(store) => SimpleStackAnalysis::with_contracts(store),
+        None => SimpleStackAnalysis::new(),
+    };
     if let Some(net_effect) = simple.analyze_block(body) {
         let inputs = simple.inputs_required();
         let outputs = (inputs as i32 + net_effect) as usize;
@@ -777,6 +910,170 @@ pub trait StackLike {
         for i in 0..4 {
             self.swap(i, 7 - i);
         }
+    }
+
+    /// Push N copies of the given element onto the stack.
+    fn push_n(&mut self, n: usize, elem: Self::Element)
+    where
+        Self::Element: Clone,
+    {
+        for _ in 0..n {
+            self.push(elem.clone());
+        }
+    }
+
+    /// Push N elements of the default value onto the stack.
+    fn push_defaults(&mut self, n: usize)
+    where
+        Self::Element: Default,
+    {
+        for _ in 0..n {
+            self.push(Self::Element::default());
+        }
+    }
+
+    /// Pop N elements from the stack.
+    fn pop_n(&mut self, n: usize) {
+        for _ in 0..n {
+            self.pop();
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Stack Manipulation Helper
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Result of applying a stack manipulation instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackManipResult {
+    /// The instruction was a pure stack manipulation and was applied.
+    Applied,
+    /// The instruction is not a pure stack manipulation (needs special handling).
+    NotStackManip,
+}
+
+/// Apply pure stack manipulation instructions to a StackLike implementation.
+///
+/// This handles all dup, swap, movup, movdn, drop instructions and their word variants.
+/// Returns `StackManipResult::Applied` if the instruction was handled, or
+/// `StackManipResult::NotStackManip` if the instruction requires special handling.
+///
+/// This function is useful for stack tracking analysis where only the provenance
+/// of values matters, not their contents.
+pub fn apply_stack_manipulation<S: StackLike>(stack: &mut S, inst: &Instruction) -> StackManipResult
+where
+    S::Element: Default,
+{
+    use Instruction::*;
+    match inst {
+        // Drop operations
+        Drop => {
+            stack.pop();
+            StackManipResult::Applied
+        }
+        DropW => {
+            stack.pop_n(4);
+            StackManipResult::Applied
+        }
+
+        // Dup operations
+        Dup0 => { stack.dup(0); StackManipResult::Applied }
+        Dup1 => { stack.dup(1); StackManipResult::Applied }
+        Dup2 => { stack.dup(2); StackManipResult::Applied }
+        Dup3 => { stack.dup(3); StackManipResult::Applied }
+        Dup4 => { stack.dup(4); StackManipResult::Applied }
+        Dup5 => { stack.dup(5); StackManipResult::Applied }
+        Dup6 => { stack.dup(6); StackManipResult::Applied }
+        Dup7 => { stack.dup(7); StackManipResult::Applied }
+        Dup8 => { stack.dup(8); StackManipResult::Applied }
+        Dup9 => { stack.dup(9); StackManipResult::Applied }
+        Dup10 => { stack.dup(10); StackManipResult::Applied }
+        Dup11 => { stack.dup(11); StackManipResult::Applied }
+        Dup12 => { stack.dup(12); StackManipResult::Applied }
+        Dup13 => { stack.dup(13); StackManipResult::Applied }
+        Dup14 => { stack.dup(14); StackManipResult::Applied }
+        Dup15 => { stack.dup(15); StackManipResult::Applied }
+
+        // DupW operations
+        DupW0 => { stack.dupw(0); StackManipResult::Applied }
+        DupW1 => { stack.dupw(1); StackManipResult::Applied }
+        DupW2 => { stack.dupw(2); StackManipResult::Applied }
+        DupW3 => { stack.dupw(3); StackManipResult::Applied }
+
+        // Swap operations
+        Swap1 => { stack.swap(0, 1); StackManipResult::Applied }
+        Swap2 => { stack.swap(0, 2); StackManipResult::Applied }
+        Swap3 => { stack.swap(0, 3); StackManipResult::Applied }
+        Swap4 => { stack.swap(0, 4); StackManipResult::Applied }
+        Swap5 => { stack.swap(0, 5); StackManipResult::Applied }
+        Swap6 => { stack.swap(0, 6); StackManipResult::Applied }
+        Swap7 => { stack.swap(0, 7); StackManipResult::Applied }
+        Swap8 => { stack.swap(0, 8); StackManipResult::Applied }
+        Swap9 => { stack.swap(0, 9); StackManipResult::Applied }
+        Swap10 => { stack.swap(0, 10); StackManipResult::Applied }
+        Swap11 => { stack.swap(0, 11); StackManipResult::Applied }
+        Swap12 => { stack.swap(0, 12); StackManipResult::Applied }
+        Swap13 => { stack.swap(0, 13); StackManipResult::Applied }
+        Swap14 => { stack.swap(0, 14); StackManipResult::Applied }
+        Swap15 => { stack.swap(0, 15); StackManipResult::Applied }
+
+        // SwapW operations
+        SwapW1 => { stack.swapw(0, 1); StackManipResult::Applied }
+        SwapW2 => { stack.swapw(0, 2); StackManipResult::Applied }
+        SwapW3 => { stack.swapw(0, 3); StackManipResult::Applied }
+
+        // SwapDW
+        SwapDw => {
+            // Swap double words: [0..8] with [8..16]
+            for i in 0..8 {
+                stack.swap(i, 8 + i);
+            }
+            StackManipResult::Applied
+        }
+
+        // MovUp operations
+        MovUp2 => { stack.movup(2); StackManipResult::Applied }
+        MovUp3 => { stack.movup(3); StackManipResult::Applied }
+        MovUp4 => { stack.movup(4); StackManipResult::Applied }
+        MovUp5 => { stack.movup(5); StackManipResult::Applied }
+        MovUp6 => { stack.movup(6); StackManipResult::Applied }
+        MovUp7 => { stack.movup(7); StackManipResult::Applied }
+        MovUp8 => { stack.movup(8); StackManipResult::Applied }
+        MovUp9 => { stack.movup(9); StackManipResult::Applied }
+        MovUp10 => { stack.movup(10); StackManipResult::Applied }
+        MovUp11 => { stack.movup(11); StackManipResult::Applied }
+        MovUp12 => { stack.movup(12); StackManipResult::Applied }
+        MovUp13 => { stack.movup(13); StackManipResult::Applied }
+        MovUp14 => { stack.movup(14); StackManipResult::Applied }
+        MovUp15 => { stack.movup(15); StackManipResult::Applied }
+
+        // MovUpW operations
+        MovUpW2 => { stack.movupw(2); StackManipResult::Applied }
+        MovUpW3 => { stack.movupw(3); StackManipResult::Applied }
+
+        // MovDn operations
+        MovDn2 => { stack.movdn(2); StackManipResult::Applied }
+        MovDn3 => { stack.movdn(3); StackManipResult::Applied }
+        MovDn4 => { stack.movdn(4); StackManipResult::Applied }
+        MovDn5 => { stack.movdn(5); StackManipResult::Applied }
+        MovDn6 => { stack.movdn(6); StackManipResult::Applied }
+        MovDn7 => { stack.movdn(7); StackManipResult::Applied }
+        MovDn8 => { stack.movdn(8); StackManipResult::Applied }
+        MovDn9 => { stack.movdn(9); StackManipResult::Applied }
+        MovDn10 => { stack.movdn(10); StackManipResult::Applied }
+        MovDn11 => { stack.movdn(11); StackManipResult::Applied }
+        MovDn12 => { stack.movdn(12); StackManipResult::Applied }
+        MovDn13 => { stack.movdn(13); StackManipResult::Applied }
+        MovDn14 => { stack.movdn(14); StackManipResult::Applied }
+        MovDn15 => { stack.movdn(15); StackManipResult::Applied }
+
+        // MovDnW operations
+        MovDnW2 => { stack.movdnw(2); StackManipResult::Applied }
+        MovDnW3 => { stack.movdnw(3); StackManipResult::Applied }
+
+        // Not a pure stack manipulation (handled separately)
+        _ => StackManipResult::NotStackManip,
     }
 }
 

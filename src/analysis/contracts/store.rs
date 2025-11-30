@@ -20,6 +20,8 @@ pub struct ContractStore {
     contracts: HashMap<SymbolPath, ProcContract>,
     /// Index by short name for fast lookups
     by_name: HashMap<String, Vec<SymbolPath>>,
+    /// Version counter for change tracking
+    version: u64,
 }
 
 impl ContractStore {
@@ -27,8 +29,20 @@ impl ContractStore {
         Self::default()
     }
 
+    /// Get the current version of the store.
+    ///
+    /// Version increases on each modification, useful for cache invalidation.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Update contracts for a document.
     pub fn update_document(&mut self, contracts: Vec<ProcContract>) {
+        if contracts.is_empty() {
+            return;
+        }
+        self.version += 1;
+
         for contract in contracts {
             let path = contract.path.clone();
             let name = path.name().to_string();
@@ -49,6 +63,11 @@ impl ContractStore {
 
     /// Remove contracts for a document.
     pub fn remove_document(&mut self, paths: &[SymbolPath]) {
+        if paths.is_empty() {
+            return;
+        }
+        self.version += 1;
+
         for path in paths {
             self.contracts.remove(path);
             let name = path.name().to_string();
@@ -56,6 +75,16 @@ impl ContractStore {
                 entries.retain(|p| p != path);
             }
         }
+    }
+
+    /// Returns the number of contracts in the store.
+    pub fn len(&self) -> usize {
+        self.contracts.len()
+    }
+
+    /// Returns true if the store is empty.
+    pub fn is_empty(&self) -> bool {
+        self.contracts.is_empty()
     }
 
     /// Get contract by exact path.
@@ -120,6 +149,7 @@ mod tests {
             reads_advice: false,
             uses_merkle_ops: false,
             stack_effect: StackEffect::Unknown,
+            signature: None,
             definition_range: None,
         };
 
@@ -140,6 +170,7 @@ mod tests {
             reads_advice: false,
             uses_merkle_ops: false,
             stack_effect: StackEffect::Unknown,
+            signature: None,
             definition_range: None,
         };
 
@@ -148,5 +179,30 @@ mod tests {
         assert!(store.get_by_suffix("u64::add").is_some());
         assert!(store.get_by_suffix("add").is_some());
         assert!(store.get_by_suffix("math::u64::add").is_some());
+    }
+
+    #[test]
+    fn test_contract_store_version() {
+        let mut store = ContractStore::new();
+        assert_eq!(store.version(), 0);
+
+        let path = SymbolPath::new("::test::proc1");
+        let contract = ProcContract {
+            path: path.clone(),
+            validates: ValidationBehavior::None,
+            uses_u32_ops: false,
+            reads_advice: false,
+            uses_merkle_ops: false,
+            stack_effect: StackEffect::Unknown,
+            signature: None,
+            definition_range: None,
+        };
+
+        store.update_document(vec![contract]);
+        assert_eq!(store.version(), 1);
+
+        // Empty update shouldn't increment version
+        store.update_document(vec![]);
+        assert_eq!(store.version(), 1);
     }
 }

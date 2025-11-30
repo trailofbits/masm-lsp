@@ -8,6 +8,9 @@ The LSP performs static analysis using:
 - **Taint tracking**: Values from untrusted sources (advice stack, Merkle store) are tracked
 - **Symbolic stack simulation**: Stack state is maintained abstractly through execution
 - **Control flow analysis**: Branch merging with lattice-based state joins
+- **Contract inference**: Automatic inference of procedure stack effects and validation behavior
+
+For details on the contract inference algorithm, see [CONTRACT_INFERENCE.md](CONTRACT_INFERENCE.md).
 
 ---
 
@@ -82,8 +85,8 @@ The LSP performs static analysis using:
 
 **Unhandled edge cases**:
 - MAST root calls cannot be analyzed
-- External procedures have unknown stack effects (no warning emitted)
-- Cross-module contract inference not supported
+- External procedures not in workspace have unknown stack effects (no warning emitted)
+- Procedures with dynamic control flow may have unknown effects
 
 ---
 
@@ -147,6 +150,7 @@ Document
     └─► Module Analysis
             │
             ├─► Contract Inference (per-procedure behavior)
+            │       └─► Topological ordering for efficient analysis
             │
             ├─► Stack Simulation Analysis
             │       ├─► U32 Validation Checker
@@ -159,3 +163,7 @@ Document
 ```
 
 Checkers run before stack effects are applied, receiving the current symbolic state at each instruction.
+
+## Related Documentation
+
+- [CONTRACT_INFERENCE.md](CONTRACT_INFERENCE.md) - Details on the contract inference algorithm
