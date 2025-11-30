@@ -1092,8 +1092,11 @@ pub fn format_procedure_signature(
     let args_str = args.join(", ");
 
     // Build the full signature with prefix
+    // Use dot notation for "export" (export.name) and space for others (proc name)
     let full_name = if prefix.is_empty() {
         name.to_string()
+    } else if prefix == "export" {
+        format!("{}.{}", prefix, name)
     } else {
         format!("{} {}", prefix, name)
     };
@@ -1415,7 +1418,7 @@ mod tests {
     fn test_format_procedure_signature_no_args_with_return() {
         assert_eq!(
             format_procedure_signature("export", "get_value", 0, Some(1)),
-            "export get_value() -> r_0:"
+            "export.get_value() -> r_0:"
         );
     }
 
