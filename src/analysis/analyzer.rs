@@ -10,16 +10,16 @@ use std::ops::ControlFlow;
 
 use miden_assembly_syntax::ast::{
     visit::{self, Visit},
-    Instruction, InvocationTarget, Module, Procedure,
+    Block, Instruction, InvocationTarget, Module, Op, Procedure,
 };
-use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Span};
+use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Span, Spanned};
 use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticRelatedInformation, Location, Position, Range, Url,
 };
 
 use crate::diagnostics::SOURCE_ANALYSIS;
 
-use super::checker::{AnalysisFinding, CheckContext, Checker};
+use super::checker::{AnalysisFinding, CheckContext, Checker, Severity};
 use super::checkers::default_checkers;
 use super::contracts::{ContractStore, StackEffect};
 use super::stack_effects::apply_effect;
@@ -160,6 +160,117 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Analyze a block and return the net stack effect (change in depth).
+    ///
+    /// Returns `None` if analysis fails (e.g., unknown procedure call).
+    fn analyze_block_effect(&mut self, block: &Block) -> Option<isize> {
+        let entry_depth = self.current_state.as_ref()?.stack.depth() as isize;
+
+        for op in block.iter() {
+            self.analyze_op_for_effect(op);
+        }
+
+        let exit_depth = self.current_state.as_ref()?.stack.depth() as isize;
+        Some(exit_depth - entry_depth)
+    }
+
+    /// Analyze a single op for stack effects (used by analyze_block_effect).
+    /// Also checks nested if/else blocks for branch balance.
+    fn analyze_op_for_effect(&mut self, op: &Op) {
+        match op {
+            Op::Inst(inst) => {
+                self.handle_instruction(inst.inner(), inst.span());
+            }
+            Op::If {
+                then_blk,
+                else_blk,
+                ..
+            } => {
+                // Check nested if/else for branch balance
+                self.check_branch_balance(then_blk, else_blk, op.span());
+            }
+            Op::While { body, .. } => {
+                // Condition is consumed at start of each iteration
+                if let Some(state) = &mut self.current_state {
+                    state.stack.pop();
+                }
+                // Analyze body once for effect
+                for op in body.iter() {
+                    self.analyze_op_for_effect(op);
+                }
+            }
+            Op::Repeat { body, .. } => {
+                // Analyze body once (repeat has known iteration count)
+                for op in body.iter() {
+                    self.analyze_op_for_effect(op);
+                }
+            }
+        }
+    }
+
+    /// Check if/else branches for stack balance and emit diagnostic if mismatched.
+    fn check_branch_balance(
+        &mut self,
+        then_blk: &Block,
+        else_blk: &Block,
+        span: SourceSpan,
+    ) {
+        let Some(entry_state) = self.current_state.clone() else {
+            return;
+        };
+
+        // Condition is consumed by if.true
+        let _entry_depth = entry_state.stack.depth().saturating_sub(1) as isize;
+
+        // Analyze then branch
+        self.current_state = Some(entry_state.clone());
+        if let Some(state) = &mut self.current_state {
+            state.stack.pop(); // consume condition
+        }
+        let then_effect = self.analyze_block_effect(then_blk);
+        let then_depth = self.current_state.as_ref().map(|s| s.stack.depth() as isize);
+
+        // Analyze else branch
+        self.current_state = Some(entry_state);
+        if let Some(state) = &mut self.current_state {
+            state.stack.pop(); // consume condition
+        }
+        let else_effect = self.analyze_block_effect(else_blk);
+        let else_depth = self.current_state.as_ref().map(|s| s.stack.depth() as isize);
+
+        // Compare effects
+        match (then_effect, else_effect, then_depth, else_depth) {
+            (Some(then_eff), Some(else_eff), Some(then_d), Some(_else_d)) => {
+                if then_eff != else_eff {
+                    let finding = AnalysisFinding {
+                        severity: Severity::Warning,
+                        message: format!(
+                            "Branch stack mismatch: 'then' branch has net effect {:+}, 'else' branch has net effect {:+}.",
+                            then_eff, else_eff
+                        ),
+                        related_value: None,
+                    };
+                    self.findings.push((span, finding));
+                }
+                // Use the then branch state going forward (arbitrary choice, both have same effect)
+                // Restore to then branch final depth
+                if let Some(state) = &mut self.current_state {
+                    // Adjust stack to then_depth (we're currently at else_depth)
+                    let current = state.stack.depth() as isize;
+                    let target = then_d;
+                    if current > target {
+                        for _ in 0..(current - target) {
+                            state.stack.pop();
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Analysis failed for one branch, can't compare
+            }
+        }
+    }
+
     /// Convert collected findings to LSP diagnostics.
     fn build_diagnostics(&self) -> Vec<Diagnostic> {
         self.findings
@@ -253,6 +364,26 @@ impl<'a> Visit for Analyzer<'a> {
         result
     }
 
+    fn visit_op(&mut self, op: &Op) -> ControlFlow<()> {
+        match op {
+            Op::If {
+                then_blk,
+                else_blk,
+                ..
+            } => {
+                // Check for branch stack balance mismatch
+                self.check_branch_balance(then_blk, else_blk, op.span());
+
+                // Don't recurse - check_branch_balance already analyzed both branches
+                ControlFlow::Continue(())
+            }
+            _ => {
+                // Default traversal for other ops
+                visit::visit_op(self, op)
+            }
+        }
+    }
+
     fn visit_inst(&mut self, inst: &Span<Instruction>) -> ControlFlow<()> {
         self.handle_instruction(inst.inner(), inst.span());
 
@@ -287,4 +418,172 @@ pub fn analyze_module(
 ) -> Vec<Diagnostic> {
     let analyzer = Analyzer::new(source_manager, uri.clone(), contracts);
     analyzer.analyze(module)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use miden_assembly_syntax::ast::ModuleKind;
+    use miden_assembly_syntax::{Parse, ParseOptions};
+    use miden_debug_types::{SourceLanguage, Uri};
+    use tower_lsp::lsp_types::DiagnosticSeverity;
+
+    fn analyze_source(source: &str) -> Vec<Diagnostic> {
+        let source_manager = DefaultSourceManager::default();
+        let miden_uri = Uri::from("test://test.masm");
+        source_manager.load(SourceLanguage::Masm, miden_uri.clone(), source.to_string());
+
+        let source_file = source_manager
+            .get_by_uri(&miden_uri)
+            .expect("Failed to load source");
+        let mut module_path = miden_assembly_syntax::ast::PathBuf::default();
+        module_path.push("test");
+        let opts = ParseOptions {
+            kind: ModuleKind::Library,
+            path: Some(module_path.into()),
+            ..Default::default()
+        };
+
+        match source_file.parse_with_options(&source_manager, opts) {
+            Ok(module) => {
+                let uri = Url::parse("file:///test.masm").unwrap();
+                analyze_module(&module, &source_manager, &uri, None)
+            }
+            Err(_) => vec![], // Parse error, no analysis
+        }
+    }
+
+    #[test]
+    fn test_branch_mismatch_detected() {
+        let source = r#"
+proc test
+    push.1
+    if.true
+        push.1
+    else
+        nop
+    end
+end
+"#;
+        let diags = analyze_source(source);
+        assert!(
+            diags.iter().any(|d| d.message.contains("Branch stack mismatch")),
+            "Expected branch mismatch diagnostic, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_branch_mismatch_severity_is_warning() {
+        let source = r#"
+proc test
+    push.1
+    if.true
+        push.1 push.2
+    else
+        push.1
+    end
+end
+"#;
+        let diags = analyze_source(source);
+        let mismatch = diags
+            .iter()
+            .find(|d| d.message.contains("Branch stack mismatch"));
+        assert!(mismatch.is_some(), "Expected branch mismatch diagnostic");
+        assert_eq!(mismatch.unwrap().severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn test_balanced_branches_no_diagnostic() {
+        let source = r#"
+proc test
+    push.1
+    if.true
+        push.1
+    else
+        push.2
+    end
+end
+"#;
+        let diags = analyze_source(source);
+        assert!(
+            !diags.iter().any(|d| d.message.contains("Branch stack mismatch")),
+            "Should not report mismatch for balanced branches, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_empty_else_matches_empty_then() {
+        let source = r#"
+proc test
+    push.1
+    if.true
+        nop
+    else
+        nop
+    end
+end
+"#;
+        let diags = analyze_source(source);
+        assert!(
+            !diags.iter().any(|d| d.message.contains("Branch stack mismatch")),
+            "Empty branches should be balanced, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_nested_if_mismatch() {
+        let source = r#"
+proc test
+    push.1
+    if.true
+        push.1
+        if.true
+            push.1
+        else
+            nop
+        end
+    else
+        push.1
+    end
+end
+"#;
+        let diags = analyze_source(source);
+        assert!(
+            diags.iter().any(|d| d.message.contains("Branch stack mismatch")),
+            "Expected branch mismatch for nested if, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_mismatch_message_shows_effects() {
+        let source = r#"
+proc test
+    push.1 push.2
+    if.true
+        push.1 push.2
+    else
+        drop
+    end
+end
+"#;
+        let diags = analyze_source(source);
+        let mismatch = diags
+            .iter()
+            .find(|d| d.message.contains("Branch stack mismatch"))
+            .expect("Expected branch mismatch diagnostic");
+        // then: +2, else: -1 (drop from non-empty stack)
+        assert!(
+            mismatch.message.contains("+2") && mismatch.message.contains("-1"),
+            "Message should show net effects, got: {}",
+            mismatch.message
+        );
+    }
 }
