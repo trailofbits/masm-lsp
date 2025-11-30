@@ -751,12 +751,20 @@ where
         // Try to resolve as a symbol (procedure, constant, etc.)
         match resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos) {
             Ok(symbol) => {
-                // Find the definition location
+                // Find the definition location and contract
                 let workspace = self.workspace.read().await;
                 let def_loc = workspace
                     .definition(symbol.path.as_str())
                     .or_else(|| workspace.definition_by_suffix(symbol.path.as_str()))
                     .or_else(|| workspace.definition_by_name(&symbol.name));
+
+                // Look up the contract to get argument usage information
+                let contract = workspace
+                    .contracts()
+                    .get_by_path(symbol.path.as_str())
+                    .or_else(|| workspace.contracts().get_by_suffix(symbol.path.as_str()))
+                    .or_else(|| workspace.contracts().get_by_name(&symbol.name))
+                    .cloned();
                 drop(workspace);
 
                 if let Some(loc) = def_loc {
@@ -769,12 +777,31 @@ where
                         let signature = extract_procedure_signature(content, def_line);
                         let comment = extract_doc_comment(content, def_line);
 
-                        // Build hover content: signature code block + separator + doc comment
-                        let hover_text = match (signature, comment) {
-                            (Some(sig), Some(doc)) => {
-                                format!("```masm\n{sig}\n```\n\n---\n\n{doc}")
+                        // Extract procedure name from signature for contract formatting
+                        // e.g., "pub proc foo" -> "pub proc foo", "export.bar" -> "export.bar"
+                        let proc_name = signature
+                            .as_ref()
+                            .and_then(|s| s.lines().last())
+                            .map(|line| line.trim().to_string())
+                            .unwrap_or_else(|| symbol.name.clone());
+
+                        // Format contract signature with procedure name
+                        let contract_sig = contract.and_then(|c| c.format_signature_for_display(&proc_name));
+
+                        // Build hover content: contract signature replaces the raw signature
+                        let hover_text = match (&contract_sig, comment) {
+                            (Some(csig), Some(doc)) => {
+                                format!("```masm\n{csig}\n```\n\n---\n\n{doc}")
                             }
-                            (Some(sig), None) => format!("```masm\n{sig}\n```"),
+                            (Some(csig), None) => {
+                                format!("```masm\n{csig}\n```")
+                            }
+                            (None, Some(doc)) if signature.is_some() => {
+                                format!("```masm\n{}\n```\n\n---\n\n{doc}", signature.unwrap())
+                            }
+                            (None, None) if signature.is_some() => {
+                                format!("```masm\n{}\n```", signature.unwrap())
+                            }
                             (None, Some(doc)) => doc,
                             (None, None) => return Ok(None),
                         };

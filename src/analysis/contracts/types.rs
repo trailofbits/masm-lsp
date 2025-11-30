@@ -244,6 +244,61 @@ impl ProcSignature {
             kinds: self.inputs.clone(),
         }
     }
+
+    /// Format the signature for display in hover tooltips.
+    ///
+    /// Returns a human-readable signature like:
+    /// - `(in a: felt, in b: felt) -> (r: felt)` for simple value procedures
+    /// - `(in src: *felt, out dst: *felt) -> ()` for procedures with address arguments
+    ///
+    /// Input annotations:
+    /// - `in`: input value or address read from
+    /// - `out`: address written to
+    /// - `inout`: address both read and written
+    ///
+    /// Types:
+    /// - `felt`: field element value
+    /// - `*felt`: pointer/address to memory
+    pub fn format_for_display(&self, proc_name: &str) -> String {
+        let inputs: Vec<String> = self
+            .inputs
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                let (dir, ty) = match kind {
+                    InputKind::Value => ("in", "felt"),
+                    InputKind::InputAddress => ("in", "*felt"),
+                    InputKind::OutputAddress => ("out", "*felt"),
+                    InputKind::InOutAddress => ("inout", "*felt"),
+                };
+                format!("{dir} a_{i}: {ty}")
+            })
+            .collect();
+
+        let outputs: Vec<String> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                let ty = match kind {
+                    OutputKind::Computed => "felt",
+                    OutputKind::InputPassthrough { input_pos } => {
+                        // Passthrough preserves the input type
+                        match self.inputs.get(*input_pos) {
+                            Some(InputKind::Value) => "felt",
+                            Some(_) => "*felt",
+                            None => "felt",
+                        }
+                    }
+                    OutputKind::MemoryRead { .. } => "felt",
+                    OutputKind::WrittenAddress { .. } => "*felt",
+                };
+                format!("r_{i}: {ty}")
+            })
+            .collect();
+
+        format!("{proc_name}({}) -> ({})", inputs.join(", "), outputs.join(", "))
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -379,6 +434,43 @@ impl ProcContract {
     /// Get the full signature if available.
     pub fn get_signature(&self) -> Option<&ProcSignature> {
         self.signature.as_ref()
+    }
+
+    /// Format the signature for display in hover tooltips.
+    ///
+    /// Returns a human-readable signature string. If detailed signature is available,
+    /// shows argument usage (value vs address). Otherwise falls back to basic stack effect.
+    ///
+    /// The `proc_name` parameter should be the procedure name with visibility prefix
+    /// (e.g., "pub foo" or "export.bar").
+    pub fn format_signature_for_display(&self, proc_name: &str) -> Option<String> {
+        // If we have a detailed signature, use it
+        if let Some(sig) = &self.signature {
+            return Some(sig.format_for_display(proc_name));
+        }
+
+        // Otherwise, fall back to basic stack effect
+        match &self.stack_effect {
+            StackEffect::Known { inputs, outputs } => {
+                let input_str = (0..*inputs)
+                    .map(|i| format!("in a_{i}: felt"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let output_str = (0..*outputs)
+                    .map(|i| format!("r_{i}: felt"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(format!("{proc_name}({input_str}) -> ({output_str})"))
+            }
+            StackEffect::KnownInputs { inputs } => {
+                let input_str = (0..*inputs)
+                    .map(|i| format!("in a_{i}: felt"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(format!("{proc_name}({input_str}) -> (?)"))
+            }
+            StackEffect::Unknown => None,
+        }
     }
 }
 
@@ -562,4 +654,161 @@ mod tests {
         assert_eq!(known.outputs(), Some(1));
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Signature Formatting Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_proc_signature_format_simple_values() {
+        let sig = ProcSignature::new(2, 1);
+        assert_eq!(
+            sig.format_for_display("pub proc foo"),
+            "pub proc foo(in a_0: felt, in a_1: felt) -> (r_0: felt)"
+        );
+    }
+
+    #[test]
+    fn test_proc_signature_format_empty() {
+        let sig = ProcSignature::new(0, 0);
+        assert_eq!(sig.format_for_display("export.bar"), "export.bar() -> ()");
+    }
+
+    #[test]
+    fn test_proc_signature_format_with_addresses() {
+        let sig = ProcSignature {
+            inputs: vec![
+                InputKind::Value,
+                InputKind::InputAddress,
+                InputKind::OutputAddress,
+            ],
+            outputs: vec![OutputKind::Computed],
+        };
+        assert_eq!(
+            sig.format_for_display("pub proc copy"),
+            "pub proc copy(in a_0: felt, in a_1: *felt, out a_2: *felt) -> (r_0: felt)"
+        );
+    }
+
+    #[test]
+    fn test_proc_signature_format_with_inout_address() {
+        let sig = ProcSignature {
+            inputs: vec![InputKind::InOutAddress],
+            outputs: vec![OutputKind::Computed],
+        };
+        assert_eq!(
+            sig.format_for_display("pub proc update"),
+            "pub proc update(inout a_0: *felt) -> (r_0: felt)"
+        );
+    }
+
+    #[test]
+    fn test_proc_signature_format_with_passthrough() {
+        let sig = ProcSignature {
+            inputs: vec![InputKind::Value, InputKind::Value],
+            outputs: vec![
+                OutputKind::Computed,
+                OutputKind::InputPassthrough { input_pos: 0 },
+            ],
+        };
+        assert_eq!(
+            sig.format_for_display("pub proc dup_and_add"),
+            "pub proc dup_and_add(in a_0: felt, in a_1: felt) -> (r_0: felt, r_1: felt)"
+        );
+    }
+
+    #[test]
+    fn test_proc_signature_format_with_memory_read() {
+        let sig = ProcSignature {
+            inputs: vec![InputKind::InputAddress],
+            outputs: vec![OutputKind::MemoryRead { from_input: Some(0) }],
+        };
+        assert_eq!(
+            sig.format_for_display("pub proc load"),
+            "pub proc load(in a_0: *felt) -> (r_0: felt)"
+        );
+    }
+
+    #[test]
+    fn test_proc_signature_format_with_address_passthrough() {
+        let sig = ProcSignature {
+            inputs: vec![InputKind::OutputAddress],
+            outputs: vec![OutputKind::InputPassthrough { input_pos: 0 }],
+        };
+        assert_eq!(
+            sig.format_for_display("pub proc get_ptr"),
+            "pub proc get_ptr(out a_0: *felt) -> (r_0: *felt)"
+        );
+    }
+
+    #[test]
+    fn test_proc_contract_format_with_signature() {
+        let contract = ProcContract {
+            path: SymbolPath::new("::test::store"),
+            validates: ValidationBehavior::None,
+            uses_u32_ops: false,
+            reads_advice: false,
+            uses_merkle_ops: false,
+            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            signature: Some(ProcSignature {
+                inputs: vec![InputKind::Value, InputKind::OutputAddress],
+                outputs: vec![OutputKind::Computed],
+            }),
+            definition_range: None,
+        };
+        assert_eq!(
+            contract.format_signature_for_display("pub proc store"),
+            Some("pub proc store(in a_0: felt, out a_1: *felt) -> (r_0: felt)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_proc_contract_format_fallback_to_stack_effect() {
+        let contract = ProcContract {
+            path: SymbolPath::new("::test::proc"),
+            validates: ValidationBehavior::None,
+            uses_u32_ops: false,
+            reads_advice: false,
+            uses_merkle_ops: false,
+            stack_effect: StackEffect::Known { inputs: 3, outputs: 2 },
+            signature: None,
+            definition_range: None,
+        };
+        assert_eq!(
+            contract.format_signature_for_display("pub proc compute"),
+            Some("pub proc compute(in a_0: felt, in a_1: felt, in a_2: felt) -> (r_0: felt, r_1: felt)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_proc_contract_format_known_inputs_only() {
+        let contract = ProcContract {
+            path: SymbolPath::new("::test::proc"),
+            validates: ValidationBehavior::None,
+            uses_u32_ops: false,
+            reads_advice: false,
+            uses_merkle_ops: false,
+            stack_effect: StackEffect::KnownInputs { inputs: 2 },
+            signature: None,
+            definition_range: None,
+        };
+        assert_eq!(
+            contract.format_signature_for_display("pub proc dynamic"),
+            Some("pub proc dynamic(in a_0: felt, in a_1: felt) -> (?)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_proc_contract_format_unknown_effect() {
+        let contract = ProcContract {
+            path: SymbolPath::new("::test::proc"),
+            validates: ValidationBehavior::None,
+            uses_u32_ops: false,
+            reads_advice: false,
+            uses_merkle_ops: false,
+            stack_effect: StackEffect::Unknown,
+            signature: None,
+            definition_range: None,
+        };
+        assert_eq!(contract.format_signature_for_display("pub proc unknown"), None);
+    }
 }

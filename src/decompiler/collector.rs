@@ -432,10 +432,9 @@ impl<'a> Visit for DecompilationCollector<'a> {
         });
 
         // Get contract from store
-        let contract_effect = self
-            .contracts
-            .and_then(|c| c.get_by_name(&proc_name))
-            .map(|contract| contract.stack_effect.clone());
+        let contract = self.contracts.and_then(|c| c.get_by_name(&proc_name));
+        let contract_effect = contract.map(|c| c.stack_effect.clone());
+        let contract_signature = contract.and_then(|c| c.signature.clone());
 
         // Pre-analyze procedure to discover inputs needed (especially for loops)
         let pre_analysis = pre_analyze_procedure(proc.body());
@@ -466,7 +465,7 @@ impl<'a> Visit for DecompilationCollector<'a> {
         // Generate initial signature hint for the procedure declaration
         if let Some(line) = decl_line {
             let decl_prefix = extract_declaration_prefix(self.source_text, line);
-            let signature = format_procedure_signature(&decl_prefix, &proc_name, initial_input_count, output_count);
+            let signature = format_procedure_signature(&decl_prefix, &proc_name, initial_input_count, output_count, contract_signature.as_ref());
             self.hints.push((line, signature));
         }
 
@@ -513,7 +512,7 @@ impl<'a> Visit for DecompilationCollector<'a> {
                     // Find and update the signature hint for this procedure
                     if let Some(sig_hint) = self.hints.iter_mut().find(|(l, _)| *l == line) {
                         let decl_prefix = extract_declaration_prefix(self.source_text, line);
-                        sig_hint.1 = format_procedure_signature(&decl_prefix, &proc_name, discovered_inputs, output_count);
+                        sig_hint.1 = format_procedure_signature(&decl_prefix, &proc_name, discovered_inputs, output_count, contract_signature.as_ref());
                     }
                 }
             }

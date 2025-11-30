@@ -1078,17 +1078,36 @@ pub fn format_invocation_target(target: &InvocationTarget) -> String {
 ///
 /// Examples:
 /// - `proc foo():` - no inputs, unknown outputs
-/// - `pub proc foo(a_0, a_1):` - 2 inputs, unknown outputs
-/// - `export.bar(a_0, a_1) -> r_0:` - 2 inputs, 1 output
-/// - `proc foo(a_0) -> (r_0, r_1, r_2):` - 1 input, 3 outputs (parenthesized)
+/// - `pub proc foo(in a_0: felt, in a_1: felt):` - 2 inputs, unknown outputs
+/// - `export bar(in a_0: felt, out a_1: *felt) -> (r_0: felt):` - 2 inputs, 1 output
+/// - `proc foo(in a_0: felt) -> (r_0: felt, r_1: felt, r_2: felt):` - 1 input, 3 outputs
+///
+/// The `signature` parameter provides type information for inputs and outputs.
+/// If not provided, all inputs/outputs default to `felt`.
 pub fn format_procedure_signature(
     prefix: &str,
     name: &str,
     inputs: usize,
     outputs: Option<usize>,
+    signature: Option<&crate::analysis::contracts::ProcSignature>,
 ) -> String {
-    // Format input arguments: a_0, a_1, a_2, ... (0-indexed)
-    let args: Vec<String> = (0..inputs).map(|i| format!("a_{}", i)).collect();
+    use crate::analysis::contracts::{InputKind, OutputKind};
+
+    // Format input arguments with direction and type: in a_0: felt, out a_1: *felt, ...
+    let args: Vec<String> = (0..inputs)
+        .map(|i| {
+            let (dir, ty) = signature
+                .and_then(|sig| sig.inputs.get(i))
+                .map(|kind| match kind {
+                    InputKind::Value => ("in", "felt"),
+                    InputKind::InputAddress => ("in", "*felt"),
+                    InputKind::OutputAddress => ("out", "*felt"),
+                    InputKind::InOutAddress => ("inout", "*felt"),
+                })
+                .unwrap_or(("in", "felt"));
+            format!("{} a_{}: {}", dir, i, ty)
+        })
+        .collect();
     let args_str = args.join(", ");
 
     // Build the full signature with prefix
@@ -1098,13 +1117,30 @@ pub fn format_procedure_signature(
         format!("{} {}", prefix, name)
     };
 
-    // Format return values: r_0, r_1, r_2, ... (0-indexed)
-    // Multiple returns are parenthesized, single returns are not
+    // Format return values with types: r_0: felt, r_1: *felt, ...
     match outputs {
         Some(0) => format!("{}({}):", full_name, args_str),
-        Some(1) => format!("{}({}) -> r_0:", full_name, args_str),
         Some(n) => {
-            let returns: Vec<String> = (0..n).map(|i| format!("r_{}", i)).collect();
+            let returns: Vec<String> = (0..n)
+                .map(|i| {
+                    let ty = signature
+                        .and_then(|sig| sig.outputs.get(i))
+                        .map(|kind| match kind {
+                            OutputKind::Computed => "felt",
+                            OutputKind::InputPassthrough { input_pos } => {
+                                // Passthrough preserves the input type
+                                signature
+                                    .and_then(|sig| sig.inputs.get(*input_pos))
+                                    .map(|k| if matches!(k, InputKind::Value) { "felt" } else { "*felt" })
+                                    .unwrap_or("felt")
+                            }
+                            OutputKind::MemoryRead { .. } => "felt",
+                            OutputKind::WrittenAddress { .. } => "*felt",
+                        })
+                        .unwrap_or("felt");
+                    format!("r_{}: {}", i, ty)
+                })
+                .collect();
             format!("{}({}) -> ({}):", full_name, args_str, returns.join(", "))
         }
         None => {
@@ -1382,7 +1418,7 @@ mod tests {
     #[test]
     fn test_format_procedure_signature_no_args() {
         assert_eq!(
-            format_procedure_signature("proc", "foo", 0, Some(0)),
+            format_procedure_signature("proc", "foo", 0, Some(0), None),
             "proc foo():"
         );
     }
@@ -1390,40 +1426,68 @@ mod tests {
     #[test]
     fn test_format_procedure_signature_with_args() {
         assert_eq!(
-            format_procedure_signature("proc", "bar", 3, None),
-            "proc bar(a_0, a_1, a_2):"
+            format_procedure_signature("proc", "bar", 3, None, None),
+            "proc bar(in a_0: felt, in a_1: felt, in a_2: felt):"
         );
     }
 
     #[test]
     fn test_format_procedure_signature_with_return() {
         assert_eq!(
-            format_procedure_signature("pub proc", "baz", 2, Some(1)),
-            "pub proc baz(a_0, a_1) -> r_0:"
+            format_procedure_signature("pub proc", "baz", 2, Some(1), None),
+            "pub proc baz(in a_0: felt, in a_1: felt) -> (r_0: felt):"
         );
     }
 
     #[test]
     fn test_format_procedure_signature_multiple_returns() {
         assert_eq!(
-            format_procedure_signature("proc", "maj", 3, Some(2)),
-            "proc maj(a_0, a_1, a_2) -> (r_0, r_1):"
+            format_procedure_signature("proc", "maj", 3, Some(2), None),
+            "proc maj(in a_0: felt, in a_1: felt, in a_2: felt) -> (r_0: felt, r_1: felt):"
         );
     }
 
     #[test]
     fn test_format_procedure_signature_no_args_with_return() {
         assert_eq!(
-            format_procedure_signature("export", "get_value", 0, Some(1)),
-            "export get_value() -> r_0:"
+            format_procedure_signature("export", "get_value", 0, Some(1), None),
+            "export get_value() -> (r_0: felt):"
         );
     }
 
     #[test]
     fn test_format_procedure_signature_no_prefix() {
         assert_eq!(
-            format_procedure_signature("", "internal", 1, Some(1)),
-            "internal(a_0) -> r_0:"
+            format_procedure_signature("", "internal", 1, Some(1), None),
+            "internal(in a_0: felt) -> (r_0: felt):"
+        );
+    }
+
+    #[test]
+    fn test_format_procedure_signature_with_types() {
+        use crate::analysis::contracts::{InputKind, OutputKind, ProcSignature};
+
+        let sig = ProcSignature {
+            inputs: vec![InputKind::Value, InputKind::InputAddress, InputKind::OutputAddress],
+            outputs: vec![OutputKind::Computed],
+        };
+        assert_eq!(
+            format_procedure_signature("pub proc", "copy", 3, Some(1), Some(&sig)),
+            "pub proc copy(in a_0: felt, in a_1: *felt, out a_2: *felt) -> (r_0: felt):"
+        );
+    }
+
+    #[test]
+    fn test_format_procedure_signature_inout_address() {
+        use crate::analysis::contracts::{InputKind, OutputKind, ProcSignature};
+
+        let sig = ProcSignature {
+            inputs: vec![InputKind::InOutAddress],
+            outputs: vec![OutputKind::Computed, OutputKind::Computed],
+        };
+        assert_eq!(
+            format_procedure_signature("proc", "update", 1, Some(2), Some(&sig)),
+            "proc update(inout a_0: *felt) -> (r_0: felt, r_1: felt):"
         );
     }
 
