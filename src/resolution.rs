@@ -275,6 +275,14 @@ pub fn resolve_invocation_target(
         return Ok(resolved);
     }
 
+    // For module-qualified paths like `base_field::square`, try to expand the
+    // module alias. The LocalSymbolResolver doesn't handle these directly.
+    if let InvocationTarget::Path(_) = target {
+        if let Some(resolved) = try_expand_module_alias(module, &resolver, &target_str) {
+            return Ok(resolved);
+        }
+    }
+
     // For unresolved paths, construct a path from the target itself
     match target {
         InvocationTarget::Path(path) => Ok(ResolvedSymbol {
@@ -287,6 +295,36 @@ pub fn resolve_invocation_target(
         }),
         InvocationTarget::MastRoot(_) => Err(ResolutionError::SymbolNotFound(target_str)),
     }
+}
+
+/// Try to expand a module-qualified path like `base_field::square` by resolving
+/// the module alias to its full path.
+fn try_expand_module_alias(
+    _module: &Module,
+    resolver: &LocalSymbolResolver,
+    target_str: &str,
+) -> Option<ResolvedSymbol> {
+    // Split into module alias and remaining path (e.g., "base_field::square" -> "base_field", "square")
+    let (module_alias, rest) = target_str.split_once("::")?;
+
+    // Try to resolve the module alias
+    if let Ok(Some(resolution)) = resolver.resolve(module_alias) {
+        let module_path = match resolution {
+            SymbolResolution::Module { path, .. } => path.to_string(),
+            SymbolResolution::External(p) => {
+                // External might point to a module path
+                p.into_inner().to_string()
+            }
+            _ => return None,
+        };
+        // Construct the full path: module_path + "::" + rest
+        let full_path = format!("{}::{}", module_path, rest);
+        return Some(ResolvedSymbol {
+            path: SymbolPath::new(full_path),
+            name: target_str.to_string(),
+        });
+    }
+    None
 }
 
 /// Convert an LSP position to a byte offset in the source file.

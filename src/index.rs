@@ -338,10 +338,45 @@ impl<'a> InvocationCollector<'a> {
             return;
         }
 
+        // For module-qualified paths like `base_field::square`, try to expand
+        // the module alias using the resolver. The LocalSymbolResolver doesn't
+        // handle these directly, so we need to resolve the module part separately.
+        if let InvocationTarget::Path(_) = target {
+            if let Some(resolved_path) = self.try_expand_module_alias(&target_str) {
+                self.refs.push(Reference { path: resolved_path, range });
+                return;
+            }
+        }
+
         // For any unresolved target, track it as a reference using its literal path.
         // Resolution checking is done at diagnostic time against the workspace index.
         let path = SymbolPath::new(&target_str);
         self.refs.push(Reference { path, range });
+    }
+
+    /// Try to expand a module-qualified path like `base_field::square` by resolving
+    /// the module alias to its full path.
+    fn try_expand_module_alias(&self, target_str: &str) -> Option<SymbolPath> {
+        use miden_assembly_syntax::ast::SymbolResolution;
+
+        // Split into module alias and remaining path (e.g., "base_field::square" -> "base_field", "square")
+        let (module_alias, rest) = target_str.split_once("::")?;
+
+        // Try to resolve the module alias
+        if let Ok(Some(resolution)) = self.resolver.resolve(module_alias) {
+            let module_path = match resolution {
+                SymbolResolution::Module { path, .. } => path.to_string(),
+                SymbolResolution::External(p) => {
+                    // External might point to a module path
+                    p.into_inner().to_string()
+                }
+                _ => return None,
+            };
+            // Construct the full path: module_path + "::" + rest
+            let full_path = format!("{}::{}", module_path, rest);
+            return Some(SymbolPath::new(full_path));
+        }
+        None
     }
 }
 
@@ -496,6 +531,31 @@ mod tests {
         // Find by suffix "hash"
         let found = index.references_by_suffix("hash");
         assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn workspace_index_references_by_suffix_full_path() {
+        let mut index = WorkspaceIndex::default();
+        let uri = test_uri();
+
+        // References should be stored with fully-qualified paths after module alias expansion.
+        // For example, `exec.base_field::square` with `use std::math::ecgfp5::base_field`
+        // should be stored as `::std::math::ecgfp5::base_field::square`.
+        let refs = vec![
+            make_reference("::std::math::ecgfp5::base_field::square", 10),
+        ];
+        index.update_document(uri.clone(), &[], &refs);
+
+        // Looking up by full path should find the reference
+        let found = index.references_by_suffix("::std::math::ecgfp5::base_field::square");
+        assert_eq!(found.len(), 1);
+
+        // Looking up by suffix should also work
+        let found2 = index.references_by_suffix("base_field::square");
+        assert_eq!(found2.len(), 1);
+
+        let found3 = index.references_by_suffix("square");
+        assert_eq!(found3.len(), 1);
     }
 
     #[test]
