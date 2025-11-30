@@ -7,7 +7,7 @@
 
 use miden_assembly_syntax::ast::{Instruction, InvocationTarget};
 
-use crate::analysis::checker::{has_unvalidated_advice, CheckContext, Checker, Finding};
+use crate::analysis::checker::{has_unvalidated_advice, AnalysisFinding, CheckContext, Checker};
 use crate::analysis::types::AnalysisState;
 
 /// Checker that detects untrusted values passed to procedure calls.
@@ -46,7 +46,7 @@ impl Checker for ProcedureCallChecker {
         inst: &Instruction,
         state: &AnalysisState,
         ctx: &CheckContext,
-    ) -> Vec<Finding> {
+    ) -> Vec<AnalysisFinding> {
         // Only check procedure call instructions
         let target = match inst {
             Instruction::Exec(t) | Instruction::Call(t) | Instruction::SysCall(t) => t,
@@ -69,12 +69,12 @@ impl Checker for ProcedureCallChecker {
             Some((false, true)) => {
                 // Known procedure that requires u32 inputs but doesn't validate
                 if let Some(taint) = has_unvalidated_advice(state, 4) {
-                    vec![Finding::warning(format!(
+                    vec![AnalysisFinding::warning(format!(
                         "Unvalidated advice passed to `{}` which requires \
                          u32 inputs but doesn't validate them.",
                         target_name
                     ))
-                    .with_taint(taint)]
+                    .with_tracked_value(taint)]
                 } else {
                     vec![]
                 }
@@ -86,12 +86,12 @@ impl Checker for ProcedureCallChecker {
             None => {
                 // Unknown procedure - conservative warning if passing untrusted values
                 if let Some(taint) = has_unvalidated_advice(state, 4) {
-                    vec![Finding::warning(format!(
+                    vec![AnalysisFinding::warning(format!(
                         "Unvalidated advice may be passed to `{}`. \
                          Consider adding validation if the procedure expects u32 inputs.",
                         target_name
                     ))
-                    .with_taint(taint)]
+                    .with_tracked_value(taint)]
                 } else {
                     vec![]
                 }

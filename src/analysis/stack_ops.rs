@@ -643,7 +643,7 @@ pub fn analyze_procedure_simple(body: &Block) -> StackEffectResult {
 ///
 /// Use this function when you need the most accurate analysis possible.
 pub fn analyze_procedure_tiered(body: &Block) -> StackEffectResult {
-    use super::abstract_interp::pre_analyze_procedure;
+    use super::abstract_interpretation::pre_analyze_procedure;
 
     // Tier 1: Try fast path
     let mut simple = SimpleStackAnalysis::new();
@@ -687,11 +687,11 @@ pub trait StackLike {
     type Element: Clone;
 
     /// Get the current stack depth.
-    fn len(&self) -> usize;
+    fn depth(&self) -> usize;
 
     /// Check if the stack is empty.
     fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.depth() == 0
     }
 
     /// Push an element onto the stack.

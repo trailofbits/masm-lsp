@@ -103,7 +103,7 @@ fn build_error_message(
 ) -> String {
     // Check if label message is unhelpful (LALRPOP-generated)
     let label_is_unhelpful = label_msg
-        .map(|m| is_unhelpful_label_message(m))
+        .map(is_unhelpful_label_message)
         .unwrap_or(true);
 
     // If we have a helpful label message, use it

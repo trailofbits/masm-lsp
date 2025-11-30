@@ -19,11 +19,11 @@ use tower_lsp::lsp_types::{
 
 use crate::diagnostics::SOURCE_ANALYSIS;
 
-use super::checker::{CheckContext, Checker, Finding};
+use super::checker::{AnalysisFinding, CheckContext, Checker};
 use super::checkers::default_checkers;
 use super::contracts::{ContractStore, StackEffect};
 use super::stack_effects::apply_effect;
-use super::types::{AnalysisState, Source};
+use super::types::{AnalysisState, ValueOrigin};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Analyzer
@@ -38,7 +38,7 @@ pub struct Analyzer<'a> {
 
     // Analysis state
     current_state: Option<AnalysisState>,
-    findings: Vec<(SourceSpan, Finding)>,
+    findings: Vec<(SourceSpan, AnalysisFinding)>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -169,17 +169,17 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Convert a finding to an LSP diagnostic.
-    fn finding_to_diagnostic(&self, span: SourceSpan, finding: &Finding) -> Diagnostic {
+    fn finding_to_diagnostic(&self, span: SourceSpan, finding: &AnalysisFinding) -> Diagnostic {
         let range = self.span_to_range(span);
 
         // Build related information if we have a source location
-        let related_information = finding.related_taint.as_ref().and_then(|taint| {
-            taint.source_span.map(|source_span| {
+        let related_information = finding.related_value.as_ref().and_then(|value| {
+            value.source_span.map(|source_span| {
                 let source_range = self.span_to_range(source_span);
-                let source_desc = match &taint.source {
-                    Source::AdviceStack => "Untrusted value loaded from advice stack here",
-                    Source::AdviceMap => "Untrusted value loaded from advice map here",
-                    Source::MerkleStore => "Untrusted value loaded from Merkle store here",
+                let source_desc = match &value.origin {
+                    ValueOrigin::AdviceStack => "Untrusted value loaded from advice stack here",
+                    ValueOrigin::AdviceMap => "Untrusted value loaded from advice map here",
+                    ValueOrigin::MerkleStore => "Untrusted value loaded from Merkle store here",
                     _ => "Value originated here",
                 };
                 vec![DiagnosticRelatedInformation {

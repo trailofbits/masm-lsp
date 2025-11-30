@@ -6,7 +6,7 @@
 //! # Module Structure
 //!
 //! - `bounds`: Value bounds tracking (`Bounds`, `U32_MAX`, `FIELD_MODULUS`)
-//! - `taint`: Taint tracking types (`Source`, `ValidationState`, `Taint`)
+//! - `taint`: Value tracking types (`Source`, `ValidationState`, `TrackedValue`)
 //! - `stack`: Symbolic stack implementation (`SymbolicStack`)
 //! - `state`: Per-procedure analysis state (`AnalysisState`)
 
@@ -19,4 +19,4 @@ pub mod taint;
 pub use bounds::{Bounds, FIELD_MODULUS, U32_MAX};
 pub use stack::SymbolicStack;
 pub use state::AnalysisState;
-pub use taint::{Source, Taint, ValidationState};
+pub use taint::{TrackedValue, ValidationState, ValueOrigin};

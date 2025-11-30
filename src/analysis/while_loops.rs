@@ -46,14 +46,17 @@ impl LoopBound {
 // Symbolic Stack for Tracking
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A minimal symbolic stack that tracks bounds through a while body.
+/// A minimal stack that tracks value bounds through a while loop body.
+///
+/// This is distinct from `analysis::types::SymbolicStack` which tracks `TrackedValue`s
+/// for taint analysis. This stack only tracks `Bounds` for loop iteration inference.
 #[derive(Clone, Debug, Default)]
-struct SymbolicStack {
+struct BoundsStack {
     /// Stack values with their bounds
     elements: Vec<Bounds>,
 }
 
-impl SymbolicStack {
+impl BoundsStack {
     fn new() -> Self {
         Self::default()
     }
@@ -100,10 +103,10 @@ impl SymbolicStack {
     }
 }
 
-impl StackLike for SymbolicStack {
+impl StackLike for BoundsStack {
     type Element = Bounds;
 
-    fn len(&self) -> usize {
+    fn depth(&self) -> usize {
         self.elements.len()
     }
 
@@ -173,7 +176,7 @@ impl StackLike for SymbolicStack {
 /// - `gt.N` pattern (counter > N condition)
 pub struct WhileLoopAnalyzer {
     /// Symbolic stack state
-    stack: SymbolicStack,
+    stack: BoundsStack,
     /// Whether we've seen unknown operations that prevent analysis
     unknown_ops: bool,
     /// Detected decrement pattern: (position, decrement_amount)
@@ -196,8 +199,8 @@ impl WhileLoopAnalyzer {
     /// Create a new analyzer with an optional initial counter value.
     pub fn new(initial_counter: Option<u64>) -> Self {
         let stack = match initial_counter {
-            Some(n) => SymbolicStack::with_counter(n),
-            None => SymbolicStack::new(),
+            Some(n) => BoundsStack::with_counter(n),
+            None => BoundsStack::new(),
         };
 
         Self {

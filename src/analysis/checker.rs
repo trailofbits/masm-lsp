@@ -8,10 +8,10 @@ use miden_debug_types::SourceSpan;
 use tower_lsp::lsp_types::{DiagnosticSeverity, Url};
 
 use super::contracts::ContractStore;
-use super::types::{AnalysisState, Taint};
+use super::types::{AnalysisState, TrackedValue};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Finding - result of a check
+// AnalysisFinding - result of a check
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Severity level for findings.
@@ -37,22 +37,22 @@ impl From<Severity> for DiagnosticSeverity {
 
 /// A finding from a security check.
 #[derive(Clone, Debug)]
-pub struct Finding {
+pub struct AnalysisFinding {
     /// Human-readable description of the issue
     pub message: String,
     /// Severity of the finding
     pub severity: Severity,
-    /// The taint that caused this finding (for related information)
-    pub related_taint: Option<Taint>,
+    /// The tracked value that caused this finding (for related information)
+    pub related_value: Option<TrackedValue>,
 }
 
-impl Finding {
+impl AnalysisFinding {
     /// Create a new warning finding.
     pub fn warning(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             severity: Severity::Warning,
-            related_taint: None,
+            related_value: None,
         }
     }
 
@@ -61,13 +61,13 @@ impl Finding {
         Self {
             message: message.into(),
             severity: Severity::Error,
-            related_taint: None,
+            related_value: None,
         }
     }
 
-    /// Attach a related taint to this finding.
-    pub fn with_taint(mut self, taint: Taint) -> Self {
-        self.related_taint = Some(taint);
+    /// Attach a related tracked value to this finding.
+    pub fn with_tracked_value(mut self, value: TrackedValue) -> Self {
+        self.related_value = Some(value);
         self
     }
 }
@@ -107,7 +107,7 @@ pub struct CheckContext<'a> {
 ///         inst: &Instruction,
 ///         state: &AnalysisState,
 ///         ctx: &CheckContext,
-///     ) -> Vec<Finding> {
+///     ) -> Vec<AnalysisFinding> {
 ///         // Check something about the instruction and state
 ///         vec![]
 ///     }
@@ -127,7 +127,7 @@ pub trait Checker: Send + Sync {
         inst: &Instruction,
         state: &AnalysisState,
         ctx: &CheckContext,
-    ) -> Vec<Finding>;
+    ) -> Vec<AnalysisFinding>;
 
     /// Human-readable name for this checker (used in diagnostics).
     fn name(&self) -> &'static str;
@@ -147,24 +147,12 @@ pub fn is_u32_op(inst: &Instruction) -> bool {
         && !inst_str.starts_with("u32cast")
 }
 
-/// Check if an instruction is a Merkle tree operation.
-pub fn is_merkle_op(inst: &Instruction) -> bool {
-    matches!(
-        inst,
-        Instruction::MTreeGet
-            | Instruction::MTreeSet
-            | Instruction::MTreeMerge
-            | Instruction::MTreeVerify
-            | Instruction::MTreeVerifyWithError(_)
-    )
-}
-
 /// Check if the top n stack values contain unvalidated untrusted input.
-pub fn has_unvalidated_advice(state: &AnalysisState, n: usize) -> Option<Taint> {
+pub fn has_unvalidated_advice(state: &AnalysisState, n: usize) -> Option<TrackedValue> {
     for i in 0..n.min(state.stack.depth()) {
-        if let Some(t) = state.stack.peek(i) {
-            if t.source.is_untrusted() && !t.is_validated() {
-                return Some(t.clone());
+        if let Some(value) = state.stack.peek(i) {
+            if value.origin.is_untrusted() && !value.is_validated() {
+                return Some(value.clone());
             }
         }
     }

@@ -7,26 +7,15 @@ use std::ops::ControlFlow;
 
 use miden_assembly_syntax::ast::{
     visit::{self, Visit},
-    Block, Immediate, Instruction, Module, Op, Procedure,
+    Block, Instruction, Module, Op, Procedure,
 };
-use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Span};
+use miden_debug_types::{DefaultSourceManager, SourceSpan, Span};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
-use crate::diagnostics::SOURCE_ANALYSIS;
+use crate::analysis::utils::u16_imm_to_u16;
+use crate::diagnostics::{span_to_range, SOURCE_ANALYSIS};
 
 use super::state::{LocalState, LocalsState};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helper functions
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Extract u16 value from an immediate.
-fn u16_imm_to_u16(imm: &Immediate<u16>) -> Option<u16> {
-    match imm {
-        Immediate::Value(span) => Some(*span.inner()),
-        _ => None,
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Finding type for locals analysis
@@ -295,7 +284,8 @@ impl<'a> LocalsAnalyzer<'a> {
 
     /// Convert a finding to an LSP diagnostic.
     fn finding_to_diagnostic(&self, finding: &LocalsFinding) -> Diagnostic {
-        let range = self.span_to_range(finding.span);
+        let range = span_to_range(self.source_manager, finding.span)
+            .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
 
         Diagnostic {
             range,
@@ -307,33 +297,6 @@ impl<'a> LocalsAnalyzer<'a> {
             related_information: None,
             tags: None,
             data: None,
-        }
-    }
-
-    /// Convert a source span to an LSP range.
-    fn span_to_range(&self, span: SourceSpan) -> Range {
-        let byte_range = span.into_range();
-        let start = self
-            .source_manager
-            .file_line_col(SourceSpan::at(span.source_id(), byte_range.start))
-            .ok();
-        let end = self
-            .source_manager
-            .file_line_col(SourceSpan::at(span.source_id(), byte_range.end))
-            .ok();
-
-        match (start, end) {
-            (Some(s), Some(e)) => Range::new(
-                Position::new(
-                    s.line.to_usize().saturating_sub(1) as u32,
-                    s.column.to_usize().saturating_sub(1) as u32,
-                ),
-                Position::new(
-                    e.line.to_usize().saturating_sub(1) as u32,
-                    e.column.to_usize().saturating_sub(1) as u32,
-                ),
-            ),
-            _ => Range::new(Position::new(0, 0), Position::new(0, 0)),
         }
     }
 }
@@ -377,7 +340,7 @@ mod tests {
     use super::*;
     use miden_assembly_syntax::ast::ModuleKind;
     use miden_assembly_syntax::{Parse, ParseOptions};
-    use miden_debug_types::{SourceLanguage, Uri};
+    use miden_debug_types::{SourceLanguage, SourceManager, Uri};
 
     // Helper to count diagnostics of a given severity
     fn count_warnings(diags: &[Diagnostic]) -> usize {

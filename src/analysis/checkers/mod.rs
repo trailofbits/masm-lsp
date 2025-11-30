@@ -23,3 +23,18 @@ pub fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(ProcedureCallChecker),
     ]
 }
+
+/// Shared test utilities for checker tests.
+#[cfg(test)]
+pub(crate) mod test_utils {
+    use miden_debug_types::SourceSpan;
+    use tower_lsp::lsp_types::Url;
+
+    /// Create a test context with a default URL and span.
+    pub fn make_test_context() -> (Url, SourceSpan) {
+        (
+            Url::parse("file:///test.masm").unwrap(),
+            SourceSpan::default(),
+        )
+    }
+}

@@ -6,7 +6,7 @@
 
 use miden_assembly_syntax::ast::Instruction;
 
-use crate::analysis::checker::{CheckContext, Checker, Finding};
+use crate::analysis::checker::{AnalysisFinding, CheckContext, Checker};
 use crate::analysis::types::AnalysisState;
 
 /// Checker that detects unvalidated depth values in Merkle operations.
@@ -18,7 +18,7 @@ impl Checker for MerkleDepthChecker {
         inst: &Instruction,
         state: &AnalysisState,
         _ctx: &CheckContext,
-    ) -> Vec<Finding> {
+    ) -> Vec<AnalysisFinding> {
         // Only check Merkle operations that take depth as input
         let needs_depth_check = matches!(
             inst,
@@ -32,11 +32,11 @@ impl Checker for MerkleDepthChecker {
         // Depth is typically at a specific stack position depending on the operation
         // For mtree_get and mtree_set, depth is at the top of the stack
         if let Some(t) = state.stack.peek(0) {
-            if t.source.is_untrusted() && !t.is_validated() {
-                return vec![Finding::warning(
+            if t.origin.is_untrusted() && !t.is_validated() {
+                return vec![AnalysisFinding::warning(
                     "MTree depth from advice not validated. Ensure depth <= 64 before use.",
                 )
-                .with_taint(t.clone())];
+                .with_tracked_value(t.clone())];
             }
         }
 
@@ -51,16 +51,9 @@ impl Checker for MerkleDepthChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::checkers::test_utils::make_test_context;
     use crate::analysis::types::AnalysisState;
     use miden_debug_types::SourceSpan;
-    use tower_lsp::lsp_types::Url;
-
-    fn make_context() -> (Url, SourceSpan) {
-        (
-            Url::parse("file:///test.masm").unwrap(),
-            SourceSpan::default(),
-        )
-    }
 
     #[test]
     fn test_detects_unvalidated_depth_in_mtree_get() {
@@ -72,7 +65,7 @@ mod tests {
         state.stack.push(t);
 
         let checker = MerkleDepthChecker;
-        let (uri, span) = make_context();
+        let (uri, span) = make_test_context();
         let ctx = CheckContext {
             contracts: None,
             uri: &uri,
@@ -95,7 +88,7 @@ mod tests {
         state.stack.push(depth);
 
         let checker = MerkleDepthChecker;
-        let (uri, span) = make_context();
+        let (uri, span) = make_test_context();
         let ctx = CheckContext {
             contracts: None,
             uri: &uri,
@@ -115,7 +108,7 @@ mod tests {
         state.stack.push(lit);
 
         let checker = MerkleDepthChecker;
-        let (uri, span) = make_context();
+        let (uri, span) = make_test_context();
         let ctx = CheckContext {
             contracts: None,
             uri: &uri,
@@ -136,7 +129,7 @@ mod tests {
         state.stack.push(t);
 
         let checker = MerkleDepthChecker;
-        let (uri, span) = make_context();
+        let (uri, span) = make_test_context();
         let ctx = CheckContext {
             contracts: None,
             uri: &uri,

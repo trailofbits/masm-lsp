@@ -1,22 +1,22 @@
-//! Symbolic stack for taint tracking.
+//! Symbolic stack for value tracking.
 //!
 //! This module provides a symbolic stack implementation that tracks
-//! taint information through stack operations.
+//! value metadata through stack operations.
 
 use crate::analysis::stack_ops::StackLike;
 
-use super::taint::Taint;
+use super::taint::TrackedValue;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Symbolic Stack
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A symbolic stack that tracks taint information.
+/// A symbolic stack that tracks value metadata.
 ///
 /// The stack grows upward: the last element is the top of the stack (position 0).
 #[derive(Clone, Debug, Default)]
 pub struct SymbolicStack {
-    elements: Vec<Taint>,
+    elements: Vec<TrackedValue>,
 }
 
 impl SymbolicStack {
@@ -25,17 +25,17 @@ impl SymbolicStack {
     }
 
     /// Push a value onto the stack.
-    pub fn push(&mut self, taint: Taint) {
-        self.elements.push(taint);
+    pub fn push(&mut self, value: TrackedValue) {
+        self.elements.push(value);
     }
 
     /// Pop a value from the stack.
-    pub fn pop(&mut self) -> Option<Taint> {
+    pub fn pop(&mut self) -> Option<TrackedValue> {
         self.elements.pop()
     }
 
     /// Peek at a value on the stack (0 = top).
-    pub fn peek(&self, n: usize) -> Option<&Taint> {
+    pub fn peek(&self, n: usize) -> Option<&TrackedValue> {
         if n < self.elements.len() {
             Some(&self.elements[self.elements.len() - 1 - n])
         } else {
@@ -44,7 +44,7 @@ impl SymbolicStack {
     }
 
     /// Peek at a value on the stack mutably (0 = top).
-    pub fn peek_mut(&mut self, n: usize) -> Option<&mut Taint> {
+    pub fn peek_mut(&mut self, n: usize) -> Option<&mut TrackedValue> {
         let len = self.elements.len();
         if n < len {
             Some(&mut self.elements[len - 1 - n])
@@ -124,22 +124,22 @@ impl SymbolicStack {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl StackLike for SymbolicStack {
-    type Element = Taint;
+    type Element = TrackedValue;
 
-    fn len(&self) -> usize {
+    fn depth(&self) -> usize {
         self.elements.len()
     }
 
-    fn push(&mut self, elem: Taint) {
+    fn push(&mut self, elem: TrackedValue) {
         self.elements.push(elem);
     }
 
-    fn pop(&mut self) -> Taint {
-        // Return default (untainted) value if stack is empty
+    fn pop(&mut self) -> TrackedValue {
+        // Return default (untracked) value if stack is empty
         self.elements.pop().unwrap_or_default()
     }
 
-    fn peek(&self, n: usize) -> Option<&Taint> {
+    fn peek(&self, n: usize) -> Option<&TrackedValue> {
         if n < self.elements.len() {
             Some(&self.elements[self.elements.len() - 1 - n])
         } else {
@@ -148,9 +148,9 @@ impl StackLike for SymbolicStack {
     }
 
     fn ensure_depth(&mut self, needed: usize) {
-        // For taint tracking, we pad with default (untainted) values
+        // For value tracking, we pad with default (untracked) values
         while self.elements.len() < needed {
-            self.elements.insert(0, Taint::default());
+            self.elements.insert(0, TrackedValue::default());
         }
     }
 
@@ -194,8 +194,8 @@ mod tests {
     use super::*;
     use crate::analysis::types::bounds::Bounds;
 
-    fn make_taint(value: u64) -> Taint {
-        Taint {
+    fn make_tracked_value(value: u64) -> TrackedValue {
+        TrackedValue {
             id: value,
             bounds: Bounds::Const(value),
             ..Default::default()
@@ -207,8 +207,8 @@ mod tests {
         let mut stack = SymbolicStack::new();
         assert_eq!(stack.depth(), 0);
 
-        stack.push(make_taint(1));
-        stack.push(make_taint(2));
+        stack.push(make_tracked_value(1));
+        stack.push(make_tracked_value(2));
 
         assert_eq!(stack.depth(), 2);
         assert!(matches!(stack.peek(0).unwrap().bounds, Bounds::Const(2)));
@@ -219,8 +219,8 @@ mod tests {
     fn test_symbolic_stack_dup() {
         let mut stack = SymbolicStack::new();
 
-        stack.push(make_taint(1));
-        stack.push(make_taint(2));
+        stack.push(make_tracked_value(1));
+        stack.push(make_tracked_value(2));
 
         assert!(stack.dup(1)); // Duplicate element at position 1 (value 1)
         assert_eq!(stack.depth(), 3);
@@ -231,8 +231,8 @@ mod tests {
     fn test_symbolic_stack_swap() {
         let mut stack = SymbolicStack::new();
 
-        stack.push(make_taint(1));
-        stack.push(make_taint(2));
+        stack.push(make_tracked_value(1));
+        stack.push(make_tracked_value(2));
 
         assert!(stack.swap(0, 1));
         assert!(matches!(stack.peek(0).unwrap().bounds, Bounds::Const(1)));
@@ -243,9 +243,9 @@ mod tests {
     fn test_symbolic_stack_movup() {
         let mut stack = SymbolicStack::new();
 
-        stack.push(make_taint(1));
-        stack.push(make_taint(2));
-        stack.push(make_taint(3));
+        stack.push(make_tracked_value(1));
+        stack.push(make_tracked_value(2));
+        stack.push(make_tracked_value(3));
 
         assert!(stack.movup(2)); // Move element at position 2 to top
         assert!(matches!(stack.peek(0).unwrap().bounds, Bounds::Const(1)));
@@ -256,8 +256,8 @@ mod tests {
     #[test]
     fn test_symbolic_stack_clear() {
         let mut stack = SymbolicStack::new();
-        stack.push(make_taint(1));
-        stack.push(make_taint(2));
+        stack.push(make_tracked_value(1));
+        stack.push(make_tracked_value(2));
 
         stack.clear();
         assert_eq!(stack.depth(), 0);

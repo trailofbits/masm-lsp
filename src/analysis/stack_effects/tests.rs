@@ -152,7 +152,7 @@ fn test_adv_push_creates_untrusted() {
 
     assert_eq!(state.stack.depth(), 1);
     let top = state.stack.peek(0).unwrap();
-    assert!(top.source.is_untrusted());
+    assert!(top.origin.is_untrusted());
     assert!(!top.is_validated());
 }
 
@@ -163,7 +163,7 @@ fn test_adv_push_multiple() {
     assert_eq!(state.stack.depth(), 3);
     for i in 0..3 {
         let elem = state.stack.peek(i).unwrap();
-        assert!(elem.source.is_untrusted());
+        assert!(elem.origin.is_untrusted());
     }
 }
 
@@ -348,8 +348,8 @@ fn test_mem_loadw_be_pop1_push4() {
     // All 4 values should be from memory
     for i in 0..4 {
         assert!(matches!(
-            state.stack.peek(i).unwrap().source,
-            crate::analysis::types::Source::Memory
+            state.stack.peek(i).unwrap().origin,
+            crate::analysis::types::ValueOrigin::Memory
         ));
     }
 }

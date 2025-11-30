@@ -7,7 +7,7 @@
 
 use miden_assembly_syntax::ast::Instruction;
 
-use crate::analysis::checker::{has_unvalidated_advice, is_u32_op, CheckContext, Checker, Finding};
+use crate::analysis::checker::{has_unvalidated_advice, is_u32_op, AnalysisFinding, CheckContext, Checker};
 use crate::analysis::types::AnalysisState;
 
 /// Checker that detects unvalidated advice values in u32 operations.
@@ -19,7 +19,7 @@ impl Checker for U32ValidationChecker {
         inst: &Instruction,
         state: &AnalysisState,
         _ctx: &CheckContext,
-    ) -> Vec<Finding> {
+    ) -> Vec<AnalysisFinding> {
         if !is_u32_op(inst) {
             return vec![];
         }
@@ -27,11 +27,11 @@ impl Checker for U32ValidationChecker {
         // Check top 2 stack values for unvalidated advice
         // (most u32 ops are binary operations)
         if let Some(taint) = has_unvalidated_advice(state, 2) {
-            return vec![Finding::warning(
+            return vec![AnalysisFinding::warning(
                 "Unvalidated advice value used in u32 operation. \
                  Add `u32assert` or `u32assert2` before this instruction.",
             )
-            .with_taint(taint)];
+            .with_tracked_value(taint)];
         }
 
         vec![]
@@ -45,16 +45,9 @@ impl Checker for U32ValidationChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::checkers::test_utils::make_test_context;
     use crate::analysis::types::AnalysisState;
     use miden_debug_types::SourceSpan;
-    use tower_lsp::lsp_types::Url;
-
-    fn make_context() -> (Url, SourceSpan) {
-        (
-            Url::parse("file:///test.masm").unwrap(),
-            SourceSpan::default(),
-        )
-    }
 
     #[test]
     fn test_detects_unvalidated_advice_in_u32_op() {
@@ -68,7 +61,7 @@ mod tests {
         state.stack.push(t2);
 
         let checker = U32ValidationChecker;
-        let (uri, span) = make_context();
+        let (uri, span) = make_test_context();
         let ctx = CheckContext {
             contracts: None,
             uri: &uri,
@@ -95,7 +88,7 @@ mod tests {
         state.stack.push(t2);
 
         let checker = U32ValidationChecker;
-        let (uri, span) = make_context();
+        let (uri, span) = make_test_context();
         let ctx = CheckContext {
             contracts: None,
             uri: &uri,
@@ -117,7 +110,7 @@ mod tests {
         state.stack.push(l2);
 
         let checker = U32ValidationChecker;
-        let (uri, span) = make_context();
+        let (uri, span) = make_test_context();
         let ctx = CheckContext {
             contracts: None,
             uri: &uri,
@@ -138,7 +131,7 @@ mod tests {
         state.stack.push(t);
 
         let checker = U32ValidationChecker;
-        let (uri, span) = make_context();
+        let (uri, span) = make_test_context();
         let ctx = CheckContext {
             contracts: None,
             uri: &uri,

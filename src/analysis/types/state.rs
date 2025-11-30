@@ -7,7 +7,7 @@ use miden_debug_types::SourceSpan;
 
 use super::bounds::Bounds;
 use super::stack::SymbolicStack;
-use super::taint::{Source, Taint, ValidationState};
+use super::taint::{TrackedValue, ValidationState, ValueOrigin};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Analysis State
@@ -22,8 +22,8 @@ pub struct AnalysisState {
     pub stack: SymbolicStack,
     /// Number of advice values consumed
     pub advice_consumed: usize,
-    /// Next taint ID to assign
-    next_taint_id: u64,
+    /// Next tracked value ID to assign
+    next_value_id: u64,
 }
 
 impl AnalysisState {
@@ -32,81 +32,81 @@ impl AnalysisState {
             proc_name,
             stack: SymbolicStack::new(),
             advice_consumed: 0,
-            next_taint_id: 0,
+            next_value_id: 0,
         }
     }
 
     fn next_id(&mut self) -> u64 {
-        let id = self.next_taint_id;
-        self.next_taint_id += 1;
+        let id = self.next_value_id;
+        self.next_value_id += 1;
         id
     }
 
-    /// Create a taint for a literal constant.
-    pub fn make_literal(&mut self, value: u64, span: Option<SourceSpan>) -> Taint {
-        Taint {
+    /// Create a tracked value for a literal constant.
+    pub fn make_literal(&mut self, value: u64, span: Option<SourceSpan>) -> TrackedValue {
+        TrackedValue {
             id: self.next_id(),
             bounds: Bounds::Const(value),
-            source: Source::Literal,
+            origin: ValueOrigin::Literal,
             validated: ValidationState::Validated,
             source_span: span,
         }
     }
 
-    /// Create a taint for a value from the advice stack.
-    pub fn make_advice(&mut self, span: SourceSpan) -> Taint {
+    /// Create a tracked value for a value from the advice stack.
+    pub fn make_advice(&mut self, span: SourceSpan) -> TrackedValue {
         self.advice_consumed += 1;
-        Taint {
+        TrackedValue {
             id: self.next_id(),
             bounds: Bounds::Field,
-            source: Source::AdviceStack,
+            origin: ValueOrigin::AdviceStack,
             validated: ValidationState::None,
             source_span: Some(span),
         }
     }
 
-    /// Create a taint for a value from the Merkle store.
-    pub fn make_merkle(&mut self, span: SourceSpan) -> Taint {
-        Taint {
+    /// Create a tracked value for a value from the Merkle store.
+    pub fn make_merkle(&mut self, span: SourceSpan) -> TrackedValue {
+        TrackedValue {
             id: self.next_id(),
             bounds: Bounds::Field,
-            source: Source::MerkleStore,
+            origin: ValueOrigin::MerkleStore,
             validated: ValidationState::None,
             source_span: Some(span),
         }
     }
 
-    /// Create a taint for a derived value (e.g., arithmetic result).
-    pub fn make_derived(&mut self, bounds: Bounds) -> Taint {
-        Taint {
+    /// Create a tracked value for a derived value (e.g., arithmetic result).
+    pub fn make_derived(&mut self, bounds: Bounds) -> TrackedValue {
+        TrackedValue {
             id: self.next_id(),
             bounds,
-            source: Source::Derived,
+            origin: ValueOrigin::Derived,
             validated: ValidationState::Validated,
             source_span: None,
         }
     }
 
-    /// Create a taint for a value loaded from memory.
-    pub fn make_memory(&mut self, span: SourceSpan) -> Taint {
-        Taint {
+    /// Create a tracked value for a value loaded from memory.
+    pub fn make_memory(&mut self, span: SourceSpan) -> TrackedValue {
+        TrackedValue {
             id: self.next_id(),
             bounds: Bounds::Field,
-            source: Source::Memory,
+            origin: ValueOrigin::Memory,
             validated: ValidationState::None,
             source_span: Some(span),
         }
     }
 
-    /// Create a taint for a procedure return value.
+    /// Create a tracked value for a procedure return value.
     ///
     /// Return values from procedures with known contracts are considered
     /// validated (we trust the procedure to return valid values).
-    pub fn make_proc_return(&mut self, target: String) -> Taint {
-        Taint {
+    pub fn make_proc_return(&mut self, target: String) -> TrackedValue {
+        TrackedValue {
             id: self.next_id(),
             bounds: Bounds::Field,
-            source: Source::ProcReturn { target },
+            origin: ValueOrigin::ProcReturn { target },
             validated: ValidationState::Validated,
             source_span: None,
         }
@@ -147,7 +147,7 @@ mod tests {
         assert_eq!(taint.id, 0);
         assert_eq!(taint.bounds, Bounds::Field);
         assert!(!taint.is_validated());
-        assert!(matches!(taint.source, Source::AdviceStack));
+        assert!(matches!(taint.origin, ValueOrigin::AdviceStack));
         assert_eq!(state.advice_consumed, 1);
     }
 

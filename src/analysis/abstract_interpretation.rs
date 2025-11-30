@@ -539,7 +539,7 @@ impl AbstractState {
 impl super::stack_ops::StackLike for AbstractState {
     type Element = SymbolicExpr;
 
-    fn len(&self) -> usize {
+    fn depth(&self) -> usize {
         self.stack.len()
     }
 

@@ -62,6 +62,17 @@ pub fn u8_imm_to_u64(imm: &Immediate<u8>) -> Option<u64> {
     }
 }
 
+/// Try to extract a u16 value from a u16 immediate.
+///
+/// This is used for instructions with u16 immediate arguments,
+/// such as `loc_load.N`, `loc_store.N`, etc.
+pub fn u16_imm_to_u16(imm: &Immediate<u16>) -> Option<u16> {
+    match imm {
+        Immediate::Value(span) => Some(*span.inner()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Note: Testing these functions requires constructing Immediate values,

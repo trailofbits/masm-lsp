@@ -474,9 +474,10 @@ impl Bounds {
             (Bounds::Bool, Bounds::Const(c)) | (Bounds::Const(c), Bounds::Bool) => {
                 Bounds::Range { lo: 0, hi: *c }
             }
-            (Bounds::Bool, Bounds::Range { lo, hi }) | (Bounds::Range { lo, hi }, Bounds::Bool) => {
+            (Bounds::Bool, Bounds::Range { lo: _, hi }) | (Bounds::Range { lo: _, hi }, Bounds::Bool) => {
+                // Bool is [0, 1], so join with Range: lower bound is 0, upper bound is max(hi, 1)
                 Bounds::Range {
-                    lo: (*lo).min(0),
+                    lo: 0,
                     hi: (*hi).max(1),
                 }
             }

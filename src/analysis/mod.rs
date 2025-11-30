@@ -7,7 +7,7 @@
 //! - Reads from uninitialized local variables
 //!
 //! The analysis is structured as:
-//! - `types`: Core types (Bounds, Source, Taint, AnalysisState)
+//! - `types`: Core types (Bounds, ValueOrigin, TrackedValue, AnalysisState)
 //! - `checker`: Pluggable checker trait and common utilities
 //! - `checkers`: Individual security checkers (u32, merkle, procedure calls)
 //! - `stack_effects`: How instructions affect the symbolic stack
@@ -15,10 +15,10 @@
 //! - `analyzer`: Main analyzer composing checkers with stack simulation
 //! - `contracts`: Workspace-wide procedure contract inference
 //! - `while_loops`: Loop bound inference for while loops with counter patterns
-//! - `abstract_interp`: Abstract interpretation framework for decompilation
+//! - `abstract_interpretation`: Abstract interpretation framework for decompilation
 //! - `locals`: Uninitialized local variable detection
 
-pub mod abstract_interp;
+pub mod abstract_interpretation;
 pub mod analyzer;
 pub mod checker;
 pub mod checkers;
@@ -40,10 +40,10 @@ pub use contracts::{
 };
 
 // Re-export core types for external use
-pub use types::{AnalysisState, Bounds, Source, Taint, FIELD_MODULUS, U32_MAX};
+pub use types::{AnalysisState, Bounds, TrackedValue, ValueOrigin, FIELD_MODULUS, U32_MAX};
 
 // Re-export abstract interpretation types for decompilation
-pub use abstract_interp::{
+pub use abstract_interpretation::{
     analyze_repeat_loop, analyze_while_loop, pre_analyze_procedure, AbstractState, LoopAnalysis,
     ProcedureAnalysis, SymbolicExpr,
 };

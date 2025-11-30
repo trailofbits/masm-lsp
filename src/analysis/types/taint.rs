@@ -1,6 +1,6 @@
-//! Taint tracking types for value provenance analysis.
+//! Value tracking types for provenance analysis.
 //!
-//! This module provides types for tracking where values come from (their source)
+//! This module provides types for tracking where values come from (their origin)
 //! and whether they have been validated.
 
 use miden_debug_types::SourceSpan;
@@ -8,12 +8,12 @@ use miden_debug_types::SourceSpan;
 use super::bounds::Bounds;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Source Tracking
+// Value Origin Tracking
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Tracks where a value came from (its provenance).
+/// Tracks where a value originated from (its provenance).
 #[derive(Clone, Debug, Default)]
-pub enum Source {
+pub enum ValueOrigin {
     /// Literal constant in the code
     Literal,
     /// Read from advice stack (UNTRUSTED)
@@ -33,12 +33,12 @@ pub enum Source {
     ProcReturn { target: String },
 }
 
-impl Source {
-    /// Returns true if this source is untrusted external input.
+impl ValueOrigin {
+    /// Returns true if this origin is untrusted external input.
     pub fn is_untrusted(&self) -> bool {
         matches!(
             self,
-            Source::AdviceStack | Source::AdviceMap | Source::MerkleStore
+            ValueOrigin::AdviceStack | ValueOrigin::AdviceMap | ValueOrigin::MerkleStore
         )
     }
 }
@@ -58,31 +58,34 @@ pub enum ValidationState {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Taint
+// TrackedValue
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A tracked value with bounds and provenance.
+/// A tracked value with bounds, origin, and validation state.
+///
+/// This is the core type for tracking value metadata during analysis,
+/// including where values came from and whether they've been validated.
 #[derive(Clone, Debug)]
-pub struct Taint {
-    /// Unique identifier for this taint
+pub struct TrackedValue {
+    /// Unique identifier for this tracked value
     pub id: u64,
     /// Known bounds on this value
     pub bounds: Bounds,
-    /// Where this value came from
-    pub source: Source,
+    /// Where this value originated from
+    pub origin: ValueOrigin,
     /// Whether this value has been validated
     pub validated: ValidationState,
     /// Location where this value was created/loaded
     pub source_span: Option<SourceSpan>,
 }
 
-impl Taint {
-    /// Returns true if this taint has been validated.
+impl TrackedValue {
+    /// Returns true if this value has been validated.
     pub fn is_validated(&self) -> bool {
         matches!(self.validated, ValidationState::Validated)
     }
 
-    /// Mark this taint as validated and constrain bounds to u32.
+    /// Mark this value as validated and constrain bounds to u32.
     pub fn apply_validation(&mut self) {
         self.validated = ValidationState::Validated;
         // Also constrain bounds to u32 after validation
@@ -92,12 +95,12 @@ impl Taint {
     }
 }
 
-impl Default for Taint {
+impl Default for TrackedValue {
     fn default() -> Self {
         Self {
             id: 0,
             bounds: Bounds::Field,
-            source: Source::Literal,
+            origin: ValueOrigin::Literal,
             validated: ValidationState::None,
             source_span: None,
         }
@@ -113,36 +116,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_source_untrusted() {
-        assert!(Source::AdviceStack.is_untrusted());
-        assert!(Source::AdviceMap.is_untrusted());
-        assert!(Source::MerkleStore.is_untrusted());
-        assert!(!Source::Literal.is_untrusted());
-        assert!(!Source::Memory.is_untrusted());
-        assert!(!Source::Derived.is_untrusted());
+    fn test_value_origin_untrusted() {
+        assert!(ValueOrigin::AdviceStack.is_untrusted());
+        assert!(ValueOrigin::AdviceMap.is_untrusted());
+        assert!(ValueOrigin::MerkleStore.is_untrusted());
+        assert!(!ValueOrigin::Literal.is_untrusted());
+        assert!(!ValueOrigin::Memory.is_untrusted());
+        assert!(!ValueOrigin::Derived.is_untrusted());
     }
 
     #[test]
-    fn test_taint_default() {
-        let taint = Taint::default();
-        assert_eq!(taint.id, 0);
-        assert_eq!(taint.bounds, Bounds::Field);
-        assert!(!taint.is_validated());
+    fn test_tracked_value_default() {
+        let value = TrackedValue::default();
+        assert_eq!(value.id, 0);
+        assert_eq!(value.bounds, Bounds::Field);
+        assert!(!value.is_validated());
     }
 
     #[test]
-    fn test_taint_validation() {
-        let mut taint = Taint {
+    fn test_tracked_value_validation() {
+        let mut value = TrackedValue {
             id: 1,
             bounds: Bounds::Field,
-            source: Source::AdviceStack,
+            origin: ValueOrigin::AdviceStack,
             validated: ValidationState::None,
             source_span: None,
         };
 
-        assert!(!taint.is_validated());
-        taint.apply_validation();
-        assert!(taint.is_validated());
-        assert!(taint.bounds.is_u32());
+        assert!(!value.is_validated());
+        value.apply_validation();
+        assert!(value.is_validated());
+        assert!(value.bounds.is_u32());
     }
 }

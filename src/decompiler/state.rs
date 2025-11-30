@@ -241,7 +241,7 @@ impl DecompilerState {
 impl StackLike for DecompilerState {
     type Element = NamedValue;
 
-    fn len(&self) -> usize {
+    fn depth(&self) -> usize {
         self.stack.len()
     }
 
