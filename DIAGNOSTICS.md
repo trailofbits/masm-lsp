@@ -37,14 +37,14 @@ The LSP performs static analysis using:
 
 **What it detects**: Values from the advice stack used in u32 operations without prior `u32assert`/`u32assert2`/`u32assertw`.
 
-**Analysis**: Tracks value origin and validation state. Checks top 2 stack positions at each u32 operation (excluding `u32assert*`, `u32test*`, `u32split`, `u32cast`).
+**Analysis**: Tracks value origin and validation state. Checks the exact number of stack positions consumed by each u32 operation (1 for unary/immediate ops, 2 for binary ops, 3 for ternary ops). Excludes `u32assert*`, `u32test*`, `u32split`, `u32cast`.
 
 **Why useful**: u32 operations have undefined behavior if inputs exceed 0xFFFFFFFF. Malicious provers can inject invalid values via advice.
 
 **Unhandled edge cases**:
-- Only checks top 2 stack positions; deep stack unvalidated values are missed
 - Custom validation patterns (e.g., range checks via comparison) not recognized
 - Values validated then moved deep in stack lose tracking
+- After unknown procedure calls, stack tracking is cleared to avoid false positives
 
 ---
 
@@ -73,16 +73,16 @@ The LSP performs static analysis using:
 **What it detects**: Passing unvalidated advice values to procedures that require validated u32 inputs.
 
 **Analysis**:
-1. Infers procedure contracts (validates inputs? uses u32 ops?)
-2. At call sites, checks top 4 stack positions for unvalidated advice
-3. Warns if callee requires u32 but doesn't validate, or if callee is unknown
+1. Infers procedure contracts (validates inputs? uses u32 ops? stack effect?)
+2. At call sites, checks stack positions consumed by the procedure for unvalidated advice
+3. Only emits warnings when stack effect is known (skips procedures with unknown input counts)
+4. Warns only if callee requires u32 but doesn't validate
 
 **Why useful**: Prevents propagation of unvalidated values across procedure boundaries.
 
 **Unhandled edge cases**:
 - MAST root calls cannot be analyzed
-- External procedures have unknown contracts (conservative warning)
-- Only checks top 4 stack positions
+- External procedures have unknown stack effects (no warning emitted)
 - Cross-module contract inference not supported
 
 ---

@@ -6,7 +6,7 @@
 use miden_assembly_syntax::ast::{Immediate, Instruction};
 use miden_debug_types::SourceSpan;
 
-use super::types::{AnalysisState, Bounds};
+use super::types::{AnalysisState, Bounds, TrackedValue};
 use super::utils::{felt_imm_to_u64, push_imm_to_u64};
 
 /// Apply an instruction's effect on the analysis state.
@@ -146,23 +146,25 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
 
         // ─────────────────────────────────────────────────────────────────────
         // Stack manipulation - Dup
+        // If the position doesn't exist in our tracking, push an untracked value
+        // to maintain consistency with actual stack state.
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::Dup0 => { state.stack.dup(0); }
-        Instruction::Dup1 => { state.stack.dup(1); }
-        Instruction::Dup2 => { state.stack.dup(2); }
-        Instruction::Dup3 => { state.stack.dup(3); }
-        Instruction::Dup4 => { state.stack.dup(4); }
-        Instruction::Dup5 => { state.stack.dup(5); }
-        Instruction::Dup6 => { state.stack.dup(6); }
-        Instruction::Dup7 => { state.stack.dup(7); }
-        Instruction::Dup8 => { state.stack.dup(8); }
-        Instruction::Dup9 => { state.stack.dup(9); }
-        Instruction::Dup10 => { state.stack.dup(10); }
-        Instruction::Dup11 => { state.stack.dup(11); }
-        Instruction::Dup12 => { state.stack.dup(12); }
-        Instruction::Dup13 => { state.stack.dup(13); }
-        Instruction::Dup14 => { state.stack.dup(14); }
-        Instruction::Dup15 => { state.stack.dup(15); }
+        Instruction::Dup0 => { if !state.stack.dup(0) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup1 => { if !state.stack.dup(1) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup2 => { if !state.stack.dup(2) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup3 => { if !state.stack.dup(3) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup4 => { if !state.stack.dup(4) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup5 => { if !state.stack.dup(5) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup6 => { if !state.stack.dup(6) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup7 => { if !state.stack.dup(7) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup8 => { if !state.stack.dup(8) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup9 => { if !state.stack.dup(9) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup10 => { if !state.stack.dup(10) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup11 => { if !state.stack.dup(11) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup12 => { if !state.stack.dup(12) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup13 => { if !state.stack.dup(13) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup14 => { if !state.stack.dup(14) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup15 => { if !state.stack.dup(15) { state.stack.push(TrackedValue::default()); } }
 
         Instruction::DupW0 => {
             // Duplicate word at positions 0-3 onto top

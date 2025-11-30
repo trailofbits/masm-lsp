@@ -137,7 +137,7 @@ pub trait Checker: Send + Sync {
 // Helper functions for checkers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Check if an instruction is a u32 operation (excluding assertions/tests).
+/// Check if an instruction is a u32 operation (excluding assertions/tests/casts).
 pub fn is_u32_op(inst: &Instruction) -> bool {
     let inst_str = inst.to_string();
     inst_str.starts_with("u32")
@@ -145,6 +145,43 @@ pub fn is_u32_op(inst: &Instruction) -> bool {
         && !inst_str.starts_with("u32test")
         && !inst_str.starts_with("u32split")
         && !inst_str.starts_with("u32cast")
+}
+
+/// Returns the number of stack inputs consumed by a u32 operation.
+/// Returns 0 for non-u32 operations or those that don't consume inputs.
+pub fn u32_op_input_count(inst: &Instruction) -> usize {
+    use Instruction::*;
+    match inst {
+        // Ternary: pop 3
+        U32OverflowingAdd3 | U32OverflowingMadd | U32WrappingAdd3 | U32WrappingMadd => 3,
+
+        // Binary: pop 2
+        U32WrappingAdd | U32WrappingSub | U32WrappingMul | U32OverflowingAdd
+        | U32OverflowingSub | U32OverflowingMul | U32DivMod | U32Div | U32Mod | U32And
+        | U32Or | U32Xor | U32Shl | U32Shr | U32Rotl | U32Rotr | U32Lt | U32Lte | U32Gt
+        | U32Gte | U32Min | U32Max => 2,
+
+        // Unary with immediate: pop 1
+        U32WrappingAddImm(_)
+        | U32WrappingSubImm(_)
+        | U32WrappingMulImm(_)
+        | U32OverflowingAddImm(_)
+        | U32OverflowingSubImm(_)
+        | U32OverflowingMulImm(_)
+        | U32DivModImm(_)
+        | U32DivImm(_)
+        | U32ModImm(_)
+        | U32ShlImm(_)
+        | U32ShrImm(_)
+        | U32RotlImm(_)
+        | U32RotrImm(_) => 1,
+
+        // Unary: pop 1
+        U32Not | U32Popcnt | U32Clz | U32Ctz | U32Clo | U32Cto => 1,
+
+        // Operations that don't consume inputs or are excluded
+        _ => 0,
+    }
 }
 
 /// Check if the top n stack values contain unvalidated untrusted input.

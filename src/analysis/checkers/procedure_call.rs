@@ -8,6 +8,7 @@
 use miden_assembly_syntax::ast::{Instruction, InvocationTarget};
 
 use crate::analysis::checker::{has_unvalidated_advice, AnalysisFinding, CheckContext, Checker};
+use crate::analysis::contracts::ProcContract;
 use crate::analysis::types::AnalysisState;
 
 /// Checker that detects untrusted values passed to procedure calls.
@@ -23,20 +24,20 @@ impl ProcedureCallChecker {
         }
     }
 
-    /// Look up contract information for a procedure.
-    fn get_contract_info(
-        target: &str,
-        ctx: &CheckContext,
-    ) -> Option<(bool, bool)> {
-        // Returns (validates_inputs, requires_u32)
+    /// Look up the full contract for a procedure.
+    fn get_contract<'a>(target: &str, ctx: &'a CheckContext) -> Option<&'a ProcContract> {
         let store = ctx.contracts?;
 
         // Try by suffix first, then by name
-        let contract = store
+        store
             .get_by_suffix(target)
-            .or_else(|| store.get_by_name(target))?;
+            .or_else(|| store.get_by_name(target))
+    }
 
-        Some((contract.validates_inputs(), contract.requires_u32_inputs()))
+    /// Get the number of inputs to check for a procedure.
+    /// Returns None if the stack effect is unknown.
+    fn get_input_count(contract: Option<&ProcContract>) -> Option<usize> {
+        contract.and_then(|c| c.stack_effect.inputs())
     }
 }
 
@@ -59,16 +60,23 @@ impl Checker for ProcedureCallChecker {
         };
 
         // Look up contract from workspace
-        let contract_info = Self::get_contract_info(&target_name, ctx);
+        let contract = Self::get_contract(&target_name, ctx);
 
-        match contract_info {
-            Some((true, _)) => {
+        // Get the number of inputs to check based on the contract's stack effect
+        // If unknown, we cannot reliably check so we skip the diagnostic
+        let input_count = match Self::get_input_count(contract) {
+            Some(count) => count,
+            None => return vec![], // Unknown stack effect - skip diagnostic
+        };
+
+        match contract {
+            Some(c) if c.validates_inputs() => {
                 // Procedure validates inputs - no warning needed
                 vec![]
             }
-            Some((false, true)) => {
+            Some(c) if c.requires_u32_inputs() => {
                 // Known procedure that requires u32 inputs but doesn't validate
-                if let Some(taint) = has_unvalidated_advice(state, 4) {
+                if let Some(taint) = has_unvalidated_advice(state, input_count) {
                     vec![AnalysisFinding::warning(format!(
                         "Unvalidated advice passed to `{}` which requires \
                          u32 inputs but doesn't validate them.",
@@ -79,22 +87,10 @@ impl Checker for ProcedureCallChecker {
                     vec![]
                 }
             }
-            Some((false, false)) => {
-                // Known procedure that doesn't require u32 - no warning
+            Some(_) | None => {
+                // Known procedure that doesn't require u32, or unknown procedure
+                // with known stack effect - no warning needed
                 vec![]
-            }
-            None => {
-                // Unknown procedure - conservative warning if passing untrusted values
-                if let Some(taint) = has_unvalidated_advice(state, 4) {
-                    vec![AnalysisFinding::warning(format!(
-                        "Unvalidated advice may be passed to `{}`. \
-                         Consider adding validation if the procedure expects u32 inputs.",
-                        target_name
-                    ))
-                    .with_tracked_value(taint)]
-                } else {
-                    vec![]
-                }
             }
         }
     }
@@ -139,7 +135,7 @@ mod tests {
         let t = state.make_advice(span);
         state.stack.push(t);
 
-        // Create contract store with validating procedure
+        // Create contract store with validating procedure with known stack effect
         let mut contracts = ContractStore::new();
         contracts.update_document(vec![ProcContract {
             path: SymbolPath::new("::test::validating_proc"),
@@ -147,7 +143,7 @@ mod tests {
             uses_u32_ops: true,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Unknown,
+            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
             definition_range: None,
         }]);
 
@@ -168,7 +164,7 @@ mod tests {
         let t = state.make_advice(span);
         state.stack.push(t);
 
-        // Create contract store with non-validating u32 procedure
+        // Create contract store with non-validating u32 procedure with known stack effect
         let mut contracts = ContractStore::new();
         contracts.update_document(vec![ProcContract {
             path: SymbolPath::new("::test::u32_proc"),
@@ -176,7 +172,7 @@ mod tests {
             uses_u32_ops: true,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Unknown,
+            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
             definition_range: None,
         }]);
 
@@ -190,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_warns_for_unknown_procedure_with_untrusted_input() {
+    fn test_no_warning_for_unknown_procedure() {
         let mut state = AnalysisState::new("test".to_string());
         let span = SourceSpan::default();
 
@@ -205,10 +201,9 @@ mod tests {
         let uri = Url::parse("file:///test.masm").unwrap();
         let ctx = make_context_with_contracts(&uri, span, &contracts);
 
+        // Unknown procedures have unknown stack effects, so no warning is emitted
         let findings = checker.check(&make_exec("unknown_proc"), &state, &ctx);
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].message.contains("unknown_proc"));
-        assert!(findings[0].message.contains("may be passed"));
+        assert!(findings.is_empty());
     }
 
     #[test]
@@ -221,7 +216,7 @@ mod tests {
         t.apply_validation();
         state.stack.push(t);
 
-        // Create contract store with non-validating u32 procedure
+        // Create contract store with non-validating u32 procedure with known stack effect
         let mut contracts = ContractStore::new();
         contracts.update_document(vec![ProcContract {
             path: SymbolPath::new("::test::u32_proc"),
@@ -229,7 +224,7 @@ mod tests {
             uses_u32_ops: true,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Unknown,
+            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
             definition_range: None,
         }]);
 
@@ -239,5 +234,80 @@ mod tests {
 
         let findings = checker.check(&make_exec("u32_proc"), &state, &ctx);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_uses_known_input_count_from_stack_effect() {
+        let mut state = AnalysisState::new("test".to_string());
+        let span = SourceSpan::default();
+
+        // Push a literal at position 0 (top of stack after all pushes)
+        let lit = state.make_literal(42, None);
+        state.stack.push(lit);
+
+        // Push unvalidated advice at position 1
+        let advice = state.make_advice(span);
+        state.stack.push(advice);
+
+        // Swap so literal is on top, advice is at position 1
+        state.stack.swap(0, 1);
+
+        // Create a procedure that only consumes 1 input (position 0)
+        let mut contracts = ContractStore::new();
+        contracts.update_document(vec![ProcContract {
+            path: SymbolPath::new("::test::single_input_proc"),
+            validates: ValidationBehavior::None,
+            uses_u32_ops: true,
+            reads_advice: false,
+            uses_merkle_ops: false,
+            stack_effect: StackEffect::Known { inputs: 1, outputs: 1 },
+            definition_range: None,
+        }]);
+
+        let checker = ProcedureCallChecker;
+        let uri = Url::parse("file:///test.masm").unwrap();
+        let ctx = make_context_with_contracts(&uri, span, &contracts);
+
+        // Should NOT warn because the procedure only consumes position 0 (the literal)
+        // Position 1 (unvalidated advice) is not consumed by this procedure
+        let findings = checker.check(&make_exec("single_input_proc"), &state, &ctx);
+        assert!(
+            findings.is_empty(),
+            "Should not warn when unvalidated advice is beyond the procedure's input count"
+        );
+    }
+
+    #[test]
+    fn test_warns_when_unvalidated_advice_within_input_count() {
+        let mut state = AnalysisState::new("test".to_string());
+        let span = SourceSpan::default();
+
+        // Push unvalidated advice at position 0
+        let advice = state.make_advice(span);
+        state.stack.push(advice);
+
+        // Create a procedure that consumes 2 inputs
+        let mut contracts = ContractStore::new();
+        contracts.update_document(vec![ProcContract {
+            path: SymbolPath::new("::test::two_input_proc"),
+            validates: ValidationBehavior::None,
+            uses_u32_ops: true,
+            reads_advice: false,
+            uses_merkle_ops: false,
+            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            definition_range: None,
+        }]);
+
+        let checker = ProcedureCallChecker;
+        let uri = Url::parse("file:///test.masm").unwrap();
+        let ctx = make_context_with_contracts(&uri, span, &contracts);
+
+        // Should warn because unvalidated advice is at position 0, which is consumed
+        let findings = checker.check(&make_exec("two_input_proc"), &state, &ctx);
+        assert_eq!(
+            findings.len(),
+            1,
+            "Should warn when unvalidated advice is within the procedure's input count"
+        );
     }
 }
