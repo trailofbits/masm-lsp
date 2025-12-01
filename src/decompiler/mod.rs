@@ -120,10 +120,11 @@ mod tests {
         // end
         //
         // This loop has net_effect = -1 (consuming), and creates 1 variable per iteration.
+        // The loop counter i takes values 0, 1, 2, 3, 4 (stride = 1).
         // The pseudocode for "add" should be transformed from:
         //   "v_0 = a_0 + a_5"
         // to:
-        //   "v_i = a_i + a_(5+i)"
+        //   "v_i = a_i + a_(i+5)"
         //
         // This shows that each iteration produces a distinct output (v_i) from distinct inputs.
 
@@ -137,10 +138,10 @@ mod tests {
 
         // Apply input indexing first
         let with_inputs = apply_counter_indexing(original, counter, net_effect);
-        assert_eq!(with_inputs, "v_0 = a_i + a_(5+i)");
+        assert_eq!(with_inputs, "v_0 = a_i + a_(i+5)");
 
         // Then apply output indexing
         let with_outputs = apply_output_indexing(&with_inputs, counter, start_var_id, vars_per_iteration);
-        assert_eq!(with_outputs, "v_i = a_i + a_(5+i)");
+        assert_eq!(with_outputs, "v_i = a_i + a_(i+5)");
     }
 }

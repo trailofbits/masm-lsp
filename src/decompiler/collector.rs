@@ -268,11 +268,19 @@ impl<'a> DecompilationCollector<'a> {
                     // Non-zero net effect: stack positions shift each iteration
                     // Generate a counter and apply indexing
                     let counter = self.state.as_mut().map(|s| s.new_counter()).unwrap_or_else(|| "i".to_string());
+                    let stride = net_effect.unsigned_abs();
 
-                    // Update the while hint to include counter initialization
-                    // Format: "while i = 0; condition:" instead of separate "i = 0" line
+                    // Update the while hint to use for loop syntax
+                    // Format: "for i = 0; condition; i = i + stride:"
                     if while_hint_idx < self.hints.len() {
-                        self.hints[while_hint_idx].1 = format!("{}while {} = 0; {}:", self.indent(), counter, condition);
+                        let hint = if stride == 1 {
+                            format!("{}for {} = 0; {}; {} = {} + 1:",
+                                self.indent(), counter, condition, counter, counter)
+                        } else {
+                            format!("{}for {} = 0; {}; {} = {} + {}:",
+                                self.indent(), counter, condition, counter, counter, stride)
+                        };
+                        self.hints[while_hint_idx].1 = hint;
                     }
 
                     // Apply counter indexing to both input and output variable references in loop body
@@ -333,9 +341,23 @@ impl<'a> DecompilationCollector<'a> {
                     }
                 }
 
-                // Generate hint for "for c in 0..N:" (replaces "repeat N times:")
+                // Generate hint for "for i = init; condition; update:" loop header
+                // The stride is |net_effect| per iteration
+                let stride = loop_analysis.net_effect_per_iteration.unsigned_abs() as u64;
                 if let Some(range) = span_to_range(self.sources, op.span()) {
-                    let hint = format!("{}for {} in 0..{}:", self.indent(), counter, count);
+                    let hint = if stride == 0 {
+                        // Zero net effect: no update needed
+                        format!("{}for {} = 0; {} < {};:", self.indent(), counter, counter, count)
+                    } else if stride == 1 {
+                        // Stride of 1: simplified increment
+                        format!("{}for {} = 0; {} < {}; {} = {} + 1:",
+                            self.indent(), counter, counter, count, counter, counter)
+                    } else {
+                        // General case with stride
+                        let bound = (*count as u64) * stride;
+                        format!("{}for {} = 0; {} < {}; {} = {} + {}:",
+                            self.indent(), counter, counter, bound, counter, counter, stride)
+                    };
                     self.hints.push((range.start.line, hint));
                 }
 
