@@ -152,7 +152,7 @@ impl<'a> SsaDecompilationCollector<'a> {
         _span: SourceSpan,
     ) -> Option<PseudocodeTemplate> {
         use miden_assembly_syntax::ast::Instruction;
-        use super::ssa::{binary_op, binary_imm_op, comparison, comparison_imm, unary_op, unary_fn};
+        use super::ssa::{binary_op, binary_imm_op, comparison, comparison_imm, unary_op, unary_fn, ext2_binary_op, ext2_unary_op, ext2_unary_fn};
 
         let state = self.state.as_mut()?;
         if state.tracking_failed {
@@ -176,6 +176,80 @@ impl<'a> SsaDecompilationCollector<'a> {
                 out.var(&var);
                 out.text(" = ");
                 out.text(&value);
+                Some(out.into_template())
+            }
+            Instruction::PushSlice(imm, range) => {
+                let count = range.len();
+                let mut vars = Vec::new();
+                for _ in 0..count {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(&format!(") = {}[{}..{}]", imm, range.start, range.end));
+                Some(out.into_template())
+            }
+            Instruction::PushFeltList(values) => {
+                let count = values.len();
+                let mut vars = Vec::new();
+                for _ in 0..count {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = [");
+                for (i, val) in values.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.text(&format!("{}", val));
+                }
+                out.text("]");
+                Some(out.into_template())
+            }
+            Instruction::Sdepth => {
+                let var = state.new_local();
+                state.push(var);
+                let mut out = TemplateOutput::default();
+                out.var(&var);
+                out.text(" = stack_depth()");
+                Some(out.into_template())
+            }
+            Instruction::Clk => {
+                let var = state.new_local();
+                state.push(var);
+                let mut out = TemplateOutput::default();
+                out.var(&var);
+                out.text(" = clk()");
+                Some(out.into_template())
+            }
+            Instruction::Caller => {
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = caller()");
                 Some(out.into_template())
             }
 
@@ -323,6 +397,16 @@ impl<'a> SsaDecompilationCollector<'a> {
             Instruction::Not => Some(unary_op::<SsaDecompilerState, TemplateOutput>(state, "!").into_template()),
 
             // ─────────────────────────────────────────────────────────────────────
+            // Extension field (ext2) operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::Ext2Add => Some(ext2_binary_op::<SsaDecompilerState, TemplateOutput>(state, "+").into_template()),
+            Instruction::Ext2Sub => Some(ext2_binary_op::<SsaDecompilerState, TemplateOutput>(state, "-").into_template()),
+            Instruction::Ext2Mul => Some(ext2_binary_op::<SsaDecompilerState, TemplateOutput>(state, "*").into_template()),
+            Instruction::Ext2Div => Some(ext2_binary_op::<SsaDecompilerState, TemplateOutput>(state, "/").into_template()),
+            Instruction::Ext2Neg => Some(ext2_unary_op::<SsaDecompilerState, TemplateOutput>(state, "-").into_template()),
+            Instruction::Ext2Inv => Some(ext2_unary_fn::<SsaDecompilerState, TemplateOutput>(state, "inv").into_template()),
+
+            // ─────────────────────────────────────────────────────────────────────
             // u32 operations
             // ─────────────────────────────────────────────────────────────────────
             Instruction::U32And => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "&").into_template()),
@@ -346,6 +430,11 @@ impl<'a> SsaDecompilationCollector<'a> {
             Instruction::U32Shr => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, ">>").into_template()),
             Instruction::U32ShlImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "<<", &format_imm(imm)).into_template()),
             Instruction::U32ShrImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, ">>", &format_imm(imm)).into_template()),
+
+            Instruction::U32Rotl => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "rotl").into_template()),
+            Instruction::U32Rotr => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "rotr").into_template()),
+            Instruction::U32RotlImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "rotl", &format_imm(imm)).into_template()),
+            Instruction::U32RotrImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "rotr", &format_imm(imm)).into_template()),
 
             Instruction::U32Lt => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, "<").into_template()),
             Instruction::U32Lte => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, "<=").into_template()),
@@ -912,15 +1001,43 @@ impl<'a> SsaDecompilationCollector<'a> {
                 Some(out.into_template())
             }
             Instruction::HPerm => {
-                // Pop 12, push 12
+                // Capture input variables before popping (C, B, A - 3 words = 12 elements)
+                let mut inputs = Vec::new();
+                for i in 0..12 {
+                    if let Some(id) = state.peek(i) {
+                        inputs.push(id);
+                    }
+                }
+                inputs.reverse(); // Show bottom-to-top order (A, B, C)
+
+                // Pop 12 inputs
                 for _ in 0..12 {
                     state.pop();
                 }
+
+                // Push 12 new outputs (D, E, F - 3 words)
+                let mut outputs = Vec::new();
                 for _ in 0..12 {
                     let var = state.new_local();
                     state.push(var);
+                    outputs.push(var);
                 }
-                Some(PseudocodeTemplate::new().literal("... = hperm(...)"))
+                outputs.reverse();
+
+                // Format: (F, E, D) = hperm(A, B, C)
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in outputs.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = hperm(");
+                for (i, var) in inputs.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(")");
+                Some(out.into_template())
             }
 
             // Merkle tree operations
@@ -993,6 +1110,13 @@ impl<'a> SsaDecompilationCollector<'a> {
             Instruction::SwapW1 => { self.swapw(0, 1); None }
             Instruction::SwapW2 => { self.swapw(0, 2); None }
             Instruction::SwapW3 => { self.swapw(0, 3); None }
+            Instruction::SwapDw => {
+                // Swap double words: positions 0-7 with 8-15
+                for i in 0..8 {
+                    state.swap(i, 8 + i);
+                }
+                None
+            }
 
             Instruction::MovUpW2 => { self.movupw(2); None }
             Instruction::MovUpW3 => { self.movupw(3); None }
@@ -1026,6 +1150,13 @@ impl<'a> SsaDecompilationCollector<'a> {
                 // Reverse top 4 elements - swap (0,3) and (1,2)
                 state.swap(0, 3);
                 state.swap(1, 2);
+                None
+            }
+            Instruction::Reversedw => {
+                // Reverse top 8 elements
+                for i in 0..4 {
+                    state.swap(i, 7 - i);
+                }
                 None
             }
 
@@ -1128,6 +1259,20 @@ impl<'a> SsaDecompilationCollector<'a> {
             Instruction::Pow2 => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "pow2").into_template()),
             Instruction::Exp => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "**").into_template()),
             Instruction::ExpImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "**", &format_imm(imm)).into_template()),
+            Instruction::ExpBitLength(bits) => {
+                let exp = state.pop();
+                let base = state.pop();
+                let var = state.new_local();
+                state.push(var);
+                let mut out = TemplateOutput::default();
+                out.var(&var);
+                out.text(" = ");
+                out.var(&base);
+                out.text(&format!(" ** ("));
+                out.var(&exp);
+                out.text(&format!(", {}-bit)", bits));
+                Some(out.into_template())
+            }
             Instruction::IsOdd => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "is_odd").into_template()),
 
             // No-ops
@@ -1135,12 +1280,330 @@ impl<'a> SsaDecompilationCollector<'a> {
             Instruction::Emit | Instruction::EmitImm(_) | Instruction::Trace(_) |
             Instruction::SysEvent(_) => None,
 
-            // For unsupported instructions, fall back to the string-based approach
-            // and convert to a literal template
-            _ => {
-                // Create a temporary DecompilerState to use the existing ToPseudocode
-                // This is a fallback for instructions not yet ported to SSA
-                None
+            // ─────────────────────────────────────────────────────────────────────
+            // Complex STARK operations
+            // ─────────────────────────────────────────────────────────────────────
+
+            // horner_eval_base: [c7..c0, -, -, -, -, -, alpha_addr, acc1, acc0, ...]
+            // Updates acc in place (positions 14-15) while keeping other values unchanged
+            Instruction::HornerBase => {
+                // Capture input variables (16 elements)
+                let mut inputs = Vec::new();
+                for _ in 0..16 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                // Push 16 outputs - most are unchanged, acc is modified
+                // Positions 0-1 (bottom, which is acc) get new values
+                for i in 0..16 {
+                    if i == 0 || i == 1 {
+                        // acc' (new accumulator values)
+                        let var = state.new_local();
+                        state.push(var);
+                    } else {
+                        // Unchanged from input
+                        state.push(inputs[i]);
+                    }
+                }
+
+                // Get the new acc values (at bottom of what we just pushed)
+                let acc0_new = state.peek(15).unwrap_or_else(|| state.new_local());
+                let acc1_new = state.peek(14).unwrap_or_else(|| state.new_local());
+
+                // Format: (acc1', acc0') = horner_eval_base(c7..c0, alpha@addr, acc1, acc0)
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&acc1_new);
+                out.text(", ");
+                out.var(&acc0_new);
+                out.text(") = horner_eval_base(");
+                // Show coefficients c7..c0
+                for i in 0..8 {
+                    if i > 0 { out.text(", "); }
+                    out.var(&inputs[i]);
+                }
+                out.text(", alpha@");
+                out.var(&inputs[13]); // alpha_addr
+                out.text(", ");
+                out.var(&inputs[14]); // acc1
+                out.text(", ");
+                out.var(&inputs[15]); // acc0
+                out.text(")");
+                Some(out.into_template())
+            }
+
+            // horner_eval_ext: similar to horner_eval_base but with extension field coefficients
+            Instruction::HornerExt => {
+                // Capture input variables (16 elements)
+                let mut inputs = Vec::new();
+                for _ in 0..16 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                // Push 16 outputs - most are unchanged, acc is modified
+                for i in 0..16 {
+                    if i == 0 || i == 1 {
+                        let var = state.new_local();
+                        state.push(var);
+                    } else {
+                        state.push(inputs[i]);
+                    }
+                }
+
+                let acc0_new = state.peek(15).unwrap_or_else(|| state.new_local());
+                let acc1_new = state.peek(14).unwrap_or_else(|| state.new_local());
+
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&acc1_new);
+                out.text(", ");
+                out.var(&acc0_new);
+                out.text(") = horner_eval_ext(");
+                // Show coefficients c3..c0 (extension field pairs)
+                for i in 0..8 {
+                    if i > 0 { out.text(", "); }
+                    out.var(&inputs[i]);
+                }
+                out.text(", alpha@");
+                out.var(&inputs[13]);
+                out.text(", ");
+                out.var(&inputs[14]);
+                out.text(", ");
+                out.var(&inputs[15]);
+                out.text(")");
+                Some(out.into_template())
+            }
+
+            // fri_ext2fold4: FRI folding operation
+            // Input: [v7..v0, f_pos, d_seg, poe, e1, e0, a1, a0, layer_ptr, rem_ptr, ...]
+            // Output: [garbage*10, layer_ptr+8, poe^4, f_pos, ne1, ne0, rem_ptr, ...]
+            Instruction::FriExt2Fold4 => {
+                // Capture inputs (17 elements)
+                let mut inputs = Vec::new();
+                for _ in 0..17 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                // Push 16 outputs
+                let mut outputs = Vec::new();
+                for _ in 0..16 {
+                    let var = state.new_local();
+                    state.push(var);
+                    outputs.push(var);
+                }
+
+                // Get output references from stack (top to bottom)
+                let out_vars: Vec<_> = (0..16).filter_map(|i| state.peek(i)).collect();
+
+                let mut out = TemplateOutput::default();
+                out.text("(_, _, _, _, _, _, _, _, _, _, ");
+                // Show meaningful outputs: layer_ptr+8, poe^4, f_pos, ne1, ne0, rem_ptr
+                if out_vars.len() >= 6 {
+                    out.var(&out_vars[5]); out.text(", ");
+                    out.var(&out_vars[4]); out.text(", ");
+                    out.var(&out_vars[3]); out.text(", ");
+                    out.var(&out_vars[2]); out.text(", ");
+                    out.var(&out_vars[1]); out.text(", ");
+                    out.var(&out_vars[0]);
+                }
+                out.text(") = fri_ext2fold4(");
+                // Show query values v7..v0
+                for i in 0..8.min(inputs.len()) {
+                    if i > 0 { out.text(", "); }
+                    out.var(&inputs[i]);
+                }
+                out.text(", ...)");
+                Some(out.into_template())
+            }
+
+            // eval_circuit: [ptr, n_read, n_eval, ...] -> [ptr, n_read, n_eval, ...]
+            // Stack unchanged, evaluates a circuit from memory
+            Instruction::EvalCircuit => {
+                // Peek at inputs without popping (stack is unchanged)
+                let n_eval = state.peek(0);
+                let n_read = state.peek(1);
+                let ptr = state.peek(2);
+
+                let mut out = TemplateOutput::default();
+                out.text("eval_circuit(ptr=");
+                if let Some(p) = ptr { out.var(&p); }
+                out.text(", n_read=");
+                if let Some(n) = n_read { out.var(&n); }
+                out.text(", n_eval=");
+                if let Some(n) = n_eval { out.var(&n); }
+                out.text(")");
+                Some(out.into_template())
+            }
+
+            // log_precompile: [COMM (4), TAG (4), ...] -> [R1 (4), R0 (4), CAP_NEXT (4), ...]
+            Instruction::LogPrecompile => {
+                // Capture inputs (8 elements)
+                let mut inputs = Vec::new();
+                for _ in 0..8 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                // Push 12 outputs
+                for _ in 0..12 {
+                    let var = state.new_local();
+                    state.push(var);
+                }
+
+                // Get output references
+                let out_vars: Vec<_> = (0..12).filter_map(|i| state.peek(i)).collect();
+
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in out_vars.iter().rev().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = log_precompile(");
+                for (i, var) in inputs.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(")");
+                Some(out.into_template())
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Memory stream operation
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::MemStream => {
+                // Pop 13 elements (addr + 12 hasher state), push 13 (new addr + new state)
+                let mut inputs = Vec::new();
+                for _ in 0..13 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                let mut outputs = Vec::new();
+                for _ in 0..13 {
+                    let var = state.new_local();
+                    state.push(var);
+                    outputs.push(var);
+                }
+                outputs.reverse();
+
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in outputs.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = mem_stream(");
+                for (i, var) in inputs.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(")");
+                Some(out.into_template())
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Procedure reference
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::ProcRef(target) => {
+                // Push 4 elements (MAST root hash)
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(&format!(") = procref({})", target));
+                Some(out.into_template())
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Procedure calls - use contracts for stack effects when available
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
+                use crate::analysis::contracts::StackEffect;
+
+                // Try to resolve the target to get its contract
+                let resolved_path = self.resolver.resolve_target(target);
+                let stack_effect = resolved_path
+                    .as_ref()
+                    .and_then(|path| self.contracts.and_then(|c| c.get(path)))
+                    .map(|c| c.stack_effect.clone());
+
+                match stack_effect {
+                    Some(StackEffect::Known { inputs, outputs }) => {
+                        // Known stack effect - pop inputs, push outputs
+                        let mut input_vars = Vec::new();
+                        for _ in 0..inputs {
+                            input_vars.push(state.pop());
+                        }
+                        input_vars.reverse();
+
+                        let mut output_vars = Vec::new();
+                        for _ in 0..outputs {
+                            let var = state.new_local();
+                            state.push(var);
+                            output_vars.push(var);
+                        }
+                        output_vars.reverse();
+
+                        let mut out = TemplateOutput::default();
+                        if !output_vars.is_empty() {
+                            out.text("(");
+                            for (i, var) in output_vars.iter().enumerate() {
+                                if i > 0 { out.text(", "); }
+                                out.var(var);
+                            }
+                            out.text(") = ");
+                        }
+                        out.text(&format!("{}(", target));
+                        for (i, var) in input_vars.iter().enumerate() {
+                            if i > 0 { out.text(", "); }
+                            out.var(var);
+                        }
+                        out.text(")");
+                        Some(out.into_template())
+                    }
+                    Some(StackEffect::KnownInputs { inputs }) => {
+                        // Known inputs but unknown outputs - pop inputs, fail tracking
+                        let mut input_vars = Vec::new();
+                        for _ in 0..inputs {
+                            input_vars.push(state.pop());
+                        }
+                        input_vars.reverse();
+                        state.fail();
+
+                        let mut out = TemplateOutput::default();
+                        out.text(&format!("{}(", target));
+                        for (i, var) in input_vars.iter().enumerate() {
+                            if i > 0 { out.text(", "); }
+                            out.var(var);
+                        }
+                        out.text(")");
+                        Some(out.into_template())
+                    }
+                    _ => {
+                        // Unknown stack effect - fail tracking
+                        state.fail();
+                        Some(PseudocodeTemplate::new().literal(&format!("{}", target)))
+                    }
+                }
+            }
+            Instruction::DynExec | Instruction::DynCall => {
+                // Dynamic calls have unknown targets - always fail tracking
+                state.fail();
+                let name = if matches!(inst, Instruction::DynExec) { "dynexec" } else { "dyncall" };
+                Some(PseudocodeTemplate::new().literal(name))
             }
         }
     }
@@ -1368,7 +1831,7 @@ impl<'a> SsaDecompilationCollector<'a> {
 
                 // Generate "for" hint
                 if let Some(range) = span_to_range(self.sources, op.span()) {
-                    let hint = format!("for {} = 0; {} < {};:", counter, counter, count);
+                    let hint = format!("for {} = 0; {} < {}:", counter, counter, count);
                     self.add_literal_hint(range.start.line, &hint);
                 }
 

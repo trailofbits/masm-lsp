@@ -370,11 +370,20 @@ impl InstructionEffect {
             },
 
             // ─────────────────────────────────────────────────────────────────
-            // Unknown/complex effects
+            // Unknown/dynamic effects (procedure calls)
             // ─────────────────────────────────────────────────────────────────
             Exec(_) | Call(_) | SysCall(_) | DynExec | DynCall => InstructionEffect::Unknown,
-            FriExt2Fold4 | HornerBase | HornerExt | EvalCircuit | LogPrecompile | SysEvent(_) => {
-                InstructionEffect::Unknown
+            SysEvent(_) => InstructionEffect::Unknown,
+
+            // ─────────────────────────────────────────────────────────────────
+            // Complex STARK operations - use static effects from stack_ops
+            // ─────────────────────────────────────────────────────────────────
+            FriExt2Fold4 | HornerBase | HornerExt | EvalCircuit | LogPrecompile => {
+                if let Some(effect) = static_effect(inst) {
+                    InstructionEffect::Static(effect)
+                } else {
+                    InstructionEffect::Unknown
+                }
             }
 
             // ─────────────────────────────────────────────────────────────────

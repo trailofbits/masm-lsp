@@ -305,10 +305,28 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         DynExec | DynCall => return None,
 
         // ─────────────────────────────────────────────────────────────────────
-        // Complex STARK operations - unknown effects
+        // Complex STARK operations
         // ─────────────────────────────────────────────────────────────────────
 
-        FriExt2Fold4 | HornerBase | HornerExt | EvalCircuit | LogPrecompile => return None,
+        // horner_eval_base: reads c7..c0 (8), five garbage slots, alpha_addr, acc1, acc0
+        // Updates acc in place. Stack depth unchanged but positions 14-15 modified.
+        // For decompilation purposes, we model this as consuming and producing 16 elements.
+        HornerBase => StaticEffect::new(16, 16),
+
+        // horner_eval_ext: same pattern as horner_eval_base
+        HornerExt => StaticEffect::new(16, 16),
+
+        // fri_ext2fold4: [v7..v0, f_pos, d_seg, poe, e1, e0, a1, a0, layer_ptr, rem_ptr, ...]
+        // Outputs 16 elements with stack shift left by 1 (pulls from overflow)
+        FriExt2Fold4 => StaticEffect::new(17, 16),
+
+        // eval_circuit: [ptr, n_read, n_eval, ...] -> [ptr, n_read, n_eval, ...]
+        // Stack unchanged
+        EvalCircuit => StaticEffect::new(3, 3),
+
+        // log_precompile: [COMM (4), TAG (4), ...] -> [R1 (4), R0 (4), CAP_NEXT (4), ...]
+        // Pops 8, pushes 12
+        LogPrecompile => StaticEffect::new(8, 12),
     })
 }
 
