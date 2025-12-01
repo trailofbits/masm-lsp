@@ -30,9 +30,10 @@ cargo bench              # Run benchmarks (decompilation)
 - **`symbol_resolution.rs`**: Resolves symbol names to qualified `SymbolPath` using module context (imports, aliases)
 - **`cursor_resolution.rs`**: Finds what symbol the cursor is on via AST traversal, returns `ResolvedSymbol`
 - **`decompiler/`**: Converts instructions to pseudocode by tracking a symbolic stack with named variables
-  - `ToPseudocode` trait on `Instruction` for conversion
-  - `DecompilerState` tracks symbolic stack state
-  - `collector.rs` visits AST to generate hints for all procedures
+  - **`ssa.rs`**: SSA (Static Single Assignment) infrastructure with phi nodes for consistent variable naming across control flow
+  - **`SsaDecompilerState`**: tracks stack with SSA IDs; phi nodes unify variables at loop/branch merge points
+  - **`collector.rs`**: uses two-pass approach: (1) generate templates with SSA refs, (2) resolve phis and emit final strings
+  - **`DecompilerOps`**: trait abstracts stack operations for generic pseudocode generation
 
 ### Analysis Subsystem (`analysis/`)
 
@@ -62,25 +63,26 @@ Two modes controlled by `InlayHintType`:
 
 ### Core Traits (Must Reuse)
 
-| Trait | Location | Purpose | When to Use |
-|-------|----------|---------|-------------|
-| `ToPseudocode` | `decompiler/pseudocode.rs` | Converts instructions to pseudocode | Any pseudocode/decompilation output |
-| `ToDescription` | `descriptions.rs` | Dynamic instruction descriptions | Hover info, documentation |
-| `StackLike` | `analysis/stack_ops.rs` | Unified stack manipulation | Any stack-based analysis |
-| `Checker` | `analysis/checker.rs` | Security check abstraction | New security/validation checks |
-| `DocumentService` | `service.rs` | Document operations | Testing, document handling |
-| `WorkspaceService` | `service.rs` | Workspace operations | Testing, workspace queries |
-| `PublishDiagnostics` | `client.rs` | Diagnostic publishing | Testing with mock clients |
+| Trait                | Location                | Purpose                                         | When to Use                                          |
+| -------------------- | ----------------------- | ----------------------------------------------- | ---------------------------------------------------- |
+| `DecompilerOps`      | `decompiler/ssa.rs`     | Generic stack operations for decompilation      | Pseudocode generation with SSA or string-based state |
+| `PseudocodeOutput`   | `decompiler/ssa.rs`     | Builds pseudocode output (strings or templates) | Creating decompilation output                        |
+| `ToDescription`      | `descriptions.rs`       | Dynamic instruction descriptions                | Hover info, documentation                            |
+| `StackLike`          | `analysis/stack_ops.rs` | Unified stack manipulation                      | Any stack-based analysis                             |
+| `Checker`            | `analysis/checker.rs`   | Security check abstraction                      | New security/validation checks                       |
+| `DocumentService`    | `service.rs`            | Document operations                             | Testing, document handling                           |
+| `WorkspaceService`   | `service.rs`            | Workspace operations                            | Testing, workspace queries                           |
+| `PublishDiagnostics` | `client.rs`             | Diagnostic publishing                           | Testing with mock clients                            |
 
 ### Key Utilities (Must Reuse)
 
-| Utility | Location | Purpose |
-|---------|----------|---------|
-| `symbol_resolution::resolve_target()` | `symbol_resolution.rs` | **Single source of truth** for symbol resolution |
-| `stack_ops::static_effect()` | `analysis/stack_ops.rs` | O(1) instruction effect lookup (pops, pushes) |
-| `diagnostics::span_to_range()` | `diagnostics.rs` | Convert byte spans to LSP ranges |
-| `diagnostics::normalize_message()` | `diagnostics.rs` | Standardize diagnostic messages |
-| `SymbolPath` | `symbol_path.rs` | Qualified symbol paths (e.g., `::std::math::u64::add`) |
+| Utility                               | Location                | Purpose                                                |
+| ------------------------------------- | ----------------------- | ------------------------------------------------------ |
+| `symbol_resolution::resolve_target()` | `symbol_resolution.rs`  | **Single source of truth** for symbol resolution       |
+| `stack_ops::static_effect()`          | `analysis/stack_ops.rs` | O(1) instruction effect lookup (pops, pushes)          |
+| `diagnostics::span_to_range()`        | `diagnostics.rs`        | Convert byte spans to LSP ranges                       |
+| `diagnostics::normalize_message()`    | `diagnostics.rs`        | Standardize diagnostic messages                        |
+| `SymbolPath`                          | `symbol_path.rs`        | Qualified symbol paths (e.g., `::std::math::u64::add`) |
 
 ### Adding New Checkers
 
@@ -125,18 +127,19 @@ async fn test_my_feature() {
 
 ### Key Test Utilities
 
-| Utility | Purpose |
-|---------|---------|
-| `TestHarness::new()` | Create test environment with mock client |
-| `TestHarness::with_instruction_hovers()` | Enable instruction hovers for hover tests |
-| `harness.open_doc(name, content)` | Open inline test document |
-| `harness.open_fixture(name)` | Open file from `tests/fixtures/` |
-| `harness.take_published()` | Get published diagnostics |
-| `fixtures::find_position(content, marker)` | Find cursor position in test code |
+| Utility                                    | Purpose                                   |
+| ------------------------------------------ | ----------------------------------------- |
+| `TestHarness::new()`                       | Create test environment with mock client  |
+| `TestHarness::with_instruction_hovers()`   | Enable instruction hovers for hover tests |
+| `harness.open_doc(name, content)`          | Open inline test document                 |
+| `harness.open_fixture(name)`               | Open file from `tests/fixtures/`          |
+| `harness.take_published()`                 | Get published diagnostics                 |
+| `fixtures::find_position(content, marker)` | Find cursor position in test code         |
 
 ### Test Fixtures (`tests/common/fixtures.rs`)
 
 Common MASM code snippets for testing:
+
 - `SIMPLE_EXECUTABLE`: Basic executable with procedure calls
 - `WITH_PROCREF`: Tests `procref` instruction
 - `MULTI_CALL`: Multiple procedure calls
@@ -155,20 +158,21 @@ let mock_ws = MockWorkspaceService::new();
 
 ### Test Organization
 
-| Test File | Coverage |
-|-----------|----------|
-| `resolution_test.rs` | Symbol resolution (local, global, stdlib) |
-| `hover_test.rs` | Hover information |
-| `diagnostics_test.rs` | Error reporting |
-| `concurrent_test.rs` | Race conditions, stress tests |
-| `stdlib_test.rs` | Standard library integration |
-| `examples_test.rs` | Real-world examples |
+| Test File             | Coverage                                  |
+| --------------------- | ----------------------------------------- |
+| `resolution_test.rs`  | Symbol resolution (local, global, stdlib) |
+| `hover_test.rs`       | Hover information                         |
+| `diagnostics_test.rs` | Error reporting                           |
+| `concurrent_test.rs`  | Race conditions, stress tests             |
+| `stdlib_test.rs`      | Standard library integration              |
+| `examples_test.rs`    | Real-world examples                       |
 
 ---
 
 ## Code Conventions
 
-- Trait-based conversion: `ToPseudocode` for decompilation, `ToDescription` for descriptions
+- Trait-based conversion: `DecompilerOps` for pseudocode generation, `ToDescription` for descriptions
+- SSA-based decompilation: Use `SsaDecompilerState` with phi nodes for control flow merge points
 - Use `SymbolPath` for qualified procedure paths (e.g., `std::math::u64::add`)
 - Span-to-range conversion goes through `diagnostics::span_to_range`
 - AST traversal uses `miden_assembly_syntax::ast::visit::Visit` trait
@@ -193,6 +197,7 @@ ServerConfig::builder()
 ### Diagnostic Sources
 
 Three diagnostic sources (use consistently):
+
 - `masm-lsp/syntax`: Parse errors, unresolved references
 - `masm-lsp/analysis`: Taint analysis, uninitialized locals
 - `masm-lsp/decompilation`: Decompilation failures
@@ -202,7 +207,7 @@ Three diagnostic sources (use consistently):
 ## Anti-Patterns to Avoid
 
 1. **Do NOT** reimplement symbol resolution—use `symbol_resolution::resolve_target()`
-2. **Do NOT** write custom stack manipulation—implement or use `StackLike`
+2. **Do NOT** write custom stack manipulation—implement or use `StackLike` or `DecompilerOps`
 3. **Do NOT** duplicate test fixtures—add to `tests/common/fixtures.rs`
 4. **Do NOT** add LSP handlers without service-layer tests
 5. **Do NOT** bypass the index for definition/reference lookups
@@ -215,15 +220,15 @@ Three diagnostic sources (use consistently):
 
 ### What Goes Where
 
-| New Feature | Location |
-|-------------|----------|
-| LSP protocol handlers | `server/mod.rs` |
-| Business logic | `service.rs` (via traits) |
-| Symbol lookups | `index.rs` → `WorkspaceIndex` |
-| New security checks | `analysis/checkers/` + register in `analyzer.rs` |
-| New instruction descriptions | `descriptions.rs` → `ToDescription` |
-| Pseudocode generation | `decompiler/pseudocode.rs` → `ToPseudocode` |
-| Stack effect metadata | `analysis/stack_ops.rs` |
+| New Feature                  | Location                                                         |
+| ---------------------------- | ---------------------------------------------------------------- |
+| LSP protocol handlers        | `server/mod.rs`                                                  |
+| Business logic               | `service.rs` (via traits)                                        |
+| Symbol lookups               | `index.rs` → `WorkspaceIndex`                                    |
+| New security checks          | `analysis/checkers/` + register in `analyzer.rs`                 |
+| New instruction descriptions | `descriptions.rs` → `ToDescription`                              |
+| Pseudocode generation        | `decompiler/ssa.rs` → `DecompilerOps`, `decompiler/collector.rs` |
+| Stack effect metadata        | `analysis/stack_ops.rs`                                          |
 
 ### Dependency Direction
 

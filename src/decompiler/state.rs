@@ -4,6 +4,7 @@
 //! including dynamic input discovery and control flow merge handling.
 
 use crate::analysis::stack_ops::StackLike;
+use crate::decompiler::ssa::DecompilerOps;
 use miden_debug_types::SourceSpan;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -306,6 +307,54 @@ impl StackLike for DecompilerState {
         // Position n from top in final stack (len+1 elements) = index (len - n)
         let idx = len - n;
         self.stack.insert(idx, elem);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DecompilerOps implementation for DecompilerState
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl DecompilerOps for DecompilerState {
+    type ValueRef = String;
+
+    fn pop_value(&mut self) -> String {
+        self.pop_name()
+    }
+
+    fn push_value(&mut self, val: String) {
+        self.push_name(val);
+    }
+
+    fn create_local(&mut self) -> String {
+        self.new_var()
+    }
+
+    fn peek_value(&self, n: usize) -> String {
+        self.peek_name(n)
+    }
+
+    fn dup_value(&mut self, n: usize) -> String {
+        self.dup_name(n)
+    }
+
+    fn stack_depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn swap_positions(&mut self, a: usize, b: usize) {
+        self.swap(a, b);
+    }
+
+    fn move_up(&mut self, n: usize) {
+        self.movup(n);
+    }
+
+    fn move_down(&mut self, n: usize) {
+        self.movdn(n);
+    }
+
+    fn is_failed(&self) -> bool {
+        self.tracking_failed
     }
 }
 

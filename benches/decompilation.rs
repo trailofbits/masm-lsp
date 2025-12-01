@@ -13,7 +13,7 @@ use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_lsp::lsp_types::{Position, Range};
+use tower_lsp::lsp_types::{Position, Range, Url};
 
 /// Load a stdlib file from the examples directory
 fn load_stdlib_file(relative_path: &str) -> Option<String> {
@@ -86,10 +86,12 @@ fn bench_exponential_risk_files(c: &mut Criterion) {
             },
         };
 
+        let uri = Url::parse("file:///benchmark.masm").unwrap();
+
         group.throughput(Throughput::Bytes(source.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &(), |b, _| {
             b.iter(|| {
-                collect_decompilation_hints(&module, &sources, &visible_range, 4, &source, None)
+                collect_decompilation_hints(&module, &sources, &uri, &visible_range, 4, &source, None)
             })
         });
     }
@@ -134,10 +136,12 @@ fn bench_stdlib_files(c: &mut Criterion) {
             },
         };
 
+        let uri = Url::parse("file:///benchmark.masm").unwrap();
+
         group.throughput(Throughput::Bytes(source.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &(), |b, _| {
             b.iter(|| {
-                collect_decompilation_hints(&module, &sources, &visible_range, 4, &source, None)
+                collect_decompilation_hints(&module, &sources, &uri, &visible_range, 4, &source, None)
             })
         });
     }

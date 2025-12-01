@@ -8,9 +8,11 @@
 //! - `state`: Decompiler state management (symbolic stack, variable naming)
 //! - `pseudocode`: Instruction-to-pseudocode conversion
 //! - `collector`: AST visitor that collects hints for all procedures
+//! - `ssa`: SSA representation for tracking variable identity across control flow
 
 mod collector;
 mod pseudocode;
+pub mod ssa;
 mod state;
 
 // Re-export public API
@@ -20,6 +22,20 @@ pub use pseudocode::{
     format_invocation_target, format_procedure_signature, rename_variable, ToPseudocode,
 };
 pub use state::{DecompilerState, FailureRelatedInfo, NamedValue, SavedStackState, LOOP_COUNTER_NAMES};
+
+// Re-export SSA types and generic helpers
+pub use ssa::{
+    // Core traits
+    DecompilerOps, PseudocodeOutput,
+    // Output types
+    StringOutput, TemplateOutput,
+    // SSA types
+    PhiNode, PseudocodeBuilder, PseudocodeSegment, PseudocodeTemplate, SsaContext,
+    SsaDecompilerState, SsaId, SsaStack, SsaValue, VarKind,
+    // Generic helper functions
+    binary_imm_op, binary_op, comparison, comparison_imm, dup, ext2_binary_op, ext2_unary_fn,
+    ext2_unary_op, unary_fn, unary_op,
+};
 
 #[cfg(test)]
 mod tests {
@@ -108,40 +124,5 @@ mod tests {
         // Apply renames
         state.apply_renames(&renames);
         assert_eq!(state.peek_name(0), "v_0"); // Now consistent with then-branch
-    }
-
-    #[test]
-    fn test_consuming_loop_output_indexing() {
-        // Test the combined input and output indexing for the add loop example:
-        // repeat.5
-        //     movup.5
-        //     add
-        //     movdn.4
-        // end
-        //
-        // This loop has net_effect = -1 (consuming), and creates 1 variable per iteration.
-        // The loop counter i takes values 0, 1, 2, 3, 4 (stride = 1).
-        // The pseudocode for "add" should be transformed from:
-        //   "v_0 = a_0 + a_5"
-        // to:
-        //   "v_i = a_i + a_(i+5)"
-        //
-        // This shows that each iteration produces a distinct output (v_i) from distinct inputs.
-
-        use super::pseudocode::{apply_counter_indexing, apply_output_indexing};
-
-        let original = "v_0 = a_0 + a_5";
-        let counter = "i";
-        let net_effect = -1;
-        let start_var_id = 0;
-        let vars_per_iteration = 1;
-
-        // Apply input indexing first
-        let with_inputs = apply_counter_indexing(original, counter, net_effect);
-        assert_eq!(with_inputs, "v_0 = a_i + a_(i+5)");
-
-        // Then apply output indexing
-        let with_outputs = apply_output_indexing(&with_inputs, counter, start_var_id, vars_per_iteration);
-        assert_eq!(with_outputs, "v_i = a_i + a_(i+5)");
     }
 }
