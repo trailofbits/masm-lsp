@@ -739,38 +739,56 @@ pub fn generate_pseudocode(
         Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
             let name = format_invocation_target(target);
 
-            // Resolve the target to a fully-qualified path, then look up the contract
-            let stack_effect = lookup_contract_for_target(resolver, contracts, target)
-                .map(|contract| &contract.stack_effect);
+            // Try to resolve the target and look up its contract
+            let lookup_result = lookup_contract_for_target_detailed(resolver, contracts, target);
 
-            match stack_effect {
-                Some(StackEffect::Known { inputs, outputs }) => {
-                    // We know the stack effect - apply it
-                    let mut args = Vec::new();
-                    for _ in 0..*inputs {
-                        args.push(state.pop_name());
-                    }
-                    args.reverse();
+            match lookup_result {
+                ContractLookupResult::Found(contract) => {
+                    match &contract.stack_effect {
+                        StackEffect::Known { inputs, outputs } => {
+                            // We know the stack effect - apply it
+                            let mut args = Vec::new();
+                            for _ in 0..*inputs {
+                                args.push(state.pop_name());
+                            }
+                            args.reverse();
 
-                    let mut results = Vec::new();
-                    for _ in 0..*outputs {
-                        let var = state.new_var();
-                        state.push_name(var.clone());
-                        results.push(var);
-                    }
-                    results.reverse();
+                            let mut results = Vec::new();
+                            for _ in 0..*outputs {
+                                let var = state.new_var();
+                                state.push_name(var.clone());
+                                results.push(var);
+                            }
+                            results.reverse();
 
-                    if results.is_empty() {
-                        Some(format!("{}({})", name, args.join(", ")))
-                    } else if results.len() == 1 {
-                        Some(format!("{} = {}({})", results[0], name, args.join(", ")))
-                    } else {
-                        Some(format!("({}) = {}({})", results.join(", "), name, args.join(", ")))
+                            if results.is_empty() {
+                                Some(format!("{}({})", name, args.join(", ")))
+                            } else if results.len() == 1 {
+                                Some(format!("{} = {}({})", results[0], name, args.join(", ")))
+                            } else {
+                                Some(format!("({}) = {}({})", results.join(", "), name, args.join(", ")))
+                            }
+                        }
+                        _ => {
+                            // Resolved but has unknown stack effect
+                            state.fail_tracking(span, &format!("procedure `{}` has unknown stack effect", name));
+                            Some(format!("call {}", name))
+                        }
                     }
                 }
-                _ => {
-                    // Unknown stack effect - fail tracking
-                    state.fail_tracking(span, &format!("procedure call to `{}` has unknown stack effect", name));
+                ContractLookupResult::UnresolvedSymbol => {
+                    // Symbol could not be resolved - this is a real error
+                    state.fail_tracking(span, &format!("unresolved procedure `{}`", name));
+                    Some(format!("call {}", name))
+                }
+                ContractLookupResult::NoContract(resolved_path) => {
+                    // Symbol resolved but no contract found - this could be external
+                    state.fail_tracking(span, &format!("no contract found for `{}` (resolved to `{}`)", name, resolved_path));
+                    Some(format!("call {}", name))
+                }
+                ContractLookupResult::NoResolver => {
+                    // No resolver available - can't resolve anything
+                    state.fail_tracking(span, &format!("procedure `{}` has unknown stack effect (no resolver available)", name));
                     Some(format!("call {}", name))
                 }
             }
@@ -1225,22 +1243,42 @@ pub fn rename_variable(text: &str, old_name: &str, new_name: &str) -> String {
     result
 }
 
-/// Look up a contract for an invocation target.
-///
-/// Uses the symbol resolver to convert the target to a fully-qualified path,
-/// then looks up the contract by that exact path. No suffix matching is used
-/// to avoid ambiguity when multiple modules have procedures with the same name.
-fn lookup_contract_for_target<'a>(
+/// Result of looking up a contract for an invocation target.
+enum ContractLookupResult<'a> {
+    /// Contract found successfully
+    Found(&'a crate::analysis::ProcContract),
+    /// No resolver available to resolve the symbol
+    NoResolver,
+    /// Symbol could not be resolved (likely a typo or missing import)
+    UnresolvedSymbol,
+    /// Symbol resolved but no contract found in store
+    NoContract(String),
+}
+
+/// Look up a contract for an invocation target with detailed error information.
+fn lookup_contract_for_target_detailed<'a>(
     resolver: Option<&SymbolResolver>,
     contracts: Option<&'a ContractStore>,
     target: &InvocationTarget,
-) -> Option<&'a crate::analysis::ProcContract> {
-    let contracts = contracts?;
-    let resolver = resolver?;
+) -> ContractLookupResult<'a> {
+    let Some(resolver) = resolver else {
+        return ContractLookupResult::NoResolver;
+    };
 
-    // Resolve the target to a fully-qualified path and look up by exact match
-    let resolved_path = resolver.resolve_target(target)?;
-    contracts.get(&resolved_path)
+    // Try to resolve the target to a fully-qualified path
+    let Some(resolved_path) = resolver.resolve_target(target) else {
+        return ContractLookupResult::UnresolvedSymbol;
+    };
+
+    let Some(contracts) = contracts else {
+        return ContractLookupResult::NoContract(resolved_path.to_string());
+    };
+
+    // Look up the contract by the resolved path
+    match contracts.get(&resolved_path) {
+        Some(contract) => ContractLookupResult::Found(contract),
+        None => ContractLookupResult::NoContract(resolved_path.to_string()),
+    }
 }
 
 /// Apply counter indexing to input variables in a hint string.
