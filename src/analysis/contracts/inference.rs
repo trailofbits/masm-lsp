@@ -199,6 +199,20 @@ fn expr_input_position(expr: &SymbolicExpr) -> Option<usize> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Block Analysis Result
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Result of analyzing a block, including stack effect and input usage.
+struct BlockAnalysisResult {
+    /// Number of inputs consumed by the block
+    inputs: usize,
+    /// Number of outputs produced by the block
+    outputs: usize,
+    /// Input usage detected within the block (address vs value)
+    input_usage: Vec<InputKind>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Signature Analyzer
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -513,17 +527,54 @@ impl<'a> SignatureAnalyzer<'a> {
     }
 
     /// Compute stack effect of a block without modifying this analyzer's state.
-    fn compute_block_effect(&self, block: &Block) -> Option<(usize, usize)> {
+    /// Also returns the input usage detected within the block.
+    fn compute_block_effect(&self, block: &Block) -> Option<BlockAnalysisResult> {
         let mut sub_analyzer = SignatureAnalyzer::new(self.resolver, self.contracts);
         let _ = visit::visit_block(&mut sub_analyzer, block);
 
         if sub_analyzer.unknown_effect {
             None
         } else {
-            // Return (inputs_consumed, outputs_produced)
+            // Return full analysis result
             let inputs = sub_analyzer.abstract_state.inputs_discovered();
             let outputs = sub_analyzer.abstract_state.depth();
-            Some((inputs, outputs))
+            Some(BlockAnalysisResult {
+                inputs,
+                outputs,
+                input_usage: sub_analyzer.input_usage,
+            })
+        }
+    }
+
+    /// Propagate input usage from a sub-analyzer to this analyzer.
+    ///
+    /// The sub-analyzer's Input(i) corresponds to the value at position (i + offset)
+    /// of our current stack. If that value is one of our inputs, we propagate
+    /// the sub-analyzer's usage to our input_usage.
+    ///
+    /// The `offset` parameter accounts for elements consumed before the block runs
+    /// (e.g., while.true consumes a condition before the body).
+    fn propagate_input_usage(&mut self, sub_usage: &[InputKind], offset: usize) {
+        self.abstract_state.ensure_depth(sub_usage.len() + offset);
+        for (sub_input_pos, kind) in sub_usage.iter().enumerate() {
+            // Skip if the sub-analyzer didn't detect any address usage
+            if !kind.is_address() {
+                continue;
+            }
+            // Find what's at position (sub_input_pos + offset) in our stack
+            // The offset accounts for elements consumed before block execution
+            let parent_pos = sub_input_pos + offset;
+            if let Some(expr) = self.abstract_state.peek(parent_pos) {
+                if let Some(our_input) = expr_input_position(expr) {
+                    // Propagate the address usage
+                    if kind.is_output() {
+                        self.record_input_write(our_input);
+                    }
+                    if kind.is_input_address() {
+                        self.record_input_read(our_input);
+                    }
+                }
+            }
         }
     }
 
@@ -902,20 +953,29 @@ impl<'a> Visit for SignatureAnalyzer<'a> {
                 self.apply_pop_push(1, 0);
 
                 // Compute effects of both branches
-                let then_effect = self.compute_block_effect(then_blk);
-                let else_effect = self.compute_block_effect(else_blk);
+                let then_result = self.compute_block_effect(then_blk);
+                let else_result = self.compute_block_effect(else_blk);
 
-                match (then_effect, else_effect) {
-                    (Some((then_in, then_out)), Some((else_in, else_out))) => {
+                // Propagate input usage from both branches before applying stack effects
+                // Offset is 0 because condition was already popped above
+                if let Some(ref result) = then_result {
+                    self.propagate_input_usage(&result.input_usage, 0);
+                }
+                if let Some(ref result) = else_result {
+                    self.propagate_input_usage(&result.input_usage, 0);
+                }
+
+                match (then_result, else_result) {
+                    (Some(then_res), Some(else_res)) => {
                         // Both branches have known effects
                         // Net = out - in (as signed to handle negative)
-                        let then_net = then_out as isize - then_in as isize;
-                        let else_net = else_out as isize - else_in as isize;
+                        let then_net = then_res.outputs as isize - then_res.inputs as isize;
+                        let else_net = else_res.outputs as isize - else_res.inputs as isize;
 
                         if then_net == else_net {
                             // Same net effect - we can compute the combined effect
                             // The inputs required is the max of both branches
-                            let max_inputs = then_in.max(else_in);
+                            let max_inputs = then_res.inputs.max(else_res.inputs);
                             // Outputs = max_inputs + net_effect
                             let outputs = (max_inputs as isize + then_net).max(0) as usize;
                             self.pop_n(max_inputs);
@@ -937,13 +997,17 @@ impl<'a> Visit for SignatureAnalyzer<'a> {
                 // While loops have known effect if:
                 // 1. Body has zero net change, OR
                 // 2. We can infer the iteration count from a counter pattern
-                if let Some((body_in, body_out)) = self.compute_block_effect(body) {
-                    let net_change = body_out as isize - body_in as isize;
+                if let Some(result) = self.compute_block_effect(body) {
+                    // Propagate input usage from the loop body
+                    // Offset of 1 because while.true consumes the condition before body runs
+                    self.propagate_input_usage(&result.input_usage, 1);
+
+                    let net_change = result.outputs as isize - result.inputs as isize;
                     if net_change == 0 {
                         // Zero net change per iteration - the loop needs body_in inputs
                         // to start, and produces body_out outputs when it terminates.
                         // Since net is 0, inputs = outputs.
-                        self.apply_pop_push(body_in, body_out);
+                        self.apply_pop_push(result.inputs, result.outputs);
                     } else {
                         // Non-zero net change - try to infer iteration count
                         // The counter should be on top of the bounds stack
@@ -955,8 +1019,8 @@ impl<'a> Visit for SignatureAnalyzer<'a> {
                             let total_net = (iterations as isize) * net_change;
                             // First iteration consumes body_in from original stack
                             // Total effect: body_in inputs consumed, (body_in + total_net) outputs
-                            let outputs = (body_in as isize + total_net).max(0) as usize;
-                            self.pop_n(body_in);
+                            let outputs = (result.inputs as isize + total_net).max(0) as usize;
+                            self.pop_n(result.inputs);
                             self.push_n(outputs, SymbolicExpr::Top);
                         } else {
                             // Unknown iteration count
@@ -971,18 +1035,22 @@ impl<'a> Visit for SignatureAnalyzer<'a> {
             }
             Op::Repeat { count, body, .. } => {
                 // Repeat has known count, so we can compute exact effect
-                if let Some((body_in, body_out)) = self.compute_block_effect(body) {
+                if let Some(result) = self.compute_block_effect(body) {
+                    // Propagate input usage from the loop body
+                    // Offset is 0 because repeat doesn't consume a condition
+                    self.propagate_input_usage(&result.input_usage, 0);
+
                     let count = *count as isize;
                     // Each iteration: consumes body_in, produces body_out
                     // Net change per iteration: body_out - body_in
                     // Total net change: count * (body_out - body_in)
-                    let net_per_iter = body_out as isize - body_in as isize;
+                    let net_per_iter = result.outputs as isize - result.inputs as isize;
                     let total_net = count * net_per_iter;
 
                     // For inputs: first iteration needs body_in inputs
                     // Subsequent iterations use previous outputs
-                    let outputs = (body_in as isize + total_net).max(0) as usize;
-                    self.pop_n(body_in);
+                    let outputs = (result.inputs as isize + total_net).max(0) as usize;
+                    self.pop_n(result.inputs);
                     self.push_n(outputs, SymbolicExpr::Top);
                 } else {
                     self.unknown_effect = true;
@@ -1700,5 +1768,141 @@ end
         let sig = contract.signature.as_ref().expect("Should have signature");
         assert_eq!(sig.num_inputs(), 4, "Should have 4 inputs");
         assert_eq!(sig.num_outputs(), 4, "Should have 4 outputs");
+    }
+
+    #[test]
+    fn test_signature_memory_in_while_loop() {
+        // Test that memory operations inside while loops correctly propagate
+        // address usage to procedure inputs.
+        //
+        // This matches the pattern from memcopy_elements in stdlib/mem.masm:
+        // - Stack at entry: [n, read_ptr, write_ptr]
+        // - Loop body uses: [-n, read_ptr, write_ptr] (counter at pos 0)
+        // - dup.1 mem_load reads from read_ptr (at position 1)
+        // - dup.3 mem_store writes to write_ptr (at position 3 after value is pushed)
+        let contracts = parse_and_infer(
+            "
+pub proc memcopy_test
+    # Stack: [n, read_ptr, write_ptr]
+    neg                 # => [-n, read_ptr, write_ptr]
+    dup neq.0           # => [cond, -n, read_ptr, write_ptr]
+
+    while.true
+        # Body sees: [-n, read_ptr, write_ptr] (cond consumed)
+
+        # Read from read_ptr (at position 1)
+        dup.1 mem_load
+        # => [value, -n, read_ptr, write_ptr]
+
+        # Write to write_ptr (at position 3)
+        dup.3 mem_store
+        # => [-n, read_ptr, write_ptr]
+
+        # Update counter and pointers, produce new condition
+        add.1 movup.2 add.1 movup.2 add.1 movup.2
+        # => [-n+1, read_ptr+1, write_ptr+1]
+
+        dup neq.0
+        # => [cond, -n+1, read_ptr+1, write_ptr+1]
+    end
+
+    drop drop drop
+end
+",
+        );
+
+        assert_eq!(contracts.len(), 1);
+        let contract = &contracts[0];
+
+        // Stack effect may be Unknown due to non-zero net change in loop body
+        // but we should still detect address usage
+        let sig = contract.signature.as_ref().expect("Should have signature");
+        assert_eq!(sig.num_inputs(), 3, "Should have 3 inputs");
+
+        // Input 0 is n (counter) - used as Value
+        assert!(
+            !sig.inputs[0].is_address(),
+            "Input 0 (n) should be Value, got {:?}",
+            sig.inputs[0]
+        );
+
+        // Input 1 is read_ptr - should be InputAddress (read from via mem_load)
+        assert!(
+            sig.inputs[1].is_input_address(),
+            "Input 1 (read_ptr) should be InputAddress, got {:?}",
+            sig.inputs[1]
+        );
+
+        // Input 2 is write_ptr - should be OutputAddress (written to via mem_store)
+        assert!(
+            sig.inputs[2].is_output(),
+            "Input 2 (write_ptr) should be OutputAddress, got {:?}",
+            sig.inputs[2]
+        );
+    }
+
+    #[test]
+    fn test_signature_memory_in_if_else() {
+        // Test that memory operations inside if-else branches correctly propagate
+        // address usage to procedure inputs.
+        let contracts = parse_and_infer(
+            "
+pub proc conditional_store
+    # Stack: [cond, val, addr]
+    if.true
+        # Store val to addr
+        swap        # [addr, val]
+        mem_store   # []
+    else
+        drop drop   # []
+    end
+end
+",
+        );
+
+        assert_eq!(contracts.len(), 1);
+        let contract = &contracts[0];
+
+        let sig = contract.signature.as_ref().expect("Should have signature");
+        assert_eq!(sig.num_inputs(), 3, "Should have 3 inputs");
+
+        // Input 2 is addr (deepest) - should be OutputAddress from the if branch
+        assert!(
+            sig.inputs[2].is_output(),
+            "Input 2 (addr) should be OutputAddress from if branch, got {:?}",
+            sig.inputs[2]
+        );
+    }
+
+    #[test]
+    fn test_signature_memory_in_repeat() {
+        // Test that memory operations inside repeat loops correctly propagate
+        // address usage to procedure inputs.
+        let contracts = parse_and_infer(
+            "
+pub proc store_three_times
+    # Stack: [val, addr]
+    repeat.3
+        dup.1       # [addr, val, addr]
+        dup.1       # [val, addr, val, addr]
+        mem_store   # [val, addr]
+    end
+    drop drop
+end
+",
+        );
+
+        assert_eq!(contracts.len(), 1);
+        let contract = &contracts[0];
+
+        let sig = contract.signature.as_ref().expect("Should have signature");
+        assert_eq!(sig.num_inputs(), 2, "Should have 2 inputs");
+
+        // Input 0 (addr) should be OutputAddress from the repeat body
+        assert!(
+            sig.inputs[0].is_output(),
+            "Input 0 (addr) should be OutputAddress from repeat body, got {:?}",
+            sig.inputs[0]
+        );
     }
 }
