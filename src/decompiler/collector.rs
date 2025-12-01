@@ -18,6 +18,7 @@ use crate::analysis::{
     StackEffect,
 };
 use crate::diagnostics::{span_to_range, SOURCE_DECOMPILATION};
+use crate::symbol_resolution::SymbolResolver;
 
 use super::pseudocode::{
     apply_counter_indexing, apply_output_indexing, extract_declaration_prefix,
@@ -66,6 +67,8 @@ pub struct DecompilationCollector<'a> {
     failures: Vec<TrackingFailure>,
     /// Source manager for span conversion
     sources: &'a DefaultSourceManager,
+    /// Symbol resolver for resolving invocation targets to fully-qualified paths
+    resolver: SymbolResolver<'a>,
     /// Contract store for looking up procedure stack effects
     contracts: Option<&'a ContractStore>,
     /// Source text for extracting declaration prefixes
@@ -76,6 +79,7 @@ pub struct DecompilationCollector<'a> {
 
 impl<'a> DecompilationCollector<'a> {
     pub fn new(
+        module: &'a Module,
         sources: &'a DefaultSourceManager,
         contracts: Option<&'a ContractStore>,
         source_text: &'a str,
@@ -88,6 +92,7 @@ impl<'a> DecompilationCollector<'a> {
             proc_decl_line: None,
             failures: Vec::new(),
             sources,
+            resolver: crate::symbol_resolution::create_resolver(module),
             contracts,
             source_text,
             indent_level: 0,
@@ -111,7 +116,7 @@ impl<'a> DecompilationCollector<'a> {
         match op {
             Op::Inst(inst) => {
                 if let Some(ref mut state) = self.state {
-                    if let Some(pseudocode) = generate_pseudocode(inst.inner(), state, inst.span(), self.contracts) {
+                    if let Some(pseudocode) = generate_pseudocode(inst.inner(), state, inst.span(), Some(&self.resolver), self.contracts) {
                         if let Some(range) = span_to_range(self.sources, inst.span()) {
                             let indented = format!("{}{}", self.indent(), pseudocode);
                             self.hints.push((range.start.line, indented));
@@ -584,7 +589,7 @@ pub fn collect_decompilation_hints(
     source_text: &str,
     contracts: Option<&ContractStore>,
 ) -> DecompilationResult {
-    let mut collector = DecompilationCollector::new(sources, contracts, source_text);
+    let mut collector = DecompilationCollector::new(module, sources, contracts, source_text);
     let _ = visit::visit_module(&mut collector, module);
 
     // Fixed padding (in columns) between instruction end and hint.

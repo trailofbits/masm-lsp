@@ -225,6 +225,7 @@ pub fn resolve_invocation_target(
     module: &Module,
     target: &InvocationTarget,
 ) -> Result<ResolvedSymbol, ResolutionError> {
+    // Extract the original target string for the `name` field
     let target_str = match target {
         InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
         InvocationTarget::Path(path) => path.inner().as_str().to_string(),
@@ -233,98 +234,15 @@ pub fn resolve_invocation_target(
         }
     };
 
-    // Check if it's a local definition first
-    if has_local_name(module, &target_str) {
-        return Ok(ResolvedSymbol {
-            path: SymbolPath::from_module_and_name(module, &target_str),
-            name: target_str,
-        });
-    }
-
-    // Try the local symbol resolver
-    let resolver = LocalSymbolResolver::from(module);
-    if let Some(resolution) = resolver.resolve(&target_str)? {
-        let resolved = match resolution {
-            SymbolResolution::Local(span) => {
-                let item = module
-                    .get(span.into_inner())
-                    .ok_or(ResolutionError::InvalidItemIndex)?;
-                let name = item.name();
-                let path = SymbolPath::from_module_and_name(module, name.as_str());
-                ResolvedSymbol {
-                    path,
-                    name: target_str,
-                }
-            }
-            SymbolResolution::External(path) => ResolvedSymbol {
-                path: SymbolPath::new(path.into_inner().as_str()),
-                name: target_str,
-            },
-            SymbolResolution::Module { path, .. } => ResolvedSymbol {
-                path: SymbolPath::new(path.as_str()),
-                name: target_str,
-            },
-            SymbolResolution::Exact { path, .. } => ResolvedSymbol {
-                path: SymbolPath::new(path.into_inner().as_str()),
-                name: target_str,
-            },
-            SymbolResolution::MastRoot(_) => {
-                return Err(ResolutionError::SymbolNotFound(target_str));
-            }
-        };
-        return Ok(resolved);
-    }
-
-    // For module-qualified paths like `base_field::square`, try to expand the
-    // module alias. The LocalSymbolResolver doesn't handle these directly.
-    if let InvocationTarget::Path(_) = target {
-        if let Some(resolved) = try_expand_module_alias(module, &resolver, &target_str) {
-            return Ok(resolved);
-        }
-    }
-
-    // For unresolved paths, construct a path from the target itself
-    match target {
-        InvocationTarget::Path(path) => Ok(ResolvedSymbol {
-            path: SymbolPath::new(path.inner().as_str()),
+    // Use the unified symbol resolution service
+    let resolver = crate::symbol_resolution::create_resolver(module);
+    match resolver.resolve_target(target) {
+        Some(path) => Ok(ResolvedSymbol {
+            path,
             name: target_str,
         }),
-        InvocationTarget::Symbol(ident) => Ok(ResolvedSymbol {
-            path: SymbolPath::from_module_and_name(module, ident.as_str()),
-            name: target_str,
-        }),
-        InvocationTarget::MastRoot(_) => Err(ResolutionError::SymbolNotFound(target_str)),
+        None => Err(ResolutionError::SymbolNotFound(target_str)),
     }
-}
-
-/// Try to expand a module-qualified path like `base_field::square` by resolving
-/// the module alias to its full path.
-fn try_expand_module_alias(
-    _module: &Module,
-    resolver: &LocalSymbolResolver,
-    target_str: &str,
-) -> Option<ResolvedSymbol> {
-    // Split into module alias and remaining path (e.g., "base_field::square" -> "base_field", "square")
-    let (module_alias, rest) = target_str.split_once("::")?;
-
-    // Try to resolve the module alias
-    if let Ok(Some(resolution)) = resolver.resolve(module_alias) {
-        let module_path = match resolution {
-            SymbolResolution::Module { path, .. } => path.to_string(),
-            SymbolResolution::External(p) => {
-                // External might point to a module path
-                p.into_inner().to_string()
-            }
-            _ => return None,
-        };
-        // Construct the full path: module_path + "::" + rest
-        let full_path = format!("{}::{}", module_path, rest);
-        return Some(ResolvedSymbol {
-            path: SymbolPath::new(full_path),
-            name: target_str.to_string(),
-        });
-    }
-    None
 }
 
 /// Convert an LSP position to a byte offset in the source file.

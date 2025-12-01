@@ -35,6 +35,7 @@ use miden_assembly_syntax::ast::{Block, Instruction, InvocationTarget, Op};
 
 use super::contracts::{ContractStore, StackEffect};
 use super::stack_ops::StackLike;
+use crate::symbol_resolution::SymbolResolver;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Abstract Domain: Symbolic Stack Values
@@ -638,17 +639,20 @@ impl AbstractStateSnapshot {
 /// `None` otherwise.
 fn resolve_procedure_call_effect(
     target: &InvocationTarget,
+    resolver: Option<&SymbolResolver>,
     contracts: Option<&ContractStore>,
 ) -> Option<(usize, usize)> {
     let store = contracts?;
+    let resolver = resolver?;
 
-    let target_name = match target {
-        InvocationTarget::Symbol(ident) => ident.as_str(),
-        InvocationTarget::Path(path) => path.inner().as_str(),
-        InvocationTarget::MastRoot(_) => return None,
-    };
+    // MAST roots can't be resolved symbolically
+    if matches!(target, InvocationTarget::MastRoot(_)) {
+        return None;
+    }
 
-    let contract = store.get_by_suffix(target_name)?;
+    // Use the unified symbol resolution to get the fully-qualified path
+    let resolved_path = resolver.resolve_target(target)?;
+    let contract = store.get(&resolved_path)?;
 
     match &contract.stack_effect {
         StackEffect::Known { inputs, outputs } => Some((*inputs, *outputs)),
@@ -660,12 +664,13 @@ fn resolve_procedure_call_effect(
 ///
 /// Returns a description of the operation for pseudocode generation, if any.
 ///
-/// When a `ContractStore` is provided, procedure calls can be resolved to their
-/// stack effects, allowing the analysis to continue past call sites instead of
-/// failing with "unknown stack effect".
+/// When a `SymbolResolver` and `ContractStore` are provided, procedure calls can
+/// be resolved to their stack effects, allowing the analysis to continue past
+/// call sites instead of failing with "unknown stack effect".
 pub fn transfer_instruction(
     inst: &Instruction,
     state: &mut AbstractState,
+    resolver: Option<&SymbolResolver>,
     contracts: Option<&ContractStore>,
 ) -> Option<TransferResult> {
     if state.tracking_failed {
@@ -983,7 +988,7 @@ pub fn transfer_instruction(
         // Static procedure calls - resolve via ContractStore if available
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
-            if let Some(effect) = resolve_procedure_call_effect(target, contracts) {
+            if let Some(effect) = resolve_procedure_call_effect(target, resolver, contracts) {
                 // Apply the known stack effect
                 for _ in 0..effect.0 {
                     state.pop();
@@ -1373,7 +1378,7 @@ fn execute_block_abstract(block: &Block, state: &mut AbstractState) {
 fn execute_op_abstract(op: &Op, state: &mut AbstractState) {
     match op {
         Op::Inst(inst) => {
-            transfer_instruction(inst.inner(), state, None);
+            transfer_instruction(inst.inner(), state, None, None);
         }
         Op::If {
             then_blk,
@@ -1493,7 +1498,7 @@ fn pre_analyze_block(block: &Block, state: &mut AbstractState) {
 fn pre_analyze_op(op: &Op, state: &mut AbstractState) {
     match op {
         Op::Inst(inst) => {
-            transfer_instruction(inst.inner(), state, None);
+            transfer_instruction(inst.inner(), state, None, None);
         }
         Op::If {
             then_blk,

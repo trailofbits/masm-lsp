@@ -565,18 +565,18 @@ pub struct WorkspaceIndexWrapper(pub WorkspaceIndex);
 
 impl WorkspaceService for WorkspaceIndexWrapper {
     fn find_definition(&self, path: &SymbolPath) -> Option<Location> {
+        // Look up by exact fully-qualified path first
+        // Fall back to name-only lookup for simple symbols without module context
+        // NOTE: We intentionally avoid suffix matching to prevent ambiguity
         self.0
             .definition(path.as_str())
-            .or_else(|| self.0.definition_by_suffix(path.as_str()))
             .or_else(|| self.0.definition_by_name(path.name()))
     }
 
     fn find_references(&self, path: &SymbolPath) -> Vec<Location> {
-        let mut results = self.0.references(path.as_str());
-        if results.is_empty() {
-            results = self.0.references_by_suffix(path.as_str());
-        }
-        results
+        // Look up by exact fully-qualified path only
+        // NOTE: We intentionally avoid suffix matching to prevent ambiguity
+        self.0.references(path.as_str())
     }
 
     fn search_symbols(&self, query: &str) -> Vec<(String, Location)> {
@@ -673,11 +673,12 @@ where
                     let normalized = token.trim_start_matches(':');
                     let workspace = self.workspace.read().await;
 
+                    // Look up the module definition by exact fully-qualified path
+                    // NOTE: We avoid suffix matching to prevent ambiguity
                     if let Some(loc) = workspace
                         .definition(&format!("::{}", normalized))
-                        .or_else(|| workspace.definition_by_suffix(normalized))
                         .or_else(|| {
-                            // Try matching by the last component (module name)
+                            // Fall back to matching by the last component (module name)
                             normalized
                                 .rsplit("::")
                                 .next()

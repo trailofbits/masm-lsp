@@ -7,6 +7,7 @@ use miden_assembly_syntax::ast::{Immediate, Instruction, InvocationTarget};
 use miden_debug_types::SourceSpan;
 
 use crate::analysis::{ContractStore, StackEffect};
+use crate::symbol_resolution::SymbolResolver;
 
 use super::state::DecompilerState;
 
@@ -18,10 +19,18 @@ use super::state::DecompilerState;
 ///
 /// Returns `Some(pseudocode)` if the instruction produces output,
 /// or `None` for instructions that just manipulate the stack.
+///
+/// # Arguments
+/// * `inst` - The instruction to generate pseudocode for
+/// * `state` - The decompiler state tracking symbolic stack
+/// * `span` - Source span for error reporting
+/// * `resolver` - Symbol resolver for resolving invocation targets to fully-qualified paths
+/// * `contracts` - Contract store for looking up procedure stack effects
 pub fn generate_pseudocode(
     inst: &Instruction,
     state: &mut DecompilerState,
     span: SourceSpan,
+    resolver: Option<&SymbolResolver>,
     contracts: Option<&ContractStore>,
 ) -> Option<String> {
     use crate::analysis::stack_ops::StackLike;
@@ -730,10 +739,9 @@ pub fn generate_pseudocode(
         Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
             let name = format_invocation_target(target);
 
-            // Try to look up the stack effect from contracts
-            let stack_effect = contracts.and_then(|c| {
-                lookup_contract_for_target(c, target).map(|contract| &contract.stack_effect)
-            });
+            // Resolve the target to a fully-qualified path, then look up the contract
+            let stack_effect = lookup_contract_for_target(resolver, contracts, target)
+                .map(|contract| &contract.stack_effect);
 
             match stack_effect {
                 Some(StackEffect::Known { inputs, outputs }) => {
@@ -1219,19 +1227,20 @@ pub fn rename_variable(text: &str, old_name: &str, new_name: &str) -> String {
 
 /// Look up a contract for an invocation target.
 ///
-/// FIX: Now uses exact path matching for Path targets instead of suffix matching.
+/// Uses the symbol resolver to convert the target to a fully-qualified path,
+/// then looks up the contract by that exact path. No suffix matching is used
+/// to avoid ambiguity when multiple modules have procedures with the same name.
 fn lookup_contract_for_target<'a>(
-    contracts: &'a ContractStore,
+    resolver: Option<&SymbolResolver>,
+    contracts: Option<&'a ContractStore>,
     target: &InvocationTarget,
 ) -> Option<&'a crate::analysis::ProcContract> {
-    match target {
-        InvocationTarget::Symbol(ident) => contracts.get_by_name(ident.as_str()),
-        InvocationTarget::Path(path) => {
-            // Use exact path matching to avoid ambiguity
-            contracts.get_by_path(path.inner().as_str())
-        }
-        InvocationTarget::MastRoot(_) => None, // Can't look up by MAST root
-    }
+    let contracts = contracts?;
+    let resolver = resolver?;
+
+    // Resolve the target to a fully-qualified path and look up by exact match
+    let resolved_path = resolver.resolve_target(target)?;
+    contracts.get(&resolved_path)
 }
 
 /// Apply counter indexing to input variables in a hint string.

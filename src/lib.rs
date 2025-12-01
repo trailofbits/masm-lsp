@@ -10,6 +10,7 @@ pub mod resolution;
 pub mod server;
 pub mod service;
 pub mod symbol_path;
+pub mod symbol_resolution;
 pub mod util;
 
 pub use resolution::ResolutionError;

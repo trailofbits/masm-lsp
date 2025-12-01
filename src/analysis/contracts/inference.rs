@@ -21,6 +21,7 @@ use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned};
 use tower_lsp::lsp_types::{Position, Range};
 
 use crate::symbol_path::SymbolPath;
+use crate::symbol_resolution::SymbolResolver;
 
 use super::super::abstract_interpretation::{AbstractState, SymbolicExpr};
 use super::super::call_graph::{CallGraph, TopologicalNode};
@@ -77,6 +78,9 @@ pub fn infer_module_contracts_with_store(
     let call_graph = CallGraph::from_module(module);
     let topo_order = call_graph.topological_order();
 
+    // Create resolver for this module (used for resolving call targets)
+    let resolver = crate::symbol_resolution::create_resolver(module);
+
     // Initialize working store with existing contracts (for external calls)
     let mut working_store = existing_contracts.cloned().unwrap_or_default();
 
@@ -91,6 +95,7 @@ pub fn infer_module_contracts_with_store(
                         proc,
                         path.clone(),
                         *def_range,
+                        &resolver,
                         Some(&working_store),
                     );
                     working_store.update_document(vec![contract]);
@@ -105,6 +110,7 @@ pub fn infer_module_contracts_with_store(
                             proc,
                             path.clone(),
                             *def_range,
+                            &resolver,
                             Some(&working_store),
                         );
                         working_store.update_document(vec![contract]);
@@ -119,6 +125,7 @@ pub fn infer_module_contracts_with_store(
                             proc,
                             path.clone(),
                             *def_range,
+                            &resolver,
                             Some(&working_store),
                         );
                         working_store.update_document(vec![contract]);
@@ -138,6 +145,7 @@ pub fn infer_module_contracts_with_store(
                     proc,
                     path.clone(),
                     *def_range,
+                    &resolver,
                     Some(&working_store),
                 );
                 working_store.update_document(vec![contract]);
@@ -160,9 +168,10 @@ fn infer_procedure_contract_with_store(
     proc: &Procedure,
     path: SymbolPath,
     definition_range: Option<Range>,
+    resolver: &SymbolResolver,
     contracts: Option<&ContractStore>,
 ) -> ProcContract {
-    let mut analyzer = SignatureAnalyzer::new(contracts);
+    let mut analyzer = SignatureAnalyzer::new(resolver, contracts);
     let _ = visit::visit_procedure(&mut analyzer, proc);
 
     ProcContract {
@@ -199,6 +208,8 @@ fn expr_input_position(expr: &SymbolicExpr) -> Option<usize> {
 /// Uses `AbstractState` from the abstract interpretation framework for stack
 /// tracking, which provides sophisticated symbolic expression handling.
 struct SignatureAnalyzer<'a> {
+    /// Symbol resolver for resolving call targets to fully-qualified paths
+    resolver: &'a SymbolResolver<'a>,
     /// Optional contract store for looking up transitive effects
     contracts: Option<&'a ContractStore>,
     /// Whether we've seen validation instructions at the start
@@ -226,8 +237,9 @@ struct SignatureAnalyzer<'a> {
 }
 
 impl<'a> SignatureAnalyzer<'a> {
-    fn new(contracts: Option<&'a ContractStore>) -> Self {
+    fn new(resolver: &'a SymbolResolver<'a>, contracts: Option<&'a ContractStore>) -> Self {
         Self {
+            resolver,
             contracts,
             early_validation: false,
             validation_count: 0,
@@ -502,7 +514,7 @@ impl<'a> SignatureAnalyzer<'a> {
 
     /// Compute stack effect of a block without modifying this analyzer's state.
     fn compute_block_effect(&self, block: &Block) -> Option<(usize, usize)> {
-        let mut sub_analyzer = SignatureAnalyzer::new(self.contracts);
+        let mut sub_analyzer = SignatureAnalyzer::new(self.resolver, self.contracts);
         let _ = visit::visit_block(&mut sub_analyzer, block);
 
         if sub_analyzer.unknown_effect {
@@ -517,21 +529,16 @@ impl<'a> SignatureAnalyzer<'a> {
 
     /// Handle procedure call - apply transitive stack effect and propagate address usage.
     fn handle_procedure_call(&mut self, target: &InvocationTarget) {
-        let target_name = match target {
-            InvocationTarget::Symbol(ident) => ident.as_str(),
-            InvocationTarget::Path(path) => path.inner().as_str(),
-            InvocationTarget::MastRoot(_) => {
-                // MAST root calls have unknown effect
-                self.unknown_effect = true;
-                return;
-            }
-        };
+        // MAST root calls have unknown effect
+        if matches!(target, InvocationTarget::MastRoot(_)) {
+            self.unknown_effect = true;
+            return;
+        }
 
-        // Look up the contract for this procedure
+        // Look up the contract using the resolved fully-qualified path
         let contract = self.contracts.and_then(|store| {
-            store
-                .get_by_suffix(target_name)
-                .or_else(|| store.get_by_name(target_name))
+            let resolved = self.resolver.resolve_target(target)?;
+            store.get(&resolved)
         });
 
         match contract.map(|c| &c.stack_effect) {

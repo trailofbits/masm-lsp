@@ -269,10 +269,8 @@ fn collect_definitions(module: &Module, source_manager: &DefaultSourceManager) -
 }
 
 fn collect_references(module: &Module, source_manager: &DefaultSourceManager) -> Vec<Reference> {
-    let resolver = miden_assembly_syntax::ast::LocalSymbolResolver::from(module);
     let mut collector = InvocationCollector {
-        module,
-        resolver,
+        resolver: crate::symbol_resolution::create_resolver(module),
         source_manager,
         refs: Vec::new(),
     };
@@ -285,8 +283,7 @@ fn zero_range() -> Range {
 }
 
 struct InvocationCollector<'a> {
-    module: &'a Module,
-    resolver: miden_assembly_syntax::ast::LocalSymbolResolver,
+    resolver: crate::symbol_resolution::SymbolResolver<'a>,
     source_manager: &'a DefaultSourceManager,
     refs: Vec<Reference>,
 }
@@ -295,88 +292,11 @@ impl<'a> InvocationCollector<'a> {
     fn push_target(&mut self, target: &InvocationTarget) {
         let range = span_to_range(self.source_manager, target.span()).unwrap_or_else(zero_range);
 
-        // Extract the target string for resolution
-        let target_str = match target {
-            InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
-            InvocationTarget::Path(path) => path.inner().as_str().to_string(),
-            InvocationTarget::MastRoot(_) => {
-                // MAST roots are always valid (they reference code by hash)
-                return;
-            }
-        };
-
-        // Check if this is a local definition
-        let is_local_def = self
-            .module
-            .items()
-            .any(|item| item.name().as_str() == target_str);
-
-        if is_local_def {
-            let path = SymbolPath::from_module_and_name(self.module, &target_str);
+        // Use the unified symbol resolution service to get the fully-qualified path
+        if let Some(path) = self.resolver.resolve_target(target) {
             self.refs.push(Reference { path, range });
-            return;
         }
-
-        // Try to resolve using the LocalSymbolResolver (handles imports and aliases)
-        if let Ok(Some(resolution)) = self.resolver.resolve(&target_str) {
-            use miden_assembly_syntax::ast::SymbolResolution;
-            let path = match resolution {
-                SymbolResolution::Local(idx) => {
-                    let item = self.module.get(idx.into_inner());
-                    item.map(|i| SymbolPath::from_module_and_name(self.module, i.name().as_str()))
-                        .unwrap_or_else(|| SymbolPath::new(&target_str))
-                }
-                SymbolResolution::External(p) => SymbolPath::new(p.into_inner().as_str()),
-                SymbolResolution::Module { path, .. } => SymbolPath::new(path.as_str()),
-                SymbolResolution::Exact { path, .. } => SymbolPath::new(path.into_inner().as_str()),
-                SymbolResolution::MastRoot(_) => {
-                    // MAST roots are valid
-                    return;
-                }
-            };
-            self.refs.push(Reference { path, range });
-            return;
-        }
-
-        // For module-qualified paths like `base_field::square`, try to expand
-        // the module alias using the resolver. The LocalSymbolResolver doesn't
-        // handle these directly, so we need to resolve the module part separately.
-        if let InvocationTarget::Path(_) = target {
-            if let Some(resolved_path) = self.try_expand_module_alias(&target_str) {
-                self.refs.push(Reference { path: resolved_path, range });
-                return;
-            }
-        }
-
-        // For any unresolved target, track it as a reference using its literal path.
-        // Resolution checking is done at diagnostic time against the workspace index.
-        let path = SymbolPath::new(&target_str);
-        self.refs.push(Reference { path, range });
-    }
-
-    /// Try to expand a module-qualified path like `base_field::square` by resolving
-    /// the module alias to its full path.
-    fn try_expand_module_alias(&self, target_str: &str) -> Option<SymbolPath> {
-        use miden_assembly_syntax::ast::SymbolResolution;
-
-        // Split into module alias and remaining path (e.g., "base_field::square" -> "base_field", "square")
-        let (module_alias, rest) = target_str.split_once("::")?;
-
-        // Try to resolve the module alias
-        if let Ok(Some(resolution)) = self.resolver.resolve(module_alias) {
-            let module_path = match resolution {
-                SymbolResolution::Module { path, .. } => path.to_string(),
-                SymbolResolution::External(p) => {
-                    // External might point to a module path
-                    p.into_inner().to_string()
-                }
-                _ => return None,
-            };
-            // Construct the full path: module_path + "::" + rest
-            let full_path = format!("{}::{}", module_path, rest);
-            return Some(SymbolPath::new(full_path));
-        }
-        None
+        // MAST roots return None from resolve_target, which is correct - we skip them
     }
 }
 

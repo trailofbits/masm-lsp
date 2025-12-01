@@ -11,7 +11,7 @@
 //! which naturally produces a reverse topological order. SCCs represent
 //! mutually recursive procedures that must be handled specially.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use miden_assembly_syntax::ast::{
     visit::{self, Visit},
@@ -19,6 +19,7 @@ use miden_assembly_syntax::ast::{
 };
 
 use crate::symbol_path::SymbolPath;
+use crate::symbol_resolution;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Call Graph
@@ -40,33 +41,35 @@ impl CallGraph {
     /// External calls (stdlib, other modules) are not included since
     /// their contracts are already known.
     pub fn from_module(module: &Module) -> Self {
-        // Build index from procedure name to path for resolution
-        let mut name_to_path: HashMap<&str, SymbolPath> = HashMap::new();
-        let mut procedures = Vec::new();
+        // Build set of local procedure paths for filtering
+        let local_paths: HashSet<SymbolPath> = module
+            .procedures()
+            .map(|proc| SymbolPath::from_module_and_name(module, proc.name().as_str()))
+            .collect();
 
-        for proc in module.procedures() {
-            let path = SymbolPath::from_module_and_name(module, proc.name().as_str());
-            name_to_path.insert(proc.name().as_str(), path.clone());
-            procedures.push(path);
-        }
+        let procedures: Vec<SymbolPath> = local_paths.iter().cloned().collect();
+
+        // Create resolver for this module
+        let resolver = symbol_resolution::create_resolver(module);
 
         // Build call edges
         let mut calls: HashMap<SymbolPath, Vec<SymbolPath>> = HashMap::new();
 
         for proc in module.procedures() {
             let caller_path = SymbolPath::from_module_and_name(module, proc.name().as_str());
-            let call_names = CallCollector::collect_from_procedure(proc);
+            let call_targets = CallCollector::collect_from_procedure(proc);
 
-            let callees: Vec<SymbolPath> = call_names
+            // Resolve each call target and keep only those that resolve to local procedures
+            let callees: Vec<SymbolPath> = call_targets
                 .iter()
-                .filter_map(|name| {
-                    // Try exact name match first
-                    if let Some(path) = name_to_path.get(name.as_str()) {
-                        return Some(path.clone());
+                .filter_map(|target| {
+                    let resolved = resolver.resolve_target(target)?;
+                    // Only include if it's a local procedure
+                    if local_paths.contains(&resolved) {
+                        Some(resolved)
+                    } else {
+                        None
                     }
-                    // Try suffix match for qualified paths (e.g., "module::proc")
-                    let short_name = name.rsplit("::").next().unwrap_or(name);
-                    name_to_path.get(short_name).cloned()
                 })
                 .collect();
 
@@ -227,12 +230,12 @@ impl TopologicalNode {
 
 /// Collects procedure call targets from a procedure body.
 pub struct CallCollector {
-    calls: Vec<String>,
+    calls: Vec<InvocationTarget>,
 }
 
 impl CallCollector {
     /// Collect all procedure call targets from a procedure.
-    pub fn collect_from_procedure(proc: &Procedure) -> Vec<String> {
+    pub fn collect_from_procedure(proc: &Procedure) -> Vec<InvocationTarget> {
         let mut collector = Self { calls: Vec::new() };
         let _ = visit::visit_procedure(&mut collector, proc);
         collector.calls
@@ -246,12 +249,10 @@ impl Visit for CallCollector {
                 Instruction::Exec(target)
                 | Instruction::Call(target)
                 | Instruction::SysCall(target) => {
-                    let name = match target {
-                        InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
-                        InvocationTarget::Path(path) => path.inner().as_str().to_string(),
-                        InvocationTarget::MastRoot(_) => return std::ops::ControlFlow::Continue(()),
-                    };
-                    self.calls.push(name);
+                    // Skip MAST roots - they can't be resolved symbolically
+                    if !matches!(target, InvocationTarget::MastRoot(_)) {
+                        self.calls.push(target.clone());
+                    }
                 }
                 _ => {}
             }

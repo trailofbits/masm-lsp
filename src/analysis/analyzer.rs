@@ -18,6 +18,7 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::diagnostics::SOURCE_ANALYSIS;
+use crate::symbol_resolution::SymbolResolver;
 
 use super::checker::{AnalysisFinding, CheckContext, Checker, Severity};
 use super::checkers::default_checkers;
@@ -33,6 +34,7 @@ use super::types::{AnalysisState, ValueOrigin};
 pub struct Analyzer<'a> {
     source_manager: &'a DefaultSourceManager,
     uri: Url,
+    resolver: SymbolResolver<'a>,
     contracts: Option<&'a ContractStore>,
     checkers: Vec<Box<dyn Checker>>,
 
@@ -44,6 +46,7 @@ pub struct Analyzer<'a> {
 impl<'a> Analyzer<'a> {
     /// Create a new analyzer with default checkers.
     pub fn new(
+        module: &'a Module,
         source_manager: &'a DefaultSourceManager,
         uri: Url,
         contracts: Option<&'a ContractStore>,
@@ -51,6 +54,7 @@ impl<'a> Analyzer<'a> {
         Self {
             source_manager,
             uri,
+            resolver: crate::symbol_resolution::create_resolver(module),
             contracts,
             checkers: default_checkers(),
             current_state: None,
@@ -108,9 +112,10 @@ impl<'a> Analyzer<'a> {
             _ => return,
         };
 
+        // Get target name for error messages and taint tracking
         let target_name = match target {
-            InvocationTarget::Symbol(ident) => ident.as_str(),
-            InvocationTarget::Path(path) => path.inner().as_str(),
+            InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
+            InvocationTarget::Path(path) => path.inner().as_str().to_string(),
             InvocationTarget::MastRoot(_) => {
                 // MAST root calls - unknown effect, clear tracking
                 if let Some(state) = &mut self.current_state {
@@ -120,12 +125,10 @@ impl<'a> Analyzer<'a> {
             }
         };
 
-        // Look up the contract for this procedure
+        // Use the unified symbol resolution to look up the contract
         let stack_effect = self.contracts.and_then(|store| {
-            store
-                .get_by_suffix(target_name)
-                .or_else(|| store.get_by_name(target_name))
-                .map(|c| &c.stack_effect)
+            let resolved_path = self.resolver.resolve_target(target)?;
+            store.get(&resolved_path).map(|c| &c.stack_effect)
         });
 
         let state = match &mut self.current_state {
@@ -141,7 +144,7 @@ impl<'a> Analyzer<'a> {
                 }
                 // Push outputs as derived values (procedure return values)
                 for _ in 0..*outputs {
-                    let taint = state.make_proc_return(target_name.to_string());
+                    let taint = state.make_proc_return(target_name.clone());
                     state.stack.push(taint);
                 }
             }
@@ -416,7 +419,7 @@ pub fn analyze_module(
     uri: &Url,
     contracts: Option<&ContractStore>,
 ) -> Vec<Diagnostic> {
-    let analyzer = Analyzer::new(source_manager, uri.clone(), contracts);
+    let analyzer = Analyzer::new(module, source_manager, uri.clone(), contracts);
     analyzer.analyze(module)
 }
 

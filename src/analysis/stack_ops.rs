@@ -8,6 +8,7 @@
 use miden_assembly_syntax::ast::{Block, Immediate, Instruction, InvocationTarget, Op};
 
 use super::contracts::{ContractStore, StackEffect};
+use crate::symbol_resolution::SymbolResolver;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Static Stack Effects
@@ -340,9 +341,9 @@ pub enum StackEffectResult {
 /// full abstract interpretation and sufficient for determining stack effects
 /// of most code.
 ///
-/// When a `ContractStore` is provided, procedure calls can be resolved to their
-/// stack effects, allowing the analysis to continue past call sites instead of
-/// falling back to `Dynamic`.
+/// When a `SymbolResolver` and `ContractStore` are provided, procedure calls can
+/// be resolved to their stack effects, allowing the analysis to continue past
+/// call sites instead of falling back to `Dynamic`.
 #[derive(Clone, Debug)]
 pub struct SimpleStackAnalysis<'a> {
     /// Current stack depth relative to procedure entry.
@@ -355,6 +356,8 @@ pub struct SimpleStackAnalysis<'a> {
     valid: bool,
     /// Reason for invalidity.
     invalid_reason: Option<String>,
+    /// Optional symbol resolver for resolving procedure call targets.
+    resolver: Option<&'a SymbolResolver<'a>>,
     /// Optional contract store for resolving procedure calls.
     contract_store: Option<&'a ContractStore>,
 }
@@ -374,18 +377,23 @@ impl<'a> SimpleStackAnalysis<'a> {
             max_depth: 0,
             valid: true,
             invalid_reason: None,
+            resolver: None,
             contract_store: None,
         }
     }
 
-    /// Create analysis with a contract store for resolving procedure calls.
-    pub fn with_contracts(contract_store: &'a ContractStore) -> Self {
+    /// Create analysis with a resolver and contract store for resolving procedure calls.
+    pub fn with_resolver_and_contracts(
+        resolver: &'a SymbolResolver<'a>,
+        contract_store: &'a ContractStore,
+    ) -> Self {
         Self {
             depth: 0,
             min_depth: 0,
             max_depth: 0,
             valid: true,
             invalid_reason: None,
+            resolver: Some(resolver),
             contract_store: Some(contract_store),
         }
     }
@@ -398,18 +406,24 @@ impl<'a> SimpleStackAnalysis<'a> {
             max_depth: input_count as i32,
             valid: true,
             invalid_reason: None,
+            resolver: None,
             contract_store: None,
         }
     }
 
-    /// Create analysis with both inputs and a contract store.
-    pub fn with_inputs_and_contracts(input_count: usize, contract_store: &'a ContractStore) -> Self {
+    /// Create analysis with inputs, resolver, and contract store.
+    pub fn with_inputs_resolver_and_contracts(
+        input_count: usize,
+        resolver: &'a SymbolResolver<'a>,
+        contract_store: &'a ContractStore,
+    ) -> Self {
         Self {
             depth: input_count as i32,
             min_depth: 0,
             max_depth: input_count as i32,
             valid: true,
             invalid_reason: None,
+            resolver: Some(resolver),
             contract_store: Some(contract_store),
         }
     }
@@ -480,20 +494,31 @@ impl<'a> SimpleStackAnalysis<'a> {
             Some(store) => store,
             None => return false,
         };
+        let resolver = match self.resolver {
+            Some(r) => r,
+            None => return false,
+        };
 
         let target = match inst {
             Instruction::Exec(t) | Instruction::Call(t) | Instruction::SysCall(t) => t,
             _ => return false,
         };
 
+        // Get target name for error messages
         let target_name = match target {
-            InvocationTarget::Symbol(ident) => ident.as_str(),
-            InvocationTarget::Path(path) => path.inner().as_str(),
+            InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
+            InvocationTarget::Path(path) => path.inner().as_str().to_string(),
             InvocationTarget::MastRoot(_) => return false, // Can't resolve MAST roots
         };
 
-        // Look up the contract by suffix (handles both short names and full paths)
-        let contract = match contract_store.get_by_suffix(target_name) {
+        // Use the unified symbol resolution to get the fully-qualified path
+        let resolved_path = match resolver.resolve_target(target) {
+            Some(p) => p,
+            None => return false, // Can't resolve target
+        };
+
+        // Look up the contract by resolved path
+        let contract = match contract_store.get(&resolved_path) {
             Some(c) => c,
             None => return false, // Contract not found
         };
@@ -713,23 +738,25 @@ impl<'a> SimpleStackAnalysis<'a> {
 /// Falls back to returning `Dynamic` if the procedure contains constructs
 /// that require abstract interpretation (while loops, procedure calls).
 pub fn analyze_procedure_simple(body: &Block) -> StackEffectResult {
-    analyze_procedure_simple_with_contracts(body, None)
+    analyze_procedure_simple_with_contracts(body, None, None)
 }
 
 /// Analyze a procedure's stack effect using the fast path with contract resolution.
 ///
-/// When a `ContractStore` is provided, procedure calls can be resolved to their
-/// known stack effects, allowing the analysis to succeed for more procedures.
+/// When a `SymbolResolver` and `ContractStore` are provided, procedure calls can
+/// be resolved to their known stack effects, allowing the analysis to succeed
+/// for more procedures.
 ///
 /// Falls back to returning `Dynamic` if the procedure contains constructs
 /// that require abstract interpretation (while loops, unresolved procedure calls).
 pub fn analyze_procedure_simple_with_contracts(
     body: &Block,
+    resolver: Option<&SymbolResolver>,
     contract_store: Option<&ContractStore>,
 ) -> StackEffectResult {
-    let mut analysis = match contract_store {
-        Some(store) => SimpleStackAnalysis::with_contracts(store),
-        None => SimpleStackAnalysis::new(),
+    let mut analysis = match (resolver, contract_store) {
+        (Some(r), Some(store)) => SimpleStackAnalysis::with_resolver_and_contracts(r, store),
+        _ => SimpleStackAnalysis::new(),
     };
 
     match analysis.analyze_block(body) {
@@ -756,13 +783,13 @@ pub fn analyze_procedure_simple_with_contracts(
 ///
 /// Use this function when you need the most accurate analysis possible.
 pub fn analyze_procedure_tiered(body: &Block) -> StackEffectResult {
-    analyze_procedure_tiered_with_contracts(body, None)
+    analyze_procedure_tiered_with_contracts(body, None, None)
 }
 
 /// Analyze a procedure's stack effect using tiered analysis with contract resolution.
 ///
-/// When a `ContractStore` is provided, procedure calls can be resolved to their
-/// known stack effects during the fast path.
+/// When a `SymbolResolver` and `ContractStore` are provided, procedure calls can
+/// be resolved to their known stack effects during the fast path.
 ///
 /// This function implements the two-tier analysis strategy:
 /// 1. First tries the fast arithmetic analysis (SimpleStackAnalysis)
@@ -771,14 +798,15 @@ pub fn analyze_procedure_tiered(body: &Block) -> StackEffectResult {
 /// Use this function when you need the most accurate analysis possible.
 pub fn analyze_procedure_tiered_with_contracts(
     body: &Block,
+    resolver: Option<&SymbolResolver>,
     contract_store: Option<&ContractStore>,
 ) -> StackEffectResult {
     use super::abstract_interpretation::pre_analyze_procedure;
 
     // Tier 1: Try fast path
-    let mut simple = match contract_store {
-        Some(store) => SimpleStackAnalysis::with_contracts(store),
-        None => SimpleStackAnalysis::new(),
+    let mut simple = match (resolver, contract_store) {
+        (Some(r), Some(store)) => SimpleStackAnalysis::with_resolver_and_contracts(r, store),
+        _ => SimpleStackAnalysis::new(),
     };
     if let Some(net_effect) = simple.analyze_block(body) {
         let inputs = simple.inputs_required();
