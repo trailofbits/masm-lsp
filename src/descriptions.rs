@@ -1,23 +1,23 @@
-//! Trait and implementation for converting instructions to inlay hint text.
+//! Trait and implementation for converting instructions to descriptions.
 //!
-//! This module provides the `ToInlayHint` trait which generates contextual
-//! hint strings for Miden assembly instructions, extracting parameter values
-//! to create more informative hints than static lookup tables.
+//! This module provides the `ToDescription` trait which generates contextual
+//! description strings for Miden assembly instructions, extracting parameter values
+//! to create more informative descriptions than static lookup tables.
 
 use miden_assembly_syntax::ast::{Immediate, Instruction};
 use miden_assembly_syntax::parser::PushValue;
 use miden_assembly_syntax::Felt;
 
-/// Trait for converting an instruction to its inlay hint text.
-pub trait ToInlayHint {
-    /// Returns the hint text for this instruction, or `None` if no dynamic hint is available.
+/// Trait for converting an instruction to its description text.
+pub trait ToDescription {
+    /// Returns the description text for this instruction, or `None` if no dynamic description is available.
     ///
-    /// When `None` is returned, callers should fall back to static hint lookup.
-    fn to_inlay_hint(&self) -> Option<String>;
+    /// When `None` is returned, callers should fall back to static description lookup.
+    fn to_description(&self) -> Option<String>;
 }
 
-impl ToInlayHint for Instruction {
-    fn to_inlay_hint(&self) -> Option<String> {
+impl ToDescription for Instruction {
+    fn to_description(&self) -> Option<String> {
         match self {
             // === Stack position: movup ===
             Instruction::MovUp2 => Some(format!("Moves the {} stack item to the top.", ordinal(2))),
@@ -426,29 +426,29 @@ mod tests {
         assert_eq!(ordinal(13), "13th");
     }
 
-    // === Tests for ToInlayHint trait ===
+    // === Tests for ToDescription trait ===
 
     #[test]
     fn hint_movup() {
-        let hint = Instruction::MovUp3.to_inlay_hint();
+        let hint = Instruction::MovUp3.to_description();
         assert_eq!(hint, Some("Moves the 3rd stack item to the top.".into()));
 
-        let hint = Instruction::MovUp15.to_inlay_hint();
+        let hint = Instruction::MovUp15.to_description();
         assert_eq!(hint, Some("Moves the 15th stack item to the top.".into()));
     }
 
     #[test]
     fn hint_movupw() {
-        let hint = Instruction::MovUpW2.to_inlay_hint();
+        let hint = Instruction::MovUpW2.to_description();
         assert_eq!(hint, Some("Moves the 2nd stack word to the top.".into()));
 
-        let hint = Instruction::MovUpW3.to_inlay_hint();
+        let hint = Instruction::MovUpW3.to_description();
         assert_eq!(hint, Some("Moves the 3rd stack word to the top.".into()));
     }
 
     #[test]
     fn hint_movdn() {
-        let hint = Instruction::MovDn4.to_inlay_hint();
+        let hint = Instruction::MovDn4.to_description();
         assert_eq!(
             hint,
             Some("Moves the top stack item to the 4th position.".into())
@@ -457,44 +457,44 @@ mod tests {
 
     #[test]
     fn hint_dup() {
-        let hint = Instruction::Dup0.to_inlay_hint();
+        let hint = Instruction::Dup0.to_description();
         assert_eq!(hint, Some("Pushes a copy of the top stack item.".into()));
 
-        let hint = Instruction::Dup5.to_inlay_hint();
+        let hint = Instruction::Dup5.to_description();
         assert_eq!(hint, Some("Pushes a copy of the 5th stack item.".into()));
     }
 
     #[test]
     fn hint_dupw() {
-        let hint = Instruction::DupW0.to_inlay_hint();
+        let hint = Instruction::DupW0.to_description();
         assert_eq!(hint, Some("Pushes a copy of the top stack word.".into()));
 
-        let hint = Instruction::DupW2.to_inlay_hint();
+        let hint = Instruction::DupW2.to_description();
         assert_eq!(hint, Some("Pushes a copy of the 2nd stack word.".into()));
     }
 
     #[test]
     fn hint_swap() {
-        let hint = Instruction::Swap1.to_inlay_hint();
+        let hint = Instruction::Swap1.to_description();
         assert_eq!(hint, Some("Swaps the top two stack items.".into()));
 
-        let hint = Instruction::Swap7.to_inlay_hint();
+        let hint = Instruction::Swap7.to_description();
         assert_eq!(hint, Some("Swaps the top item with the 7th item.".into()));
     }
 
     #[test]
     fn hint_swapw() {
-        let hint = Instruction::SwapW1.to_inlay_hint();
+        let hint = Instruction::SwapW1.to_description();
         assert_eq!(hint, Some("Swaps the top two stack words.".into()));
 
-        let hint = Instruction::SwapW3.to_inlay_hint();
+        let hint = Instruction::SwapW3.to_description();
         assert_eq!(hint, Some("Swaps the top word with the 3rd word.".into()));
     }
 
     #[test]
     fn hint_push_felt_list() {
         let values = vec![Felt::new(0), Felt::new(0)];
-        let hint = Instruction::PushFeltList(values).to_inlay_hint();
+        let hint = Instruction::PushFeltList(values).to_description();
         assert_eq!(
             hint,
             Some("Pushes the field elements [0, 0] onto the stack.".into())
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn hint_push_felt_list_multiple() {
         let values = vec![Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)];
-        let hint = Instruction::PushFeltList(values).to_inlay_hint();
+        let hint = Instruction::PushFeltList(values).to_description();
         assert_eq!(
             hint,
             Some("Pushes the field elements [1, 2, 3, 4] onto the stack.".into())
@@ -514,28 +514,28 @@ mod tests {
     #[test]
     fn hint_push_single() {
         let imm = Immediate::from(Span::unknown(PushValue::Int(IntValue::U8(42))));
-        let hint = Instruction::Push(imm).to_inlay_hint();
+        let hint = Instruction::Push(imm).to_description();
         assert_eq!(hint, Some("Pushes 42 onto the stack.".into()));
     }
 
     #[test]
     fn hint_add_imm() {
         let imm = Immediate::from(Felt::new(5));
-        let hint = Instruction::AddImm(imm).to_inlay_hint();
+        let hint = Instruction::AddImm(imm).to_description();
         assert_eq!(hint, Some("c = (a + 5) mod p.".into()));
     }
 
     #[test]
     fn hint_mem_load_imm() {
         let imm = Immediate::from(42u32);
-        let hint = Instruction::MemLoadImm(imm).to_inlay_hint();
+        let hint = Instruction::MemLoadImm(imm).to_description();
         assert_eq!(hint, Some("v = mem[42]. Pushes element from memory.".into()));
     }
 
     #[test]
     fn hint_loc_load() {
         let imm = Immediate::from(3u16);
-        let hint = Instruction::LocLoad(imm).to_inlay_hint();
+        let hint = Instruction::LocLoad(imm).to_description();
         assert_eq!(
             hint,
             Some("v = local[3]. Pushes element from local memory.".into())
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn hint_adv_push() {
         let imm = Immediate::from(4u8);
-        let hint = Instruction::AdvPush(imm).to_inlay_hint();
+        let hint = Instruction::AdvPush(imm).to_description();
         assert_eq!(
             hint,
             Some("Pops 4 value(s) from advice stack to operand stack.".into())
@@ -555,13 +555,13 @@ mod tests {
     #[test]
     fn hint_fallback_to_none() {
         // Instructions without dynamic hints should return None
-        let hint = Instruction::Add.to_inlay_hint();
+        let hint = Instruction::Add.to_description();
         assert_eq!(hint, None);
 
-        let hint = Instruction::Nop.to_inlay_hint();
+        let hint = Instruction::Nop.to_description();
         assert_eq!(hint, None);
 
-        let hint = Instruction::Hash.to_inlay_hint();
+        let hint = Instruction::Hash.to_description();
         assert_eq!(hint, None);
     }
 

@@ -4,7 +4,7 @@ pub mod decompiler;
 pub mod diagnostics;
 pub mod index;
 pub mod inlay_hints;
-pub mod instruction_hints;
+pub mod descriptions;
 pub mod module_path;
 pub mod cursor_resolution;
 pub mod server;

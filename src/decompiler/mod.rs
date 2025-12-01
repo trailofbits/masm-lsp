@@ -17,7 +17,7 @@ mod state;
 pub use collector::{collect_decompilation_hints, DecompilationResult};
 pub use pseudocode::{
     apply_counter_indexing, binary_op_pseudocode, extract_declaration_prefix,
-    format_invocation_target, format_procedure_signature, generate_pseudocode, rename_variable,
+    format_invocation_target, format_procedure_signature, rename_variable, ToPseudocode,
 };
 pub use state::{DecompilerState, FailureRelatedInfo, NamedValue, SavedStackState, LOOP_COUNTER_NAMES};
 

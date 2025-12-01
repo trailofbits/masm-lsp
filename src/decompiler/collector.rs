@@ -22,7 +22,7 @@ use crate::symbol_resolution::SymbolResolver;
 
 use super::pseudocode::{
     apply_counter_indexing, apply_output_indexing, extract_declaration_prefix,
-    format_procedure_signature, generate_pseudocode, rename_variable,
+    format_procedure_signature, rename_variable, ToPseudocode,
 };
 use super::state::DecompilerState;
 
@@ -116,7 +116,7 @@ impl<'a> DecompilationCollector<'a> {
         match op {
             Op::Inst(inst) => {
                 if let Some(ref mut state) = self.state {
-                    if let Some(pseudocode) = generate_pseudocode(inst.inner(), state, inst.span(), Some(&self.resolver), self.contracts) {
+                    if let Some(pseudocode) = inst.inner().to_pseudocode(state, inst.span(), Some(&self.resolver), self.contracts) {
                         if let Some(range) = span_to_range(self.sources, inst.span()) {
                             let indented = format!("{}{}", self.indent(), pseudocode);
                             self.hints.push((range.start.line, indented));

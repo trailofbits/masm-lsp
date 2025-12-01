@@ -1,7 +1,7 @@
 //! Pseudocode generation for Miden assembly instructions.
 //!
-//! This module contains the main `generate_pseudocode` function and all helper
-//! functions for converting instructions to readable pseudocode.
+//! This module contains the `ToPseudocode` trait for converting instructions to
+//! readable pseudocode.
 
 use miden_assembly_syntax::ast::{Immediate, Instruction, InvocationTarget};
 use miden_debug_types::SourceSpan;
@@ -12,34 +12,52 @@ use crate::symbol_resolution::SymbolResolver;
 use super::state::DecompilerState;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Main Pseudocode Generation
+// ToPseudocode Trait
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Generate pseudocode for an instruction.
+/// Trait for converting an instruction to pseudocode.
 ///
-/// Returns `Some(pseudocode)` if the instruction produces output,
-/// or `None` for instructions that just manipulate the stack.
-///
-/// # Arguments
-/// * `inst` - The instruction to generate pseudocode for
-/// * `state` - The decompiler state tracking symbolic stack
-/// * `span` - Source span for error reporting
-/// * `resolver` - Symbol resolver for resolving invocation targets to fully-qualified paths
-/// * `contracts` - Contract store for looking up procedure stack effects
-pub fn generate_pseudocode(
-    inst: &Instruction,
-    state: &mut DecompilerState,
-    span: SourceSpan,
-    resolver: Option<&SymbolResolver>,
-    contracts: Option<&ContractStore>,
-) -> Option<String> {
-    use crate::analysis::stack_ops::StackLike;
+/// This trait provides a stateful conversion from assembly instructions to
+/// readable pseudocode, tracking variable names through the symbolic stack.
+pub trait ToPseudocode {
+    /// Convert this instruction to pseudocode.
+    ///
+    /// Returns `Some(pseudocode)` if the instruction produces output,
+    /// or `None` for instructions that just manipulate the stack.
+    ///
+    /// # Arguments
+    /// * `state` - The decompiler state tracking symbolic stack
+    /// * `span` - Source span for error reporting
+    /// * `resolver` - Symbol resolver for resolving invocation targets to fully-qualified paths
+    /// * `contracts` - Contract store for looking up procedure stack effects
+    fn to_pseudocode(
+        &self,
+        state: &mut DecompilerState,
+        span: SourceSpan,
+        resolver: Option<&SymbolResolver>,
+        contracts: Option<&ContractStore>,
+    ) -> Option<String>;
+}
 
-    if state.tracking_failed {
-        return None;
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// ToPseudocode Implementation
+// ═══════════════════════════════════════════════════════════════════════════
 
-    match inst {
+impl ToPseudocode for Instruction {
+    fn to_pseudocode(
+        &self,
+        state: &mut DecompilerState,
+        span: SourceSpan,
+        resolver: Option<&SymbolResolver>,
+        contracts: Option<&ContractStore>,
+    ) -> Option<String> {
+        use crate::analysis::stack_ops::StackLike;
+
+        if state.tracking_failed {
+            return None;
+        }
+
+        match self {
         // ─────────────────────────────────────────────────────────────────────
         // Push operations
         // ─────────────────────────────────────────────────────────────────────
@@ -936,8 +954,9 @@ pub fn generate_pseudocode(
         // Complex STARK operations - fail tracking (unknown effects)
         Instruction::FriExt2Fold4 | Instruction::HornerBase | Instruction::HornerExt |
         Instruction::EvalCircuit | Instruction::LogPrecompile => {
-            state.fail_tracking(span, &format!("complex STARK operation `{}`", inst));
-            Some(format!("{}", inst))
+            state.fail_tracking(span, &format!("complex STARK operation `{}`", self));
+            Some(format!("{}", self))
+        }
         }
     }
 }

@@ -6,7 +6,7 @@ use miden_debug_types::{DefaultSourceManager, Span, Spanned};
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range};
 
 use crate::diagnostics::span_to_range;
-use crate::instruction_hints::{format_push_immediate, ToInlayHint};
+use crate::descriptions::{format_push_immediate, ToDescription};
 
 // Include the compile-time generated instruction map
 include!(concat!(env!("OUT_DIR"), "/instruction_map.rs"));
@@ -145,7 +145,7 @@ pub fn collect_inlay_hints(
 
     let mut hints: Vec<InlayHint> = line_hints
         .into_iter()
-        .flat_map(|(line_num, data)| {
+        .filter_map(|(line_num, data)| {
             // Position hints at the end of the line (after any comments)
             let line_end = line_lengths.get(line_num as usize).copied().unwrap_or(0);
 
@@ -159,22 +159,26 @@ pub fn collect_inlay_hints(
                 .map(render_invocation_hint)
                 .collect();
 
-            inst_hints
-                .into_iter()
-                .chain(invoc_hints)
-                .map(move |label_text| InlayHint {
-                    position: Position {
-                        line: line_num,
-                        character: line_end.saturating_add(padding),
-                    },
-                    label: InlayHintLabel::String(label_text),
-                    kind: Some(InlayHintKind::TYPE),
-                    text_edits: None,
-                    tooltip: None,
-                    padding_left: None,
-                    padding_right: None,
-                    data: None,
-                })
+            // Concatenate all hints for this line into a single string
+            let all_hints: Vec<String> = inst_hints.into_iter().chain(invoc_hints).collect();
+            if all_hints.is_empty() {
+                return None;
+            }
+            let label_text = all_hints.join(" ");
+
+            Some(InlayHint {
+                position: Position {
+                    line: line_num,
+                    character: line_end.saturating_add(padding),
+                },
+                label: InlayHintLabel::String(label_text),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: None,
+                data: None,
+            })
         })
         .collect();
 
@@ -297,9 +301,9 @@ fn try_aggregate_push_hint(instructions: &[Span<Instruction>]) -> Option<String>
 }
 
 fn render_note(instruction: &Span<Instruction>) -> Option<String> {
-    // Try dynamic hint first using the ToInlayHint trait
-    if let Some(hint) = instruction.inner().to_inlay_hint() {
-        return Some(hint);
+    // Try dynamic description first using the ToDescription trait
+    if let Some(desc) = instruction.inner().to_description() {
+        return Some(desc);
     }
 
     // Fall back to static lookup - use description for inlay hints
