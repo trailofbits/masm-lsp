@@ -368,6 +368,256 @@ impl<'a> SsaDecompilationCollector<'a> {
             Instruction::U32Assert2 | Instruction::U32Assert2WithError(_) |
             Instruction::U32AssertW | Instruction::U32AssertWWithError(_) => None,
 
+            // u32 overflowing operations (produce 2 values)
+            Instruction::U32OverflowingAdd => {
+                let b = state.pop();
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&result);
+                out.text(", ");
+                out.var(&overflow);
+                out.text(") = ");
+                out.var(&a);
+                out.text(" + ");
+                out.var(&b);
+                out.text(" (overflow)");
+                Some(out.into_template())
+            }
+            Instruction::U32OverflowingSub => {
+                let b = state.pop();
+                let a = state.pop();
+                let underflow = state.new_local();
+                let result = state.new_local();
+                state.push(underflow);
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&result);
+                out.text(", ");
+                out.var(&underflow);
+                out.text(") = ");
+                out.var(&a);
+                out.text(" - ");
+                out.var(&b);
+                out.text(" (underflow)");
+                Some(out.into_template())
+            }
+            Instruction::U32OverflowingMul => {
+                let b = state.pop();
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&result);
+                out.text(", ");
+                out.var(&overflow);
+                out.text(") = ");
+                out.var(&a);
+                out.text(" * ");
+                out.var(&b);
+                out.text(" (overflow)");
+                Some(out.into_template())
+            }
+            Instruction::U32OverflowingAddImm(imm) => {
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&result);
+                out.text(", ");
+                out.var(&overflow);
+                out.text(") = ");
+                out.var(&a);
+                out.text(&format!(" + {} (overflow)", format_imm(imm)));
+                Some(out.into_template())
+            }
+            Instruction::U32OverflowingSubImm(imm) => {
+                let a = state.pop();
+                let underflow = state.new_local();
+                let result = state.new_local();
+                state.push(underflow);
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&result);
+                out.text(", ");
+                out.var(&underflow);
+                out.text(") = ");
+                out.var(&a);
+                out.text(&format!(" - {} (underflow)", format_imm(imm)));
+                Some(out.into_template())
+            }
+            Instruction::U32OverflowingMulImm(imm) => {
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&result);
+                out.text(", ");
+                out.var(&overflow);
+                out.text(") = ");
+                out.var(&a);
+                out.text(&format!(" * {} (overflow)", format_imm(imm)));
+                Some(out.into_template())
+            }
+
+            // u32 ternary operations
+            Instruction::U32OverflowingAdd3 => {
+                let c = state.pop();
+                let b = state.pop();
+                let a = state.pop();
+                let carry = state.new_local();
+                let result = state.new_local();
+                state.push(carry);
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&result);
+                out.text(", ");
+                out.var(&carry);
+                out.text(") = ");
+                out.var(&a);
+                out.text(" + ");
+                out.var(&b);
+                out.text(" + ");
+                out.var(&c);
+                out.text(" (carry)");
+                Some(out.into_template())
+            }
+            Instruction::U32WrappingAdd3 => {
+                let c = state.pop();
+                let b = state.pop();
+                let a = state.pop();
+                let result = state.new_local();
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.var(&result);
+                out.text(" = ");
+                out.var(&a);
+                out.text(" + ");
+                out.var(&b);
+                out.text(" + ");
+                out.var(&c);
+                Some(out.into_template())
+            }
+            Instruction::U32OverflowingMadd => {
+                let c = state.pop();
+                let b = state.pop();
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&result);
+                out.text(", ");
+                out.var(&overflow);
+                out.text(") = ");
+                out.var(&a);
+                out.text(" * ");
+                out.var(&b);
+                out.text(" + ");
+                out.var(&c);
+                out.text(" (overflow)");
+                Some(out.into_template())
+            }
+            Instruction::U32WrappingMadd => {
+                let c = state.pop();
+                let b = state.pop();
+                let a = state.pop();
+                let result = state.new_local();
+                state.push(result);
+                let mut out = TemplateOutput::default();
+                out.var(&result);
+                out.text(" = ");
+                out.var(&a);
+                out.text(" * ");
+                out.var(&b);
+                out.text(" + ");
+                out.var(&c);
+                Some(out.into_template())
+            }
+
+            // u32 divmod
+            Instruction::U32DivMod => {
+                let b = state.pop();
+                let a = state.pop();
+                let remainder = state.new_local();
+                let quotient = state.new_local();
+                state.push(remainder);
+                state.push(quotient);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&quotient);
+                out.text(", ");
+                out.var(&remainder);
+                out.text(") = divmod(");
+                out.var(&a);
+                out.text(", ");
+                out.var(&b);
+                out.text(")");
+                Some(out.into_template())
+            }
+            Instruction::U32DivModImm(imm) => {
+                let a = state.pop();
+                let remainder = state.new_local();
+                let quotient = state.new_local();
+                state.push(remainder);
+                state.push(quotient);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&quotient);
+                out.text(", ");
+                out.var(&remainder);
+                out.text(") = divmod(");
+                out.var(&a);
+                out.text(&format!(", {})", format_imm(imm)));
+                Some(out.into_template())
+            }
+
+            // u32split
+            Instruction::U32Split => {
+                let a = state.pop();
+                let lo = state.new_local();
+                let hi = state.new_local();
+                state.push(lo);
+                state.push(hi);
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                out.var(&hi);
+                out.text(", ");
+                out.var(&lo);
+                out.text(") = split(");
+                out.var(&a);
+                out.text(")");
+                Some(out.into_template())
+            }
+
+            // u32 test
+            Instruction::U32Test | Instruction::U32TestW => {
+                let var = state.new_local();
+                state.push(var);
+                let mut out = TemplateOutput::default();
+                out.var(&var);
+                out.text(" = is_u32(top)");
+                Some(out.into_template())
+            }
+
             // ─────────────────────────────────────────────────────────────────────
             // Memory operations
             // ─────────────────────────────────────────────────────────────────────
@@ -407,6 +657,436 @@ impl<'a> SsaDecompilationCollector<'a> {
                 let mut out = TemplateOutput::default();
                 out.text(&format!("mem[{}] = ", addr));
                 out.var(&val);
+                Some(out.into_template())
+            }
+
+            // Word memory operations
+            Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
+                let addr = state.pop();
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = mem_w[");
+                out.var(&addr);
+                out.text("]");
+                Some(out.into_template())
+            }
+            Instruction::MemLoadWBeImm(imm) | Instruction::MemLoadWLeImm(imm) => {
+                let addr = format_imm(imm);
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(&format!(") = mem_w[{}]", addr));
+                Some(out.into_template())
+            }
+            Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
+                let addr = state.pop();
+                let mut vals = Vec::new();
+                for _ in 0..4 {
+                    vals.push(state.pop());
+                }
+                vals.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("mem_w[");
+                out.var(&addr);
+                out.text("] = (");
+                for (i, val) in vals.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(val);
+                }
+                out.text(")");
+                Some(out.into_template())
+            }
+            Instruction::MemStoreWBeImm(imm) | Instruction::MemStoreWLeImm(imm) => {
+                let addr = format_imm(imm);
+                let mut vals = Vec::new();
+                for _ in 0..4 {
+                    vals.push(state.pop());
+                }
+                vals.reverse();
+                let mut out = TemplateOutput::default();
+                out.text(&format!("mem_w[{}] = (", addr));
+                for (i, val) in vals.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(val);
+                }
+                out.text(")");
+                Some(out.into_template())
+            }
+
+            // Local memory - single element
+            Instruction::LocLoad(idx) => {
+                let var = state.new_local();
+                state.push(var);
+                let mut out = TemplateOutput::default();
+                out.var(&var);
+                out.text(&format!(" = local[{}]", idx));
+                Some(out.into_template())
+            }
+            Instruction::LocStore(idx) => {
+                let val = state.pop();
+                let mut out = TemplateOutput::default();
+                out.text(&format!("local[{}] = ", idx));
+                out.var(&val);
+                Some(out.into_template())
+            }
+
+            // Local memory - word level
+            Instruction::LocLoadWBe(idx) | Instruction::LocLoadWLe(idx) => {
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(&format!(") = local_w[{}]", idx));
+                Some(out.into_template())
+            }
+            Instruction::LocStoreWBe(idx) | Instruction::LocStoreWLe(idx) => {
+                let mut vals = Vec::new();
+                for _ in 0..4 {
+                    vals.push(state.pop());
+                }
+                vals.reverse();
+                let mut out = TemplateOutput::default();
+                out.text(&format!("local_w[{}] = (", idx));
+                for (i, val) in vals.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(val);
+                }
+                out.text(")");
+                Some(out.into_template())
+            }
+            Instruction::Locaddr(idx) => {
+                let var = state.new_local();
+                state.push(var);
+                let mut out = TemplateOutput::default();
+                out.var(&var);
+                out.text(&format!(" = &local[{}]", idx));
+                Some(out.into_template())
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Advice operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::AdvPush(n) => {
+                let count = match n {
+                    miden_assembly_syntax::ast::Immediate::Value(v) => v.into_inner() as usize,
+                    _ => 1,
+                };
+                let mut vars = Vec::new();
+                for _ in 0..count {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = advice()");
+                Some(out.into_template())
+            }
+            Instruction::AdvLoadW => {
+                // Pop 4 values (address), push 4 values (loaded word)
+                for _ in 0..4 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = advice_w()");
+                Some(out.into_template())
+            }
+            Instruction::AdvPipe => {
+                // Pop 8, push 8
+                for _ in 0..8 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..8 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = advice_pipe()");
+                Some(out.into_template())
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Cryptographic operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::Hash => {
+                let mut args = Vec::new();
+                for _ in 0..4 {
+                    args.push(state.pop());
+                }
+                args.reverse();
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = hash((");
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(arg);
+                }
+                out.text("))");
+                Some(out.into_template())
+            }
+            Instruction::HMerge => {
+                // Pop 8, push 4
+                for _ in 0..8 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = hmerge(...)");
+                Some(out.into_template())
+            }
+            Instruction::HPerm => {
+                // Pop 12, push 12
+                for _ in 0..12 {
+                    state.pop();
+                }
+                for _ in 0..12 {
+                    let var = state.new_local();
+                    state.push(var);
+                }
+                Some(PseudocodeTemplate::new().literal("... = hperm(...)"))
+            }
+
+            // Merkle tree operations
+            Instruction::MTreeGet => {
+                state.pop(); // depth
+                state.pop(); // index
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = mtree_get()");
+                Some(out.into_template())
+            }
+            Instruction::MTreeSet => {
+                state.pop(); // depth
+                state.pop(); // index
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = mtree_set()");
+                Some(out.into_template())
+            }
+            Instruction::MTreeMerge => {
+                // Pop 8, push 4
+                for _ in 0..8 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = mtree_merge()");
+                Some(out.into_template())
+            }
+            Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
+                Some(PseudocodeTemplate::new().literal("mtree_verify()"))
+            }
+
+            // ─────────────────────────────────────────────────────────────────────
+            // Word stack operations
+            // ─────────────────────────────────────────────────────────────────────
+            Instruction::SwapW1 => { self.swapw(0, 1); None }
+            Instruction::SwapW2 => { self.swapw(0, 2); None }
+            Instruction::SwapW3 => { self.swapw(0, 3); None }
+
+            Instruction::MovUpW2 => { self.movupw(2); None }
+            Instruction::MovUpW3 => { self.movupw(3); None }
+            Instruction::MovDnW2 => { self.movdnw(2); None }
+            Instruction::MovDnW3 => { self.movdnw(3); None }
+
+            Instruction::DupW0 => self.dupw_template(0),
+            Instruction::DupW1 => self.dupw_template(1),
+            Instruction::DupW2 => self.dupw_template(2),
+            Instruction::DupW3 => self.dupw_template(3),
+
+            Instruction::PadW => {
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = TemplateOutput::default();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 { out.text(", "); }
+                    out.var(var);
+                }
+                out.text(") = (0, 0, 0, 0)");
+                Some(out.into_template())
+            }
+
+            Instruction::Reversew => {
+                // Reverse top 4 elements - swap (0,3) and (1,2)
+                state.swap(0, 3);
+                state.swap(1, 2);
+                None
+            }
+
+            // Word equality test
+            Instruction::Eqw => {
+                // Pop 8, push 1
+                for _ in 0..8 {
+                    state.pop();
+                }
+                let var = state.new_local();
+                state.push(var);
+                let mut out = TemplateOutput::default();
+                out.var(&var);
+                out.text(" = eqw()");
+                Some(out.into_template())
+            }
+
+            // Assert word equality
+            Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
+                // Pop 8 (two words)
+                for _ in 0..8 {
+                    state.pop();
+                }
+                Some(PseudocodeTemplate::new().literal("assert_eqw()"))
+            }
+
+            // Conditional operations
+            Instruction::CSwap => {
+                let cond = state.pop();
+                let mut out = TemplateOutput::default();
+                out.text("cswap(");
+                out.var(&cond);
+                out.text(")");
+                Some(out.into_template())
+            }
+            Instruction::CSwapW => {
+                let cond = state.pop();
+                let mut out = TemplateOutput::default();
+                out.text("cswapw(");
+                out.var(&cond);
+                out.text(")");
+                Some(out.into_template())
+            }
+            Instruction::CDrop => {
+                let cond = state.pop();
+                state.pop();
+                let mut out = TemplateOutput::default();
+                out.text("cdrop(");
+                out.var(&cond);
+                out.text(")");
+                Some(out.into_template())
+            }
+            Instruction::CDropW => {
+                let cond = state.pop();
+                for _ in 0..4 {
+                    state.pop();
+                }
+                let mut out = TemplateOutput::default();
+                out.text("cdropw(");
+                out.var(&cond);
+                out.text(")");
                 Some(out.into_template())
             }
 
@@ -480,6 +1160,87 @@ impl<'a> SsaDecompilationCollector<'a> {
         out.text(" = ");
         out.var(&src);
         Some(out.into_template())
+    }
+
+    /// Generate dupw template for word duplication.
+    fn dupw_template(&mut self, word_idx: usize) -> Option<PseudocodeTemplate> {
+        let state = self.state.as_mut()?;
+        let base = word_idx * 4;
+
+        // Collect source values
+        let mut sources = Vec::new();
+        for i in 0..4 {
+            if let Some(src) = state.peek(base + i) {
+                sources.push(src);
+            }
+        }
+        if sources.len() != 4 {
+            return None;
+        }
+
+        // Duplicate the 4 values
+        for _ in 0..4 {
+            if let Some(src) = state.peek(base + 3) {
+                state.push(src);
+            }
+        }
+
+        // Create new variable names for the duplicated values
+        let mut new_vars = Vec::new();
+        for _ in 0..4 {
+            let var = state.new_local();
+            state.pop();
+            state.push(var);
+            new_vars.push(var);
+        }
+        new_vars.reverse();
+
+        let mut out = TemplateOutput::default();
+        out.text("(");
+        for (i, var) in new_vars.iter().enumerate() {
+            if i > 0 { out.text(", "); }
+            out.var(var);
+        }
+        out.text(") = (");
+        for (i, src) in sources.iter().rev().enumerate() {
+            if i > 0 { out.text(", "); }
+            out.var(src);
+        }
+        out.text(")");
+        Some(out.into_template())
+    }
+
+    /// Swap two words on the stack.
+    fn swapw(&mut self, a: usize, b: usize) {
+        if let Some(ref mut state) = self.state {
+            let base_a = a * 4;
+            let base_b = b * 4;
+            for i in 0..4 {
+                state.swap(base_a + i, base_b + i);
+            }
+        }
+    }
+
+    /// Move word at position n to top.
+    fn movupw(&mut self, word_n: usize) {
+        if let Some(ref mut state) = self.state {
+            // Move 4 elements up, starting from highest index
+            let base = word_n * 4;
+            for i in (0..4).rev() {
+                state.movup(base + i);
+            }
+        }
+    }
+
+    /// Move top word to position n.
+    fn movdnw(&mut self, word_n: usize) {
+        if let Some(ref mut state) = self.state {
+            // Move 4 elements down
+            let target = word_n * 4;
+            for _ in 0..4 {
+                state.movdn(target - 1);
+            }
+        }
     }
 
     /// Visit all operations in a block, handling control flow.
@@ -661,19 +1422,26 @@ impl<'a> Visit for SsaDecompilationCollector<'a> {
         let contract_effect = contract.map(|c| c.stack_effect.clone());
         let contract_signature = contract.and_then(|c| c.signature.clone());
 
-        // Pre-analyze procedure
+        // Pre-analyze procedure (only used as fallback when no contract is available)
         let pre_analysis = pre_analyze_procedure(proc.body());
         let pre_analyzed_inputs = pre_analysis.total_inputs_required;
 
         // Determine input/output counts
+        // Prefer contract-declared inputs when available, as pre-analysis can over-estimate
+        // for procedures with consuming loops (e.g., repeat.N with negative stack effect)
         let (initial_input_count, output_count) = match &contract_effect {
             Some(StackEffect::Known { inputs, outputs }) => {
-                ((*inputs).max(pre_analyzed_inputs), Some(*outputs))
+                // Contract provides exact input count - use it
+                (*inputs, Some(*outputs))
             }
             Some(StackEffect::KnownInputs { inputs }) => {
-                ((*inputs).max(pre_analyzed_inputs), None)
+                // Contract provides input count - use it
+                (*inputs, None)
             }
-            _ => (pre_analyzed_inputs, None),
+            _ => {
+                // No contract - use pre-analysis
+                (pre_analyzed_inputs, None)
+            }
         };
 
         // Track procedure state
@@ -711,12 +1479,22 @@ impl<'a> Visit for SsaDecompilationCollector<'a> {
         // Resolve hints (Pass 2)
         self.resolve_all_hints();
 
-        // Add "end" hint
+        // Add "end" hint for the procedure
+        // We need to find the procedure's "end", not any control flow "end" that might come first
         if let Some(body_range) = span_to_range(self.sources, proc.body().span()) {
             let start_line = body_range.end.line as usize;
             for (offset, line_text) in self.source_text.lines().skip(start_line).enumerate() {
                 if line_text.trim() == "end" {
                     let end_line = (start_line + offset) as u32;
+                    // Check if this line already has an "end" hint from control flow
+                    let already_has_end = self.resolved_hints.iter().any(|(line, hint)| {
+                        *line == end_line && hint.trim() == "end"
+                    });
+                    if already_has_end {
+                        // This "end" belongs to a control flow block, continue scanning
+                        // for the procedure's "end" on a subsequent line
+                        continue;
+                    }
                     self.resolved_hints.push((end_line, "end".to_string()));
                     break;
                 }
