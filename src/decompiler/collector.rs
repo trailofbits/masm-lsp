@@ -14,7 +14,7 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::analysis::{
-    analyze_repeat_loop, parse_procedure_signature, pre_analyze_procedure, ContractStore,
+    analyze_repeat_loop, pre_analyze_procedure, ContractStore,
     StackEffect,
 };
 use crate::diagnostics::{span_to_range, SOURCE_DECOMPILATION};
@@ -426,17 +426,15 @@ impl<'a> Visit for DecompilationCollector<'a> {
         let decl_line = decl_range.as_ref().map(|r| r.start.line);
 
         // Priority for determining input/output counts:
-        // 1. Explicit signature with type annotations (highest priority)
-        // 2. Contract store (inferred from instructions)
-        // 3. Pre-analysis via abstract interpretation (discovers inputs from loops)
-        // 4. Default to 0 (dynamic discovery will find inputs as needed)
+        // 1. Contract store (inferred from implementation - source of truth)
+        // 2. Pre-analysis via abstract interpretation (discovers inputs from loops)
+        // 3. Default to 0 (dynamic discovery will find inputs as needed)
+        //
+        // Note: We intentionally do NOT use the explicit signature annotation as the
+        // source of truth. The implementation defines the actual stack effect, and
+        // the annotation might be incorrect or use complex types we can't parse.
 
-        // Try to parse explicit signature from source text
-        let parsed_sig = decl_line.and_then(|line| {
-            parse_procedure_signature(self.source_text.lines().nth(line as usize)?)
-        });
-
-        // Get contract from store
+        // Get contract from store (inferred from the actual implementation)
         let contract = self.contracts.and_then(|c| c.get_by_name(&proc_name));
         let contract_effect = contract.map(|c| c.stack_effect.clone());
         let contract_signature = contract.and_then(|c| c.signature.clone());
@@ -445,21 +443,15 @@ impl<'a> Visit for DecompilationCollector<'a> {
         let pre_analysis = pre_analyze_procedure(proc.body());
         let pre_analyzed_inputs = pre_analysis.total_inputs_required;
 
-        // Determine initial input/output counts
-        let (initial_input_count, output_count) = if let Some(sig) = &parsed_sig {
-            // Explicit signature has priority, but take max with pre-analysis
-            (sig.inputs.max(pre_analyzed_inputs), Some(sig.outputs))
-        } else {
-            // Fall back to contract inference, but take max with pre-analysis
-            match &contract_effect {
-                Some(StackEffect::Known { inputs, outputs }) => {
-                    ((*inputs).max(pre_analyzed_inputs), Some(*outputs))
-                }
-                Some(StackEffect::KnownInputs { inputs }) => {
-                    ((*inputs).max(pre_analyzed_inputs), None)
-                }
-                _ => (pre_analyzed_inputs, None), // Use pre-analyzed inputs
+        // Determine initial input/output counts from contract inference
+        let (initial_input_count, output_count) = match &contract_effect {
+            Some(StackEffect::Known { inputs, outputs }) => {
+                ((*inputs).max(pre_analyzed_inputs), Some(*outputs))
             }
+            Some(StackEffect::KnownInputs { inputs }) => {
+                ((*inputs).max(pre_analyzed_inputs), None)
+            }
+            _ => (pre_analyzed_inputs, None), // Use pre-analyzed inputs
         };
 
         // Track where this procedure's hints start (for renaming returns and updating signature)

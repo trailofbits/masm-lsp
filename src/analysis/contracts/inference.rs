@@ -841,6 +841,23 @@ impl<'a> SignatureAnalyzer<'a> {
             Instruction::MovDnW3 => { self.movdnw(3); return; }
 
             // ─────────────────────────────────────────────────────────────────
+            // Reverse operations - these rearrange in place but need inputs
+            // ─────────────────────────────────────────────────────────────────
+            Instruction::Reversew => {
+                // Reverse top word (4 elements): positions 0,1,2,3 -> 3,2,1,0
+                self.abstract_state.swap(0, 3);
+                self.abstract_state.swap(1, 2);
+                return;
+            }
+            Instruction::Reversedw => {
+                // Reverse top double word (8 elements): positions 0-7 reversed
+                for i in 0..4 {
+                    self.abstract_state.swap(i, 7 - i);
+                }
+                return;
+            }
+
+            // ─────────────────────────────────────────────────────────────────
             // Advice operations
             // ─────────────────────────────────────────────────────────────────
             Instruction::AdvLoadW => {
@@ -1611,5 +1628,77 @@ end
             "b should have KnownInputs(0) or Unknown effect, got {:?}",
             b.stack_effect
         );
+    }
+
+    #[test]
+    fn test_overflowing_add_stack_effect() {
+        // Test that overflowing_add correctly infers 4 inputs, 3 outputs
+        // This is the u64 addition that returns (overflow_flag, result_hi, result_lo)
+        let contracts = parse_and_infer(
+            "
+pub proc overflowing_add
+    swap
+    movup.3
+    u32overflowing_add
+    movup.3
+    movup.3
+    u32overflowing_add3
+end
+",
+        );
+
+        assert_eq!(contracts.len(), 1);
+        let contract = &contracts[0];
+
+        // Stack trace:
+        // Initial: [a_0, a_1, a_2, a_3] (4 inputs discovered)
+        // swap: [a_1, a_0, a_2, a_3]
+        // movup.3: [a_3, a_1, a_0, a_2]  -- wait, actually need to trace more carefully
+        // Actually the stack grows upward, so:
+        // swap swaps top two, movup.3 moves element at depth 3 to top
+        // u32overflowing_add: pops 2, pushes 2
+        // movup.3: moves element at depth 3 to top
+        // movup.3: moves element at depth 3 to top
+        // u32overflowing_add3: pops 3, pushes 2
+        // Final depth should be: 4 - 2 + 2 - 3 + 2 = 3 outputs
+
+        assert!(
+            matches!(contract.stack_effect, StackEffect::Known { inputs: 4, outputs: 3 }),
+            "overflowing_add should have Known(4, 3), got {:?}",
+            contract.stack_effect
+        );
+
+        // Also verify signature has correct counts
+        let sig = contract.signature.as_ref().expect("Should have signature");
+        assert_eq!(sig.num_inputs(), 4, "Should have 4 inputs");
+        assert_eq!(sig.num_outputs(), 3, "Should have 3 outputs");
+    }
+
+    #[test]
+    fn test_word_reverse_stack_effect() {
+        // Test that a word reverse (swap all 4 elements) has 4 inputs, 4 outputs
+        let contracts = parse_and_infer(
+            "
+pub proc reverse
+    swap
+    movup.2
+    movup.3
+end
+",
+        );
+
+        assert_eq!(contracts.len(), 1);
+        let contract = &contracts[0];
+
+        // This should discover 4 inputs and have 4 outputs
+        assert!(
+            matches!(contract.stack_effect, StackEffect::Known { inputs: 4, outputs: 4 }),
+            "reverse should have Known(4, 4), got {:?}",
+            contract.stack_effect
+        );
+
+        let sig = contract.signature.as_ref().expect("Should have signature");
+        assert_eq!(sig.num_inputs(), 4, "Should have 4 inputs");
+        assert_eq!(sig.num_outputs(), 4, "Should have 4 outputs");
     }
 }
