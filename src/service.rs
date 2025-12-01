@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
 use crate::index::DocumentSymbols;
-use crate::resolution::{ResolvedSymbol, ResolutionError};
+use crate::cursor_resolution::{ResolvedSymbol, ResolutionError};
 use crate::symbol_path::SymbolPath;
 
 /// Service for document-level operations.

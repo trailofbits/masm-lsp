@@ -6,14 +6,14 @@ pub mod index;
 pub mod inlay_hints;
 pub mod instruction_hints;
 pub mod module_path;
-pub mod resolution;
+pub mod cursor_resolution;
 pub mod server;
 pub mod service;
 pub mod symbol_path;
 pub mod symbol_resolution;
 pub mod util;
 
-pub use resolution::ResolutionError;
+pub use cursor_resolution::ResolutionError;
 pub use symbol_path::SymbolPath;
 
 /// The type of inlay hints to display.

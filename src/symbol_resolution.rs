@@ -211,7 +211,7 @@ impl<'a> SymbolResolver<'a> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Check if the module has a local definition with the given name.
-fn has_local_definition(module: &Module, name: &str) -> bool {
+pub fn has_local_definition(module: &Module, name: &str) -> bool {
     module.items().any(|item| item.name().as_str() == name)
 }
 

@@ -17,8 +17,8 @@ use miden_assembly_syntax::ast::{
     visit::{self, Visit},
     Block, Instruction, InvocationTarget, Module, Op, Procedure,
 };
-use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned};
-use tower_lsp::lsp_types::{Position, Range};
+use miden_debug_types::{DefaultSourceManager, Spanned};
+use tower_lsp::lsp_types::Range;
 
 use crate::symbol_path::SymbolPath;
 use crate::symbol_resolution::SymbolResolver;
@@ -70,7 +70,7 @@ pub fn infer_module_contracts_with_store(
     let mut proc_info: HashMap<SymbolPath, (Option<Range>, &Procedure)> = HashMap::new();
     for proc in module.procedures() {
         let path = SymbolPath::from_module_and_name(module, proc.name().as_str());
-        let definition_range = span_to_range(source_manager, proc.name().span());
+        let definition_range = crate::diagnostics::span_to_range(source_manager, proc.name().span());
         proc_info.insert(path, (definition_range, proc));
     }
 
@@ -977,40 +977,6 @@ impl<'a> Visit for SignatureAnalyzer<'a> {
         // Default traversal for Op::Inst
         visit::visit_op(self, op)
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-fn span_to_range(
-    source_manager: &DefaultSourceManager,
-    span: miden_debug_types::SourceSpan,
-) -> Option<Range> {
-    let byte_range = span.into_range();
-    let start = source_manager
-        .file_line_col(miden_debug_types::SourceSpan::at(
-            span.source_id(),
-            byte_range.start,
-        ))
-        .ok()?;
-    let end = source_manager
-        .file_line_col(miden_debug_types::SourceSpan::at(
-            span.source_id(),
-            byte_range.end,
-        ))
-        .ok()?;
-
-    Some(Range::new(
-        Position::new(
-            start.line.to_usize().saturating_sub(1) as u32,
-            start.column.to_usize().saturating_sub(1) as u32,
-        ),
-        Position::new(
-            end.line.to_usize().saturating_sub(1) as u32,
-            end.column.to_usize().saturating_sub(1) as u32,
-        ),
-    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

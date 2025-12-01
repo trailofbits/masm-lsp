@@ -12,7 +12,7 @@ use miden_assembly_syntax::ast::{
     visit::{self, Visit},
     Block, Instruction, InvocationTarget, Module, Op, Procedure,
 };
-use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Span, Spanned};
+use miden_debug_types::{DefaultSourceManager, SourceSpan, Span, Spanned};
 use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticRelatedInformation, Location, Position, Range, Url,
 };
@@ -321,29 +321,8 @@ impl<'a> Analyzer<'a> {
 
     /// Convert a source span to an LSP range.
     fn span_to_range(&self, span: SourceSpan) -> Range {
-        let byte_range = span.into_range();
-        let start = self
-            .source_manager
-            .file_line_col(SourceSpan::at(span.source_id(), byte_range.start))
-            .ok();
-        let end = self
-            .source_manager
-            .file_line_col(SourceSpan::at(span.source_id(), byte_range.end))
-            .ok();
-
-        match (start, end) {
-            (Some(s), Some(e)) => Range::new(
-                Position::new(
-                    s.line.to_usize().saturating_sub(1) as u32,
-                    s.column.to_usize().saturating_sub(1) as u32,
-                ),
-                Position::new(
-                    e.line.to_usize().saturating_sub(1) as u32,
-                    e.column.to_usize().saturating_sub(1) as u32,
-                ),
-            ),
-            _ => Range::new(Position::new(0, 0), Position::new(0, 0)),
-        }
+        crate::diagnostics::span_to_range(self.source_manager, span)
+            .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)))
     }
 }
 
@@ -432,7 +411,7 @@ mod tests {
     use super::*;
     use miden_assembly_syntax::ast::ModuleKind;
     use miden_assembly_syntax::{Parse, ParseOptions};
-    use miden_debug_types::{SourceLanguage, Uri};
+    use miden_debug_types::{SourceLanguage, SourceManager, Uri};
     use tower_lsp::lsp_types::DiagnosticSeverity;
 
     fn analyze_source(source: &str) -> Vec<Diagnostic> {

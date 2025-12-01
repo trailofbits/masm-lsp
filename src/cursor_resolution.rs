@@ -1,9 +1,6 @@
 use crate::symbol_path::SymbolPath;
-use crate::util::{extract_token_at_position, to_miden_uri};
-use miden_assembly_syntax::ast::{
-    visit::Visit, InvocationTarget, LocalSymbolResolutionError, LocalSymbolResolver, Module,
-    SymbolResolution,
-};
+use crate::util::to_miden_uri;
+use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module, Procedure};
 use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned};
 use thiserror::Error;
 use tower_lsp::lsp_types::{Position, Url};
@@ -20,14 +17,8 @@ pub enum ResolutionError {
     #[error("invalid position {line}:{column} in source")]
     InvalidPosition { line: u32, column: u32 },
 
-    #[error("symbol resolution failed: {0}")]
-    SymbolResolution(#[from] LocalSymbolResolutionError),
-
     #[error("symbol not found: {0}")]
     SymbolNotFound(String),
-
-    #[error("invalid item index in module")]
-    InvalidItemIndex,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +28,10 @@ pub struct ResolvedSymbol {
 }
 
 /// Resolve the symbol under `position` in `module`.
+///
+/// Uses AST traversal to find symbols at the cursor position:
+/// 1. Invocation targets (exec.foo, call.bar, etc.)
+/// 2. Procedure definitions (proc foo, export bar)
 ///
 /// Returns `Ok(symbol)` if a symbol was found and resolved, or an error describing
 /// why resolution failed.
@@ -49,102 +44,25 @@ pub fn resolve_symbol_at_position(
     let source = source_manager.get_by_uri(&to_miden_uri(uri));
     let source_file = source.ok_or_else(|| ResolutionError::SourceNotFound(uri.clone()))?;
 
-    // First, try to find an invocation target at this position using AST traversal.
-    // This is more robust than token extraction as it uses the parsed AST structure.
-    if let Some(offset) = position_to_offset(&source_file, position) {
-        if let Some(target) = find_invocation_at_offset(module, offset) {
-            return resolve_invocation_target(module, &target);
-        }
+    let offset = position_to_offset(&source_file, position).ok_or(ResolutionError::InvalidPosition {
+        line: position.line,
+        column: position.character,
+    })?;
+
+    // Try to find an invocation target at this position (exec.foo, call.bar, etc.)
+    if let Some(target) = find_invocation_at_offset(module, offset) {
+        return resolve_invocation_target(module, &target);
     }
 
-    // Fallback to token-based resolution for non-invocation symbols (e.g., proc definitions)
-    let raw_token = extract_token_at_position(&source_file, position).ok_or(
-        ResolutionError::NoTokenAtPosition {
-            line: position.line,
-            column: position.character,
-        },
-    )?;
-
-    // Strip instruction prefixes if present (handles cursor on `exec.f` → `f`)
-    let token = strip_instruction_prefix(&raw_token);
-
-    if has_local_name(module, token.as_str()) {
-        return Ok(ResolvedSymbol {
-            path: SymbolPath::from_module_and_name(module, token.as_str()),
-            name: token,
-        });
+    // Try to find a procedure definition at this position (proc foo, export bar)
+    if let Some(proc_name) = find_procedure_definition_at_offset(module, offset) {
+        return resolve_procedure_definition(module, &proc_name);
     }
 
-    let resolver = LocalSymbolResolver::from(module);
-    if let Some(resolution) = resolver.resolve(token.as_str())? {
-        let resolved = match resolution {
-            SymbolResolution::Local(span) => {
-                let item = module
-                    .get(span.into_inner())
-                    .ok_or(ResolutionError::InvalidItemIndex)?;
-                let name = item.name();
-                let path = SymbolPath::from_module_and_name(module, name.as_str());
-                ResolvedSymbol { path, name: token }
-            }
-            SymbolResolution::External(path) => {
-                let local_path = SymbolPath::from_module_and_name(module, token.as_str());
-                if has_local_name(module, token.as_str()) {
-                    ResolvedSymbol {
-                        path: local_path,
-                        name: token,
-                    }
-                } else {
-                    ResolvedSymbol {
-                        path: SymbolPath::new(path.into_inner().as_str()),
-                        name: token,
-                    }
-                }
-            }
-            SymbolResolution::Module { path, .. } => {
-                let local_path = SymbolPath::from_module_and_name(module, token.as_str());
-                if has_local_name(module, token.as_str()) {
-                    ResolvedSymbol {
-                        path: local_path,
-                        name: token,
-                    }
-                } else {
-                    ResolvedSymbol {
-                        path: SymbolPath::new(path.as_str()),
-                        name: token,
-                    }
-                }
-            }
-            SymbolResolution::Exact { path, .. } => ResolvedSymbol {
-                path: SymbolPath::new(path.into_inner().as_str()),
-                name: token,
-            },
-            SymbolResolution::MastRoot(_) => {
-                return Err(ResolutionError::SymbolNotFound(token));
-            }
-        };
-        return Ok(resolved);
-    }
-
-    Err(ResolutionError::SymbolNotFound(token))
-}
-
-fn has_local_name(module: &Module, name: &str) -> bool {
-    module.items().any(|item| item.name().as_str() == name)
-}
-
-/// Strip common instruction and definition prefixes from a token.
-/// E.g., "exec.foo" → "foo", "call.bar::baz" → "bar::baz", "proc.foo" → "foo"
-fn strip_instruction_prefix(token: &str) -> String {
-    const PREFIXES: &[&str] = &[
-        "exec.", "call.", "syscall.", "procref.", // invocation prefixes
-        "proc.", "export.", "const.",             // definition prefixes
-    ];
-    for prefix in PREFIXES {
-        if let Some(rest) = token.strip_prefix(prefix) {
-            return rest.to_string();
-        }
-    }
-    token.to_string()
+    Err(ResolutionError::NoTokenAtPosition {
+        line: position.line,
+        column: position.character,
+    })
 }
 
 /// Find an invocation target at a given byte offset using AST traversal.
@@ -220,6 +138,47 @@ impl Visit for InvocationFinder {
     }
 }
 
+/// Find a procedure definition name at a given byte offset using AST traversal.
+///
+/// Returns the procedure name if the offset is on a procedure name in its definition.
+pub fn find_procedure_definition_at_offset(module: &Module, offset: u32) -> Option<String> {
+    let mut finder = ProcDefinitionFinder {
+        offset,
+        found: None,
+    };
+    let _ = miden_assembly_syntax::ast::visit::visit_module(&mut finder, module);
+    finder.found
+}
+
+struct ProcDefinitionFinder {
+    offset: u32,
+    found: Option<String>,
+}
+
+impl Visit for ProcDefinitionFinder {
+    fn visit_procedure(&mut self, proc: &Procedure) -> core::ops::ControlFlow<()> {
+        let name_span = proc.name().span();
+        let range = name_span.into_range();
+        if self.offset >= range.start && self.offset < range.end {
+            self.found = Some(proc.name().as_str().to_string());
+            return core::ops::ControlFlow::Break(());
+        }
+        // Continue to check nested procedures/invocations
+        core::ops::ControlFlow::Continue(())
+    }
+}
+
+/// Resolve a procedure definition to a symbol path.
+fn resolve_procedure_definition(module: &Module, name: &str) -> Result<ResolvedSymbol, ResolutionError> {
+    // Use the unified symbol resolution service
+    let resolver = crate::symbol_resolution::create_resolver(module);
+    let path = resolver.resolve_symbol(name);
+    Ok(ResolvedSymbol {
+        path,
+        name: name.to_string(),
+    })
+}
+
 /// Resolve an invocation target to a symbol path.
 pub fn resolve_invocation_target(
     module: &Module,
@@ -265,32 +224,6 @@ fn position_to_offset(source: &miden_debug_types::SourceFile, pos: Position) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strip_instruction_prefix_all_variants() {
-        // Invocation prefixes
-        assert_eq!(strip_instruction_prefix("exec.foo"), "foo");
-        assert_eq!(strip_instruction_prefix("call.bar::baz"), "bar::baz");
-        assert_eq!(strip_instruction_prefix("syscall.kernel_proc"), "kernel_proc");
-        assert_eq!(strip_instruction_prefix("procref.target"), "target");
-
-        // Definition prefixes
-        assert_eq!(strip_instruction_prefix("proc.my_procedure"), "my_procedure");
-        assert_eq!(strip_instruction_prefix("export.public_proc"), "public_proc");
-        assert_eq!(strip_instruction_prefix("const.MY_CONST"), "MY_CONST");
-
-        // Qualified paths with prefixes
-        assert_eq!(strip_instruction_prefix("exec.::module::proc"), "::module::proc");
-
-        // No prefix - returns unchanged
-        assert_eq!(strip_instruction_prefix("foo"), "foo");
-        assert_eq!(strip_instruction_prefix("bar::baz"), "bar::baz");
-        assert_eq!(strip_instruction_prefix(""), "");
-
-        // Partial matches - should not strip (e.g., "execute" starts with "exec" but not "exec.")
-        assert_eq!(strip_instruction_prefix("execute"), "execute");
-        assert_eq!(strip_instruction_prefix("caller"), "caller");
-    }
 
     #[test]
     fn resolution_error_display() {

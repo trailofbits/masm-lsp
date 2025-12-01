@@ -33,7 +33,7 @@ use crate::{
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
     inlay_hints::{collect_inlay_hints, get_instruction_hover},
     module_path::ModulePathResolver,
-    resolution::{resolve_symbol_at_position, ResolvedSymbol, ResolutionError},
+    cursor_resolution::{resolve_symbol_at_position, ResolvedSymbol, ResolutionError},
     service::{DocumentService, WorkspaceService},
     symbol_path::SymbolPath,
     util::{
