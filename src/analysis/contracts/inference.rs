@@ -1015,15 +1015,33 @@ impl<'a> Visit for SignatureAnalyzer<'a> {
                         let loop_bound = infer_while_bound(body, initial_counter);
 
                         if let Some(iterations) = loop_bound.count() {
-                            // Known iteration count - compute total effect
+                            // Known iteration count - compute total effect with parametric tracking
                             let total_net = (iterations as isize) * net_change;
-                            // First iteration consumes body_in from original stack
-                            // Total effect: body_in inputs consumed, (body_in + total_net) outputs
                             let outputs = (result.inputs as isize + total_net).max(0) as usize;
+
+                            // Enter loop context to track this loop's effect
+                            let loop_depth = self.abstract_state.enter_loop(net_change as i32);
+
+                            // Lift existing expressions to parametric form
+                            self.abstract_state.lift_for_current_loop(net_change as i32);
+
+                            // Pop consumed inputs
                             self.pop_n(result.inputs);
-                            self.push_n(outputs, SymbolicExpr::Top);
+
+                            // Push parametric outputs
+                            for i in 0..outputs {
+                                let expr = SymbolicExpr::parametric(
+                                    i as i32,
+                                    net_change as i32,
+                                    loop_depth - 1,
+                                );
+                                self.abstract_state.push(expr);
+                            }
+
+                            // Exit loop context
+                            self.abstract_state.exit_loop();
                         } else {
-                            // Unknown iteration count
+                            // Unknown iteration count - mark as unknown
                             self.unknown_effect = true;
                         }
                     }
@@ -1050,8 +1068,39 @@ impl<'a> Visit for SignatureAnalyzer<'a> {
                     // For inputs: first iteration needs body_in inputs
                     // Subsequent iterations use previous outputs
                     let outputs = (result.inputs as isize + total_net).max(0) as usize;
-                    self.pop_n(result.inputs);
-                    self.push_n(outputs, SymbolicExpr::Top);
+
+                    if net_per_iter == 0 {
+                        // Zero net effect - simple case, no parametric needed
+                        self.apply_pop_push(result.inputs, result.outputs);
+                    } else {
+                        // Non-zero net effect - use parametric expressions to preserve
+                        // input-output relationships through the loop
+                        //
+                        // Enter loop context to track this loop's effect on expressions
+                        let loop_depth = self.abstract_state.enter_loop(net_per_iter as i32);
+
+                        // Lift existing expressions to parametric form
+                        self.abstract_state.lift_for_current_loop(net_per_iter as i32);
+
+                        // Pop consumed inputs
+                        self.pop_n(result.inputs);
+
+                        // Push parametric outputs that describe the relationship
+                        // to inputs after all iterations complete
+                        for i in 0..outputs {
+                            // Create parametric expression based on output position
+                            // The expression describes which input ends up at this position
+                            let expr = SymbolicExpr::parametric(
+                                i as i32,
+                                net_per_iter as i32,
+                                loop_depth - 1,
+                            );
+                            self.abstract_state.push(expr);
+                        }
+
+                        // Exit loop context
+                        self.abstract_state.exit_loop();
+                    }
                 } else {
                     self.unknown_effect = true;
                 }

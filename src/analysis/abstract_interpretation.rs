@@ -38,6 +38,50 @@ use super::stack_ops::StackLike;
 use crate::symbol_resolution::SymbolResolver;
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Loop Support Types
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A single loop term in a parametric expression.
+///
+/// Represents `stride * counter` where counter is identified by loop_depth.
+/// Example: For `a_(5-4*i-j)`, we have two terms:
+/// - LoopTerm { stride: -4, loop_depth: 0 } for `-4*i`
+/// - LoopTerm { stride: -1, loop_depth: 1 } for `-j`
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LoopTerm {
+    /// Coefficient of the loop counter (negative for decrementing access)
+    pub stride: i32,
+    /// Which loop counter (0 = outermost, 1 = next inner, etc.)
+    pub loop_depth: usize,
+}
+
+impl LoopTerm {
+    /// Create a new loop term.
+    pub fn new(stride: i32, loop_depth: usize) -> Self {
+        Self { stride, loop_depth }
+    }
+}
+
+/// Information about an active loop during abstract interpretation.
+#[derive(Clone, Debug)]
+pub struct LoopInfo {
+    /// Net stack effect per iteration (negative = consuming)
+    pub net_effect: i32,
+    /// Stack depth when the loop was entered
+    pub entry_depth: usize,
+}
+
+impl LoopInfo {
+    /// Create loop info for a loop with the given net effect.
+    pub fn new(net_effect: i32, entry_depth: usize) -> Self {
+        Self {
+            net_effect,
+            entry_depth,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Abstract Domain: Symbolic Stack Values
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -50,15 +94,18 @@ pub enum SymbolicExpr {
     /// An input parameter at a fixed position: `a_0`, `a_1`, etc.
     Input(usize),
 
-    /// An input at a position that depends on a loop counter.
-    /// Represents `a_(base + counter * stride)`.
+    /// An input at a position that depends on one or more loop counters.
+    /// Represents `a_(base + sum(stride_i * counter_i))`.
+    ///
+    /// # Examples
+    /// - Single loop: `a_(3-i)` → base=3, loop_terms=[{stride:-1, loop_depth:0}]
+    /// - Nested loops: `a_(5-4*i-j)` → base=5, loop_terms=[{-4,0}, {-1,1}]
     ParametricInput {
-        /// Base input index
+        /// Base input index (constant part)
         base: i32,
-        /// Coefficient of the loop counter
-        stride: i32,
-        /// Which loop counter (0 = innermost, 1 = next outer, etc.)
-        loop_depth: usize,
+        /// Loop terms - each represents dependency on one loop counter.
+        /// Empty vec is invalid; use Input(n) instead.
+        loop_terms: Vec<LoopTerm>,
     },
 
     /// A constant literal value.
@@ -122,13 +169,33 @@ impl SymbolicExpr {
         SymbolicExpr::Input(pos)
     }
 
-    /// Create a parametric input expression.
+    /// Create a parametric input expression with a single loop term.
+    ///
+    /// This is the backward-compatible constructor for single-loop cases.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let expr = SymbolicExpr::parametric(3, -1, 0);  // a_(3-i)
+    /// ```
     pub fn parametric(base: i32, stride: i32, loop_depth: usize) -> Self {
         SymbolicExpr::ParametricInput {
             base,
-            stride,
-            loop_depth,
+            loop_terms: vec![LoopTerm::new(stride, loop_depth)],
         }
+    }
+
+    /// Create a parametric input expression with multiple loop terms.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let expr = SymbolicExpr::parametric_multi(5, vec![
+    ///     LoopTerm::new(-4, 0),  // outer loop: -4*i
+    ///     LoopTerm::new(-1, 1),  // inner loop: -j
+    /// ]);  // Represents a_(5-4*i-j)
+    /// ```
+    pub fn parametric_multi(base: i32, loop_terms: Vec<LoopTerm>) -> Self {
+        debug_assert!(!loop_terms.is_empty(), "Use Input for non-parametric");
+        SymbolicExpr::ParametricInput { base, loop_terms }
     }
 
     /// Create a constant expression.
@@ -158,40 +225,89 @@ impl SymbolicExpr {
         }
     }
 
-    /// Check if this is a parametric input reference.
+    /// Extract single-term parametric components (backward compatibility).
+    ///
+    /// Returns `Some((base, stride, loop_depth))` only for single-term cases.
+    /// Returns `None` for multi-term parametric inputs or non-parametric expressions.
     pub fn as_parametric(&self) -> Option<(i32, i32, usize)> {
         match self {
-            SymbolicExpr::ParametricInput {
-                base,
-                stride,
-                loop_depth,
-            } => Some((*base, *stride, *loop_depth)),
+            SymbolicExpr::ParametricInput { base, loop_terms } if loop_terms.len() == 1 => {
+                let term = &loop_terms[0];
+                Some((*base, term.stride, term.loop_depth))
+            }
             _ => None,
+        }
+    }
+
+    /// Extract all parametric components.
+    ///
+    /// Returns `Some((base, &loop_terms))` for any parametric input.
+    pub fn as_parametric_multi(&self) -> Option<(i32, &[LoopTerm])> {
+        match self {
+            SymbolicExpr::ParametricInput { base, loop_terms } => Some((*base, loop_terms)),
+            _ => None,
+        }
+    }
+
+    /// Add a loop term to this expression.
+    ///
+    /// Used when entering a loop to lift expressions to parametric form.
+    /// Recursively transforms nested expressions (BinaryOp, UnaryOp).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let input = SymbolicExpr::Input(3);
+    /// let parametric = input.add_loop_term(-1, 0);  // a_(3-i)
+    /// let nested = parametric.add_loop_term(-1, 1);  // a_(3-i-j)
+    /// ```
+    pub fn add_loop_term(&self, stride: i32, loop_depth: usize) -> Self {
+        match self {
+            // Input(n) → ParametricInput with one term
+            SymbolicExpr::Input(n) => SymbolicExpr::ParametricInput {
+                base: *n as i32,
+                loop_terms: vec![LoopTerm::new(stride, loop_depth)],
+            },
+
+            // ParametricInput → add another term
+            SymbolicExpr::ParametricInput { base, loop_terms } => {
+                let mut new_terms = loop_terms.clone();
+                new_terms.push(LoopTerm::new(stride, loop_depth));
+                SymbolicExpr::ParametricInput {
+                    base: *base,
+                    loop_terms: new_terms,
+                }
+            }
+
+            // BinaryOp → recursively transform operands
+            SymbolicExpr::BinaryOp { op, left, right } => SymbolicExpr::BinaryOp {
+                op: *op,
+                left: Box::new(left.add_loop_term(stride, loop_depth)),
+                right: Box::new(right.add_loop_term(stride, loop_depth)),
+            },
+
+            // UnaryOp → recursively transform operand
+            SymbolicExpr::UnaryOp { op, operand } => SymbolicExpr::UnaryOp {
+                op: *op,
+                operand: Box::new(operand.add_loop_term(stride, loop_depth)),
+            },
+
+            // MemoryLoad → recursively transform address
+            SymbolicExpr::MemoryLoad { address } => SymbolicExpr::MemoryLoad {
+                address: Box::new(address.add_loop_term(stride, loop_depth)),
+            },
+
+            // Constants, Advice, Top pass through unchanged
+            _ => self.clone(),
         }
     }
 
     /// Lift a concrete input to parametric form for loop analysis.
     ///
-    /// `a_n` becomes `a_(n + i * stride)` where `stride` is the net effect.
+    /// `a_n` becomes `a_(n + i * stride)` where `stride` is the negated net effect.
+    /// This is a convenience method that calls `add_loop_term` with negated net effect.
+    /// The negation accounts for the stack "sliding" as items are consumed.
     pub fn lift_to_parametric(&self, net_effect: i32, loop_depth: usize) -> Self {
-        match self {
-            SymbolicExpr::Input(n) => SymbolicExpr::ParametricInput {
-                base: *n as i32,
-                stride: -net_effect, // Negative because consuming moves us forward
-                loop_depth,
-            },
-            SymbolicExpr::BinaryOp { op, left, right } => SymbolicExpr::BinaryOp {
-                op: *op,
-                left: Box::new(left.lift_to_parametric(net_effect, loop_depth)),
-                right: Box::new(right.lift_to_parametric(net_effect, loop_depth)),
-            },
-            SymbolicExpr::UnaryOp { op, operand } => SymbolicExpr::UnaryOp {
-                op: *op,
-                operand: Box::new(operand.lift_to_parametric(net_effect, loop_depth)),
-            },
-            // Already parametric or other forms pass through
-            _ => self.clone(),
-        }
+        self.add_loop_term(-net_effect, loop_depth)
     }
 
     /// True lattice join (least upper bound).
@@ -211,19 +327,20 @@ impl SymbolicExpr {
             // Same constants are equal (handled above), different constants -> Top
             (SymbolicExpr::Constant(_), SymbolicExpr::Constant(_)) => SymbolicExpr::Top,
 
+            // Same inputs
+            (SymbolicExpr::Input(a), SymbolicExpr::Input(b)) if a == b => self.clone(),
+
             // Parametric inputs can be joined if they have identical structure
             (
                 SymbolicExpr::ParametricInput {
                     base: b1,
-                    stride: s1,
-                    loop_depth: d1,
+                    loop_terms: t1,
                 },
                 SymbolicExpr::ParametricInput {
                     base: b2,
-                    stride: s2,
-                    loop_depth: d2,
+                    loop_terms: t2,
                 },
-            ) if d1 == d2 && s1 == s2 && b1 == b2 => self.clone(),
+            ) if b1 == b2 && t1 == t2 => self.clone(),
 
             // Binary ops with same structure can join recursively
             (
@@ -274,8 +391,28 @@ impl SymbolicExpr {
                 let diff = (*b as i32) - (*a as i32);
                 SymbolicExpr::ParametricInput {
                     base: *a as i32,
-                    stride: diff,
-                    loop_depth,
+                    loop_terms: vec![LoopTerm::new(diff, loop_depth)],
+                }
+            }
+
+            // Parametric with same structure but shifted base
+            (
+                SymbolicExpr::ParametricInput {
+                    base: b1,
+                    loop_terms: t1,
+                },
+                SymbolicExpr::ParametricInput {
+                    base: b2,
+                    loop_terms: t2,
+                },
+            ) if t1 == t2 => {
+                let stride = b2 - b1;
+                // Add another loop term for the new loop level
+                let mut new_terms = t1.clone();
+                new_terms.push(LoopTerm::new(stride, loop_depth));
+                SymbolicExpr::ParametricInput {
+                    base: *b1,
+                    loop_terms: new_terms,
                 }
             }
 
@@ -307,34 +444,54 @@ impl SymbolicExpr {
     }
 
     /// Format as a human-readable string for pseudocode generation.
+    ///
+    /// For single-term parametric expressions, uses the provided counter_name.
+    /// For multi-term parametric expressions, uses default counter names (i, j, k, ...).
+    ///
+    /// # Simplifications
+    /// - `a_(i)` → `a_i` (base=0, stride=1)
+    /// - `a_(3+i)` instead of `a_(3+1*i)` (stride=1 omits coefficient)
+    /// - `a_(3*i)` instead of `a_(0+3*i)` (base=0 is omitted)
     pub fn to_pseudocode(&self, counter_name: &str) -> String {
         match self {
             SymbolicExpr::Input(n) => format!("a_{}", n),
-            SymbolicExpr::ParametricInput {
-                base,
-                stride,
-                loop_depth: _,
-            } => {
-                if *stride == 0 {
-                    format!("a_{}", base)
-                } else if *base == 0 {
-                    if *stride == 1 {
-                        format!("a_{}", counter_name)
-                    } else if *stride == -1 {
-                        format!("a_(-{})", counter_name)
-                    } else if *stride > 0 {
-                        format!("a_({}*{})", counter_name, stride)
+            SymbolicExpr::ParametricInput { base, loop_terms } => {
+                if loop_terms.is_empty() {
+                    return format!("a_{}", base);
+                }
+
+                // For single-term, use the provided counter_name
+                if loop_terms.len() == 1 {
+                    let stride = loop_terms[0].stride;
+                    if stride == 0 {
+                        format!("a_{}", base)
+                    } else if *base == 0 {
+                        // Simplify: a_(i) → a_i for stride=1
+                        if stride == 1 {
+                            format!("a_{}", counter_name)
+                        } else if stride == -1 {
+                            format!("a_(-{})", counter_name)
+                        } else if stride > 0 {
+                            // Coefficient first: a_(3*i) not a_(i*3)
+                            format!("a_({}*{})", stride, counter_name)
+                        } else {
+                            format!("a_(-{}*{})", -stride, counter_name)
+                        }
+                    } else if stride == 1 {
+                        // Simplify: a_(3+i) not a_(3+1*i)
+                        format!("a_({}+{})", base, counter_name)
+                    } else if stride == -1 {
+                        // Simplify: a_(3-i) not a_(3-1*i)
+                        format!("a_({}-{})", base, counter_name)
+                    } else if stride > 0 {
+                        format!("a_({}+{}*{})", base, stride, counter_name)
                     } else {
-                        format!("a_(-{}*{})", counter_name, -stride)
+                        format!("a_({}-{}*{})", base, -stride, counter_name)
                     }
-                } else if *stride == 1 {
-                    format!("a_({}+{})", base, counter_name)
-                } else if *stride == -1 {
-                    format!("a_({}-{})", base, counter_name)
-                } else if *stride > 0 {
-                    format!("a_({}+{}*{})", base, counter_name, stride)
                 } else {
-                    format!("a_({}-{}*{})", base, counter_name, -stride)
+                    // Multi-term: use default counter names
+                    let counter_names: Vec<&str> = vec!["i", "j", "k", "l", "m", "n"];
+                    self.to_pseudocode_multi(&counter_names)
                 }
             }
             SymbolicExpr::Constant(v) => format!("{}", v),
@@ -373,6 +530,83 @@ impl SymbolicExpr {
             SymbolicExpr::Top => "?".to_string(),
         }
     }
+
+    /// Format as pseudocode with multiple counter names.
+    ///
+    /// # Arguments
+    /// * `counter_names` - Counter names indexed by loop_depth (0 = outermost)
+    ///
+    /// # Simplifications
+    /// - `a_(i)` → `a_i` (single term, base=0, stride=1)
+    /// - `a_(3+i)` instead of `a_(3+1*i)` (stride=1 omits coefficient)
+    /// - `a_(3*i)` instead of `a_(0+3*i)` (base=0 is omitted)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let expr = SymbolicExpr::parametric_multi(5, vec![
+    ///     LoopTerm::new(-4, 0),
+    ///     LoopTerm::new(-1, 1),
+    /// ]);
+    /// assert_eq!(expr.to_pseudocode_multi(&["i", "j"]), "a_(5-4*i-j)");
+    /// ```
+    pub fn to_pseudocode_multi(&self, counter_names: &[&str]) -> String {
+        match self {
+            SymbolicExpr::ParametricInput { base, loop_terms } => {
+                if loop_terms.is_empty() {
+                    return format!("a_{}", base);
+                }
+
+                // Special case: single term with base=0 and stride=1 → a_i
+                if loop_terms.len() == 1 && *base == 0 && loop_terms[0].stride == 1 {
+                    let counter = counter_names
+                        .get(loop_terms[0].loop_depth)
+                        .copied()
+                        .unwrap_or("?");
+                    return format!("a_{}", counter);
+                }
+
+                let mut parts = Vec::new();
+                if *base != 0 {
+                    parts.push(format!("{}", base));
+                }
+
+                for term in loop_terms {
+                    let counter = counter_names
+                        .get(term.loop_depth)
+                        .copied()
+                        .unwrap_or("?");
+                    parts.push(format_stride_term(term.stride, counter));
+                }
+
+                let expr = parts.join("");
+                let expr = expr.trim_start_matches('+');
+                format!("a_({})", expr)
+            }
+
+            // For other types, delegate to single-counter version
+            _ => self.to_pseudocode(counter_names.first().copied().unwrap_or("i")),
+        }
+    }
+}
+
+/// Format a stride term for display.
+///
+/// Simplifications applied:
+/// - stride=1 → "+i" (no coefficient)
+/// - stride=-1 → "-i" (no coefficient)
+///
+/// Examples:
+/// - stride=1, counter="i" → "+i"
+/// - stride=-1, counter="j" → "-j"
+/// - stride=4, counter="k" → "+4*k"
+/// - stride=-4, counter="i" → "-4*i"
+fn format_stride_term(stride: i32, counter: &str) -> String {
+    match stride {
+        1 => format!("+{}", counter),
+        -1 => format!("-{}", counter),
+        s if s > 0 => format!("+{}*{}", s, counter),
+        s => format!("{}*{}", s, counter),
+    }
 }
 
 impl fmt::Display for SymbolicExpr {
@@ -397,8 +631,9 @@ pub struct AbstractState {
     /// Number of inputs that have been discovered.
     discovered_inputs: usize,
 
-    /// Current loop nesting depth (for parametric expressions).
-    loop_depth: usize,
+    /// Stack of active loops (index 0 = outermost).
+    /// Replaces the old `loop_depth: usize` field.
+    loop_stack: Vec<LoopInfo>,
 
     /// Whether we've encountered an operation that makes tracking impossible.
     tracking_failed: bool,
@@ -419,7 +654,7 @@ impl AbstractState {
             stack,
             next_temp_id: 0,
             discovered_inputs: input_count,
-            loop_depth: 0,
+            loop_stack: Vec::new(),
             tracking_failed: false,
             failure_reason: None,
         }
@@ -431,7 +666,7 @@ impl AbstractState {
             stack: Vec::new(),
             next_temp_id: 0,
             discovered_inputs: 0,
-            loop_depth: 0,
+            loop_stack: Vec::new(),
             tracking_failed: false,
             failure_reason: None,
         }
@@ -466,6 +701,84 @@ impl AbstractState {
         self.failure_reason = Some(reason.to_string());
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Loop Context Methods
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Enter a new loop context.
+    ///
+    /// Call this when encountering a loop (repeat, while.true) with
+    /// the per-iteration net stack effect.
+    ///
+    /// # Arguments
+    /// * `net_effect` - Net stack change per iteration (negative = consuming)
+    ///
+    /// # Returns
+    /// The loop depth after entering (1 for first loop, 2 for nested, etc.)
+    pub fn enter_loop(&mut self, net_effect: i32) -> usize {
+        let entry_depth = self.stack.len();
+        self.loop_stack.push(LoopInfo::new(net_effect, entry_depth));
+        self.loop_stack.len()
+    }
+
+    /// Exit the current (innermost) loop context.
+    ///
+    /// # Returns
+    /// The `LoopInfo` for the exited loop, or `None` if not in a loop.
+    pub fn exit_loop(&mut self) -> Option<LoopInfo> {
+        self.loop_stack.pop()
+    }
+
+    /// Get the current loop nesting depth.
+    ///
+    /// Returns 0 when not inside any loop.
+    pub fn current_loop_depth(&self) -> usize {
+        self.loop_stack.len()
+    }
+
+    /// Check if currently inside a loop.
+    pub fn in_loop(&self) -> bool {
+        !self.loop_stack.is_empty()
+    }
+
+    /// Get information about the current (innermost) loop.
+    pub fn current_loop(&self) -> Option<&LoopInfo> {
+        self.loop_stack.last()
+    }
+
+    /// Get information about a loop at a specific depth.
+    ///
+    /// # Arguments
+    /// * `depth` - Loop depth (0 = outermost, 1 = next inner, etc.)
+    pub fn loop_at_depth(&self, depth: usize) -> Option<&LoopInfo> {
+        self.loop_stack.get(depth)
+    }
+
+    /// Lift all stack expressions to parametric form for the current loop.
+    ///
+    /// Call this after entering a loop to transform all existing stack
+    /// expressions to account for the loop's effect.
+    ///
+    /// # Arguments
+    /// * `net_effect` - Net stack change per iteration
+    pub fn lift_for_current_loop(&mut self, net_effect: i32) {
+        let depth = self.current_loop_depth().saturating_sub(1);
+        for expr in &mut self.stack {
+            *expr = expr.add_loop_term(-net_effect, depth);
+        }
+    }
+
+    /// Lift all stack expressions to parametric form for a specific loop depth.
+    pub fn lift_for_loop(&mut self, net_effect: i32, loop_depth: usize) {
+        for expr in &mut self.stack {
+            *expr = expr.add_loop_term(-net_effect, loop_depth);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // State Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
     /// Join two abstract states (least upper bound).
     ///
     /// Used at control flow merge points.
@@ -494,7 +807,7 @@ impl AbstractState {
             stack: joined_stack,
             next_temp_id: self.next_temp_id.max(other.next_temp_id),
             discovered_inputs: self.discovered_inputs.max(other.discovered_inputs),
-            loop_depth: self.loop_depth,
+            loop_stack: self.loop_stack.clone(),
             tracking_failed: false,
             failure_reason: None,
         }
@@ -517,8 +830,9 @@ impl AbstractState {
     ///
     /// Used when entering a loop to make expressions depend on the loop counter.
     pub fn lift_to_parametric(&mut self, net_effect: i32) {
+        let loop_depth = self.current_loop_depth();
         for expr in &mut self.stack {
-            *expr = expr.lift_to_parametric(net_effect, self.loop_depth);
+            *expr = expr.lift_to_parametric(net_effect, loop_depth);
         }
     }
 
@@ -1595,21 +1909,21 @@ mod tests {
 
     #[test]
     fn test_parametric_expr_display() {
-        // a_i
+        // Simplified: a_(i) → a_i for base=0, stride=1
         let expr = SymbolicExpr::parametric(0, 1, 0);
         assert_eq!(expr.to_pseudocode("i"), "a_i");
 
-        // a_(5+i)
+        // a_(5+i) - stride=1 omits coefficient
         let expr = SymbolicExpr::parametric(5, 1, 0);
         assert_eq!(expr.to_pseudocode("i"), "a_(5+i)");
 
-        // a_(i*2)
+        // a_(2*i) - coefficient comes first
         let expr = SymbolicExpr::parametric(0, 2, 0);
-        assert_eq!(expr.to_pseudocode("i"), "a_(i*2)");
+        assert_eq!(expr.to_pseudocode("i"), "a_(2*i)");
 
-        // a_(3+i*2)
+        // a_(3+2*i) - coefficient comes first
         let expr = SymbolicExpr::parametric(3, 2, 0);
-        assert_eq!(expr.to_pseudocode("i"), "a_(3+i*2)");
+        assert_eq!(expr.to_pseudocode("i"), "a_(3+2*i)");
     }
 
     #[test]
@@ -1667,18 +1981,11 @@ mod tests {
         let lifted = expr.lift_to_parametric(-1, 0);
 
         // a_3 with net_effect=-1 should become a_(3+i)
-        match lifted {
-            SymbolicExpr::ParametricInput {
-                base,
-                stride,
-                loop_depth,
-            } => {
-                assert_eq!(base, 3);
-                assert_eq!(stride, 1); // -(-1) = 1
-                assert_eq!(loop_depth, 0);
-            }
-            _ => panic!("Expected ParametricInput"),
-        }
+        // Use as_parametric() to extract single-term components
+        let (base, stride, loop_depth) = lifted.as_parametric().expect("Expected single-term ParametricInput");
+        assert_eq!(base, 3);
+        assert_eq!(stride, 1); // -(-1) = 1
+        assert_eq!(loop_depth, 0);
     }
 
     #[test]
@@ -1702,12 +2009,159 @@ mod tests {
 
         // Pattern inference can create a parametric pattern
         let pattern = a.infer_pattern(&b, 0);
-        match pattern {
-            SymbolicExpr::ParametricInput { base, stride, .. } => {
-                assert_eq!(base, 0);
-                assert_eq!(stride, 1);
+        let (base, stride, _loop_depth) = pattern.as_parametric().expect("Expected single-term ParametricInput");
+        assert_eq!(base, 0);
+        assert_eq!(stride, 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // LoopTerm and multi-term parametric tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_loop_term_new() {
+        let term = LoopTerm::new(-4, 0);
+        assert_eq!(term.stride, -4);
+        assert_eq!(term.loop_depth, 0);
+    }
+
+    #[test]
+    fn test_parametric_single_term() {
+        let expr = SymbolicExpr::parametric(3, -1, 0);
+        assert_eq!(expr.as_parametric(), Some((3, -1, 0)));
+    }
+
+    #[test]
+    fn test_parametric_multi_term() {
+        let expr = SymbolicExpr::parametric_multi(5, vec![
+            LoopTerm::new(-4, 0),
+            LoopTerm::new(-1, 1),
+        ]);
+
+        // Single-term accessor returns None for multi-term
+        assert_eq!(expr.as_parametric(), None);
+
+        // Multi-term accessor works
+        let (base, terms) = expr.as_parametric_multi().unwrap();
+        assert_eq!(base, 5);
+        assert_eq!(terms.len(), 2);
+        assert_eq!(terms[0], LoopTerm::new(-4, 0));
+        assert_eq!(terms[1], LoopTerm::new(-1, 1));
+    }
+
+    #[test]
+    fn test_add_loop_term_from_input() {
+        let input = SymbolicExpr::Input(3);
+        let parametric = input.add_loop_term(-1, 0);
+
+        assert_eq!(parametric.as_parametric(), Some((3, -1, 0)));
+    }
+
+    #[test]
+    fn test_add_loop_term_nested() {
+        let input = SymbolicExpr::Input(5);
+        let outer = input.add_loop_term(-4, 0);
+        let nested = outer.add_loop_term(-1, 1);
+
+        let (base, terms) = nested.as_parametric_multi().unwrap();
+        assert_eq!(base, 5);
+        assert_eq!(terms.len(), 2);
+    }
+
+    #[test]
+    fn test_add_loop_term_binary_op() {
+        let left = SymbolicExpr::Input(0);
+        let right = SymbolicExpr::Input(1);
+        let expr = SymbolicExpr::BinaryOp {
+            op: BinaryOpKind::Add,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+
+        let lifted = expr.add_loop_term(-1, 0);
+
+        match lifted {
+            SymbolicExpr::BinaryOp { left, right, .. } => {
+                assert!(left.as_parametric().is_some());
+                assert!(right.as_parametric().is_some());
             }
-            _ => panic!("Expected ParametricInput, got {:?}", pattern),
+            _ => panic!("Expected BinaryOp"),
+        }
+    }
+
+    #[test]
+    fn test_to_pseudocode_multi_single_term() {
+        let expr = SymbolicExpr::parametric(3, -1, 0);
+        assert_eq!(expr.to_pseudocode_multi(&["i"]), "a_(3-i)");
+    }
+
+    #[test]
+    fn test_to_pseudocode_multi_nested() {
+        let expr = SymbolicExpr::parametric_multi(5, vec![
+            LoopTerm::new(-4, 0),
+            LoopTerm::new(-1, 1),
+        ]);
+        assert_eq!(expr.to_pseudocode_multi(&["i", "j"]), "a_(5-4*i-j)");
+    }
+
+    #[test]
+    fn test_to_pseudocode_multi_positive_stride() {
+        // Simplified: a_(i) → a_i for base=0, stride=1
+        let expr = SymbolicExpr::parametric(0, 1, 0);
+        assert_eq!(expr.to_pseudocode_multi(&["i"]), "a_i");
+
+        // For non-zero base with positive stride=1, we get a_(3+i)
+        let expr_with_base = SymbolicExpr::parametric(3, 1, 0);
+        assert_eq!(expr_with_base.to_pseudocode_multi(&["i"]), "a_(3+i)");
+
+        // For stride > 1, coefficient comes first: a_(3*i)
+        let expr_stride_3 = SymbolicExpr::parametric(0, 3, 0);
+        assert_eq!(expr_stride_3.to_pseudocode_multi(&["i"]), "a_(3*i)");
+
+        // For base and stride > 1: a_(5+3*i)
+        let expr_both = SymbolicExpr::parametric(5, 3, 0);
+        assert_eq!(expr_both.to_pseudocode_multi(&["i"]), "a_(5+3*i)");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // AbstractState loop context tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_abstract_state_enter_exit_loop() {
+        let mut state = AbstractState::new(4);
+
+        assert_eq!(state.current_loop_depth(), 0);
+        assert!(!state.in_loop());
+
+        let depth1 = state.enter_loop(-1);
+        assert_eq!(depth1, 1);
+        assert_eq!(state.current_loop_depth(), 1);
+        assert!(state.in_loop());
+
+        let depth2 = state.enter_loop(-1);
+        assert_eq!(depth2, 2);
+        assert_eq!(state.current_loop_depth(), 2);
+
+        let info = state.exit_loop().unwrap();
+        assert_eq!(info.net_effect, -1);
+        assert_eq!(state.current_loop_depth(), 1);
+
+        state.exit_loop();
+        assert_eq!(state.current_loop_depth(), 0);
+        assert!(!state.in_loop());
+    }
+
+    #[test]
+    fn test_abstract_state_lift_for_current_loop() {
+        let mut state = AbstractState::new(4);
+        state.enter_loop(-1);
+        state.lift_for_current_loop(-1);
+
+        // All inputs should now be parametric
+        for i in 0..4 {
+            let expr = state.peek(i).unwrap();
+            assert!(expr.as_parametric().is_some(), "Expected parametric at position {}", i);
         }
     }
 }
