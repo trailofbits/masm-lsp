@@ -402,7 +402,10 @@ async fn test_stdlib_file_with_decompilation(relative_path: &str) {
 
         // Request inlay hints for the entire document
         let range = Range {
-            start: Position { line: 0, character: 0 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
             end: Position {
                 line: line_count,
                 character: last_line_len,
@@ -464,7 +467,10 @@ async fn stdlib_decompile_all_files() {
             let last_line_len = content.lines().last().map(|l| l.len()).unwrap_or(0) as u32;
 
             let range = Range {
-                start: Position { line: 0, character: 0 },
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
                 end: Position {
                     line: line_count,
                     character: last_line_len,
@@ -496,7 +502,10 @@ async fn stdlib_decompile_all_files() {
         for f in &failed {
             eprintln!("  - {}", f);
         }
-        panic!("{} stdlib files timed out during decompilation", failed.len());
+        panic!(
+            "{} stdlib files timed out during decompilation",
+            failed.len()
+        );
     }
 }
 

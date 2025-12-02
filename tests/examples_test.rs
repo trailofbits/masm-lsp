@@ -75,7 +75,10 @@ async fn alias_fixture_resolves_aliased_symbol() {
 
     // Should resolve "plus" to its aliased target
     let result = harness.goto_definition_at(&uri, &content, "plus").await;
-    assert!(result.is_some(), "expected to resolve aliased symbol 'plus'");
+    assert!(
+        result.is_some(),
+        "expected to resolve aliased symbol 'plus'"
+    );
 }
 
 #[tokio::test]
@@ -132,10 +135,7 @@ async fn large_file_does_not_timeout() {
     // Generate a large file with many procedures
     let mut content = String::new();
     for i in 0..100 {
-        content.push_str(&format!(
-            "proc proc_{}\n    push.{}\nend\n\n",
-            i, i
-        ));
+        content.push_str(&format!("proc proc_{}\n    push.{}\nend\n\n", i, i));
     }
     content.push_str("begin\n");
     for i in 0..100 {

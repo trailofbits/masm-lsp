@@ -16,8 +16,7 @@ use miden_assembly_syntax::ast::{
 
 use super::stack_ops::StackLike;
 use super::types::Bounds;
-use super::utils::{felt_imm_to_u64, push_imm_to_u64, u8_imm_to_u64, u32_imm_to_u64};
-
+use super::utils::{felt_imm_to_u64, push_imm_to_u64, u32_imm_to_u64, u8_imm_to_u64};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Loop Bound Result
@@ -250,9 +249,11 @@ impl WhileLoopAnalyzer {
         }
 
         // Check for countdown with lower limit: counter > N pattern
-        if let (Some(initial), Some((_, decrement)), Some(lower)) =
-            (self.initial_counter, self.decrement_pattern, self.lower_limit)
-        {
+        if let (Some(initial), Some((_, decrement)), Some(lower)) = (
+            self.initial_counter,
+            self.decrement_pattern,
+            self.lower_limit,
+        ) {
             if decrement > 0 && initial > lower {
                 // Countdown until counter <= lower (exclusive) or counter < lower (inclusive)
                 let range = if self.limit_inclusive {
@@ -266,9 +267,11 @@ impl WhileLoopAnalyzer {
         }
 
         // Check for countup pattern: counter incremented, condition is counter < limit
-        if let (Some(initial), Some((_, increment)), Some(limit)) =
-            (self.initial_counter, self.increment_pattern, self.upper_limit)
-        {
+        if let (Some(initial), Some((_, increment)), Some(limit)) = (
+            self.initial_counter,
+            self.increment_pattern,
+            self.upper_limit,
+        ) {
             if increment > 0 && limit > initial {
                 // Countup loop: runs (limit - initial) / increment times (rounded up)
                 let range = if self.limit_inclusive {
@@ -725,7 +728,9 @@ end",
         let uri = Uri::from("test://test.masm");
         source_manager.load(SourceLanguage::Masm, uri.clone(), full_source);
 
-        let source_file = source_manager.get_by_uri(&uri).expect("Failed to load source");
+        let source_file = source_manager
+            .get_by_uri(&uri)
+            .expect("Failed to load source");
         let mut module_path = miden_assembly_syntax::ast::PathBuf::default();
         module_path.push("test");
         let opts = ParseOptions {

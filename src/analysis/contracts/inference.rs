@@ -27,7 +27,9 @@ use super::super::abstract_interpretation::{AbstractState, SymbolicExpr};
 use super::super::call_graph::{CallGraph, TopologicalNode};
 use super::super::stack_ops::StackLike;
 use super::store::ContractStore;
-use super::types::{InputKind, OutputKind, ProcContract, ProcSignature, StackEffect, ValidationBehavior};
+use super::types::{
+    InputKind, OutputKind, ProcContract, ProcSignature, StackEffect, ValidationBehavior,
+};
 use crate::analysis::stack_ops::static_effect;
 use crate::analysis::types::Bounds;
 use crate::analysis::utils::push_imm_to_u64;
@@ -70,7 +72,8 @@ pub fn infer_module_contracts_with_store(
     let mut proc_info: HashMap<SymbolPath, (Option<Range>, &Procedure)> = HashMap::new();
     for proc in module.procedures() {
         let path = SymbolPath::from_module_and_name(module, proc.name().as_str());
-        let definition_range = crate::diagnostics::span_to_range(source_manager, proc.name().span());
+        let definition_range =
+            crate::diagnostics::span_to_range(source_manager, proc.name().span());
         proc_info.insert(path, (definition_range, proc));
     }
 
@@ -279,7 +282,10 @@ impl<'a> SignatureAnalyzer<'a> {
 
     fn stack_effect(&self) -> StackEffect {
         // Calculate inputs from abstract state
-        let inputs = self.abstract_state.inputs_discovered().max(self.max_inputs_seen);
+        let inputs = self
+            .abstract_state
+            .inputs_discovered()
+            .max(self.max_inputs_seen);
 
         if self.unknown_effect {
             // Even when outputs are unknown, we still know the minimum inputs required
@@ -294,7 +300,10 @@ impl<'a> SignatureAnalyzer<'a> {
 
     /// Build the full procedure signature from collected usage information.
     fn build_signature(&self) -> Option<ProcSignature> {
-        let num_inputs = self.abstract_state.inputs_discovered().max(self.max_inputs_seen);
+        let num_inputs = self
+            .abstract_state
+            .inputs_discovered()
+            .max(self.max_inputs_seen);
 
         let num_outputs = if self.unknown_effect {
             0 // Unknown outputs
@@ -321,9 +330,7 @@ impl<'a> SignatureAnalyzer<'a> {
         for i in 0..num_outputs {
             if let Some(expr) = self.abstract_state.peek(i) {
                 sig.outputs[i] = match expr {
-                    SymbolicExpr::Input(pos) => {
-                        OutputKind::InputPassthrough { input_pos: *pos }
-                    }
+                    SymbolicExpr::Input(pos) => OutputKind::InputPassthrough { input_pos: *pos },
                     SymbolicExpr::MemoryLoad { address } => {
                         let from_input = expr_input_position(address);
                         OutputKind::MemoryRead { from_input }
@@ -465,7 +472,9 @@ impl<'a> SignatureAnalyzer<'a> {
             // mem_storew: [V0, V1, V2, V3, addr] -> addr at pos 0 (after 4 values)
             Instruction::MemStoreWBe | Instruction::MemStoreWLe => (0, true),
             // Immediate variants don't use stack address
-            Instruction::MemStoreImm(_) | Instruction::MemStoreWBeImm(_) | Instruction::MemStoreWLeImm(_) => {
+            Instruction::MemStoreImm(_)
+            | Instruction::MemStoreWBeImm(_)
+            | Instruction::MemStoreWLeImm(_) => {
                 return; // Address is immediate, not from input
             }
 
@@ -477,7 +486,9 @@ impl<'a> SignatureAnalyzer<'a> {
             // mem_loadw: [V0, V1, V2, V3, addr] -> addr at pos 0
             Instruction::MemLoadWBe | Instruction::MemLoadWLe => (0, false),
             // Immediate variants don't use stack address
-            Instruction::MemLoadImm(_) | Instruction::MemLoadWBeImm(_) | Instruction::MemLoadWLeImm(_) => {
+            Instruction::MemLoadImm(_)
+            | Instruction::MemLoadWBeImm(_)
+            | Instruction::MemLoadWLeImm(_) => {
                 return; // Address is immediate, not from input
             }
 
@@ -684,7 +695,9 @@ impl<'a> SignatureAnalyzer<'a> {
             // ─────────────────────────────────────────────────────────────────
             // Procedure calls
             // ─────────────────────────────────────────────────────────────────
-            Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
+            Instruction::Exec(target)
+            | Instruction::Call(target)
+            | Instruction::SysCall(target) => {
                 self.handle_procedure_call(target);
                 return;
             }
@@ -698,8 +711,12 @@ impl<'a> SignatureAnalyzer<'a> {
             // ─────────────────────────────────────────────────────────────────
             // STARK/complex operations - mark as unknown
             // ─────────────────────────────────────────────────────────────────
-            Instruction::FriExt2Fold4 | Instruction::HornerBase | Instruction::HornerExt |
-            Instruction::EvalCircuit | Instruction::LogPrecompile | Instruction::SysEvent(_) => {
+            Instruction::FriExt2Fold4
+            | Instruction::HornerBase
+            | Instruction::HornerExt
+            | Instruction::EvalCircuit
+            | Instruction::LogPrecompile
+            | Instruction::SysEvent(_) => {
                 self.unknown_effect = true;
                 return;
             }
@@ -709,7 +726,9 @@ impl<'a> SignatureAnalyzer<'a> {
             // ─────────────────────────────────────────────────────────────────
             Instruction::Push(imm) => {
                 let value = push_imm_to_u64(imm);
-                let expr = value.map(SymbolicExpr::Constant).unwrap_or(SymbolicExpr::Top);
+                let expr = value
+                    .map(SymbolicExpr::Constant)
+                    .unwrap_or(SymbolicExpr::Top);
                 self.abstract_state.push(expr);
                 let bounds = value.map(Bounds::Const).unwrap_or(Bounds::Field);
                 self.push_bounds(bounds);
@@ -803,48 +822,162 @@ impl<'a> SignatureAnalyzer<'a> {
             // ─────────────────────────────────────────────────────────────────
             // Dup operations - preserve symbolic expressions
             // ─────────────────────────────────────────────────────────────────
-            Instruction::Dup0 => { self.dup(0); return; }
-            Instruction::Dup1 => { self.dup(1); return; }
-            Instruction::Dup2 => { self.dup(2); return; }
-            Instruction::Dup3 => { self.dup(3); return; }
-            Instruction::Dup4 => { self.dup(4); return; }
-            Instruction::Dup5 => { self.dup(5); return; }
-            Instruction::Dup6 => { self.dup(6); return; }
-            Instruction::Dup7 => { self.dup(7); return; }
-            Instruction::Dup8 => { self.dup(8); return; }
-            Instruction::Dup9 => { self.dup(9); return; }
-            Instruction::Dup10 => { self.dup(10); return; }
-            Instruction::Dup11 => { self.dup(11); return; }
-            Instruction::Dup12 => { self.dup(12); return; }
-            Instruction::Dup13 => { self.dup(13); return; }
-            Instruction::Dup14 => { self.dup(14); return; }
-            Instruction::Dup15 => { self.dup(15); return; }
-            Instruction::DupW0 => { self.dupw(0); return; }
-            Instruction::DupW1 => { self.dupw(1); return; }
-            Instruction::DupW2 => { self.dupw(2); return; }
-            Instruction::DupW3 => { self.dupw(3); return; }
+            Instruction::Dup0 => {
+                self.dup(0);
+                return;
+            }
+            Instruction::Dup1 => {
+                self.dup(1);
+                return;
+            }
+            Instruction::Dup2 => {
+                self.dup(2);
+                return;
+            }
+            Instruction::Dup3 => {
+                self.dup(3);
+                return;
+            }
+            Instruction::Dup4 => {
+                self.dup(4);
+                return;
+            }
+            Instruction::Dup5 => {
+                self.dup(5);
+                return;
+            }
+            Instruction::Dup6 => {
+                self.dup(6);
+                return;
+            }
+            Instruction::Dup7 => {
+                self.dup(7);
+                return;
+            }
+            Instruction::Dup8 => {
+                self.dup(8);
+                return;
+            }
+            Instruction::Dup9 => {
+                self.dup(9);
+                return;
+            }
+            Instruction::Dup10 => {
+                self.dup(10);
+                return;
+            }
+            Instruction::Dup11 => {
+                self.dup(11);
+                return;
+            }
+            Instruction::Dup12 => {
+                self.dup(12);
+                return;
+            }
+            Instruction::Dup13 => {
+                self.dup(13);
+                return;
+            }
+            Instruction::Dup14 => {
+                self.dup(14);
+                return;
+            }
+            Instruction::Dup15 => {
+                self.dup(15);
+                return;
+            }
+            Instruction::DupW0 => {
+                self.dupw(0);
+                return;
+            }
+            Instruction::DupW1 => {
+                self.dupw(1);
+                return;
+            }
+            Instruction::DupW2 => {
+                self.dupw(2);
+                return;
+            }
+            Instruction::DupW3 => {
+                self.dupw(3);
+                return;
+            }
 
             // ─────────────────────────────────────────────────────────────────
             // Swap operations - preserve symbolic expressions through swap
             // ─────────────────────────────────────────────────────────────────
-            Instruction::Swap1 => { self.abstract_state.swap(0, 1); return; }
-            Instruction::Swap2 => { self.abstract_state.swap(0, 2); return; }
-            Instruction::Swap3 => { self.abstract_state.swap(0, 3); return; }
-            Instruction::Swap4 => { self.abstract_state.swap(0, 4); return; }
-            Instruction::Swap5 => { self.abstract_state.swap(0, 5); return; }
-            Instruction::Swap6 => { self.abstract_state.swap(0, 6); return; }
-            Instruction::Swap7 => { self.abstract_state.swap(0, 7); return; }
-            Instruction::Swap8 => { self.abstract_state.swap(0, 8); return; }
-            Instruction::Swap9 => { self.abstract_state.swap(0, 9); return; }
-            Instruction::Swap10 => { self.abstract_state.swap(0, 10); return; }
-            Instruction::Swap11 => { self.abstract_state.swap(0, 11); return; }
-            Instruction::Swap12 => { self.abstract_state.swap(0, 12); return; }
-            Instruction::Swap13 => { self.abstract_state.swap(0, 13); return; }
-            Instruction::Swap14 => { self.abstract_state.swap(0, 14); return; }
-            Instruction::Swap15 => { self.abstract_state.swap(0, 15); return; }
-            Instruction::SwapW1 => { self.swapw(1); return; }
-            Instruction::SwapW2 => { self.swapw(2); return; }
-            Instruction::SwapW3 => { self.swapw(3); return; }
+            Instruction::Swap1 => {
+                self.abstract_state.swap(0, 1);
+                return;
+            }
+            Instruction::Swap2 => {
+                self.abstract_state.swap(0, 2);
+                return;
+            }
+            Instruction::Swap3 => {
+                self.abstract_state.swap(0, 3);
+                return;
+            }
+            Instruction::Swap4 => {
+                self.abstract_state.swap(0, 4);
+                return;
+            }
+            Instruction::Swap5 => {
+                self.abstract_state.swap(0, 5);
+                return;
+            }
+            Instruction::Swap6 => {
+                self.abstract_state.swap(0, 6);
+                return;
+            }
+            Instruction::Swap7 => {
+                self.abstract_state.swap(0, 7);
+                return;
+            }
+            Instruction::Swap8 => {
+                self.abstract_state.swap(0, 8);
+                return;
+            }
+            Instruction::Swap9 => {
+                self.abstract_state.swap(0, 9);
+                return;
+            }
+            Instruction::Swap10 => {
+                self.abstract_state.swap(0, 10);
+                return;
+            }
+            Instruction::Swap11 => {
+                self.abstract_state.swap(0, 11);
+                return;
+            }
+            Instruction::Swap12 => {
+                self.abstract_state.swap(0, 12);
+                return;
+            }
+            Instruction::Swap13 => {
+                self.abstract_state.swap(0, 13);
+                return;
+            }
+            Instruction::Swap14 => {
+                self.abstract_state.swap(0, 14);
+                return;
+            }
+            Instruction::Swap15 => {
+                self.abstract_state.swap(0, 15);
+                return;
+            }
+            Instruction::SwapW1 => {
+                self.swapw(1);
+                return;
+            }
+            Instruction::SwapW2 => {
+                self.swapw(2);
+                return;
+            }
+            Instruction::SwapW3 => {
+                self.swapw(3);
+                return;
+            }
             Instruction::SwapDw => {
                 // Swap double words [0..8] with [8..16]
                 self.abstract_state.ensure_depth(16);
@@ -857,39 +990,135 @@ impl<'a> SignatureAnalyzer<'a> {
             // ─────────────────────────────────────────────────────────────────
             // Move operations - preserve symbolic expressions
             // ─────────────────────────────────────────────────────────────────
-            Instruction::MovUp2 => { self.abstract_state.movup(2); return; }
-            Instruction::MovUp3 => { self.abstract_state.movup(3); return; }
-            Instruction::MovUp4 => { self.abstract_state.movup(4); return; }
-            Instruction::MovUp5 => { self.abstract_state.movup(5); return; }
-            Instruction::MovUp6 => { self.abstract_state.movup(6); return; }
-            Instruction::MovUp7 => { self.abstract_state.movup(7); return; }
-            Instruction::MovUp8 => { self.abstract_state.movup(8); return; }
-            Instruction::MovUp9 => { self.abstract_state.movup(9); return; }
-            Instruction::MovUp10 => { self.abstract_state.movup(10); return; }
-            Instruction::MovUp11 => { self.abstract_state.movup(11); return; }
-            Instruction::MovUp12 => { self.abstract_state.movup(12); return; }
-            Instruction::MovUp13 => { self.abstract_state.movup(13); return; }
-            Instruction::MovUp14 => { self.abstract_state.movup(14); return; }
-            Instruction::MovUp15 => { self.abstract_state.movup(15); return; }
-            Instruction::MovUpW2 => { self.movupw(2); return; }
-            Instruction::MovUpW3 => { self.movupw(3); return; }
+            Instruction::MovUp2 => {
+                self.abstract_state.movup(2);
+                return;
+            }
+            Instruction::MovUp3 => {
+                self.abstract_state.movup(3);
+                return;
+            }
+            Instruction::MovUp4 => {
+                self.abstract_state.movup(4);
+                return;
+            }
+            Instruction::MovUp5 => {
+                self.abstract_state.movup(5);
+                return;
+            }
+            Instruction::MovUp6 => {
+                self.abstract_state.movup(6);
+                return;
+            }
+            Instruction::MovUp7 => {
+                self.abstract_state.movup(7);
+                return;
+            }
+            Instruction::MovUp8 => {
+                self.abstract_state.movup(8);
+                return;
+            }
+            Instruction::MovUp9 => {
+                self.abstract_state.movup(9);
+                return;
+            }
+            Instruction::MovUp10 => {
+                self.abstract_state.movup(10);
+                return;
+            }
+            Instruction::MovUp11 => {
+                self.abstract_state.movup(11);
+                return;
+            }
+            Instruction::MovUp12 => {
+                self.abstract_state.movup(12);
+                return;
+            }
+            Instruction::MovUp13 => {
+                self.abstract_state.movup(13);
+                return;
+            }
+            Instruction::MovUp14 => {
+                self.abstract_state.movup(14);
+                return;
+            }
+            Instruction::MovUp15 => {
+                self.abstract_state.movup(15);
+                return;
+            }
+            Instruction::MovUpW2 => {
+                self.movupw(2);
+                return;
+            }
+            Instruction::MovUpW3 => {
+                self.movupw(3);
+                return;
+            }
 
-            Instruction::MovDn2 => { self.abstract_state.movdn(2); return; }
-            Instruction::MovDn3 => { self.abstract_state.movdn(3); return; }
-            Instruction::MovDn4 => { self.abstract_state.movdn(4); return; }
-            Instruction::MovDn5 => { self.abstract_state.movdn(5); return; }
-            Instruction::MovDn6 => { self.abstract_state.movdn(6); return; }
-            Instruction::MovDn7 => { self.abstract_state.movdn(7); return; }
-            Instruction::MovDn8 => { self.abstract_state.movdn(8); return; }
-            Instruction::MovDn9 => { self.abstract_state.movdn(9); return; }
-            Instruction::MovDn10 => { self.abstract_state.movdn(10); return; }
-            Instruction::MovDn11 => { self.abstract_state.movdn(11); return; }
-            Instruction::MovDn12 => { self.abstract_state.movdn(12); return; }
-            Instruction::MovDn13 => { self.abstract_state.movdn(13); return; }
-            Instruction::MovDn14 => { self.abstract_state.movdn(14); return; }
-            Instruction::MovDn15 => { self.abstract_state.movdn(15); return; }
-            Instruction::MovDnW2 => { self.movdnw(2); return; }
-            Instruction::MovDnW3 => { self.movdnw(3); return; }
+            Instruction::MovDn2 => {
+                self.abstract_state.movdn(2);
+                return;
+            }
+            Instruction::MovDn3 => {
+                self.abstract_state.movdn(3);
+                return;
+            }
+            Instruction::MovDn4 => {
+                self.abstract_state.movdn(4);
+                return;
+            }
+            Instruction::MovDn5 => {
+                self.abstract_state.movdn(5);
+                return;
+            }
+            Instruction::MovDn6 => {
+                self.abstract_state.movdn(6);
+                return;
+            }
+            Instruction::MovDn7 => {
+                self.abstract_state.movdn(7);
+                return;
+            }
+            Instruction::MovDn8 => {
+                self.abstract_state.movdn(8);
+                return;
+            }
+            Instruction::MovDn9 => {
+                self.abstract_state.movdn(9);
+                return;
+            }
+            Instruction::MovDn10 => {
+                self.abstract_state.movdn(10);
+                return;
+            }
+            Instruction::MovDn11 => {
+                self.abstract_state.movdn(11);
+                return;
+            }
+            Instruction::MovDn12 => {
+                self.abstract_state.movdn(12);
+                return;
+            }
+            Instruction::MovDn13 => {
+                self.abstract_state.movdn(13);
+                return;
+            }
+            Instruction::MovDn14 => {
+                self.abstract_state.movdn(14);
+                return;
+            }
+            Instruction::MovDn15 => {
+                self.abstract_state.movdn(15);
+                return;
+            }
+            Instruction::MovDnW2 => {
+                self.movdnw(2);
+                return;
+            }
+            Instruction::MovDnW3 => {
+                self.movdnw(3);
+                return;
+            }
 
             // ─────────────────────────────────────────────────────────────────
             // Reverse operations - these rearrange in place but need inputs
@@ -937,7 +1166,6 @@ impl<'a> SignatureAnalyzer<'a> {
             self.apply_pop_push(effect.pops as usize, effect.pushes as usize);
         }
     }
-
 }
 
 impl<'a> Visit for SignatureAnalyzer<'a> {
@@ -1080,7 +1308,8 @@ impl<'a> Visit for SignatureAnalyzer<'a> {
                         let loop_depth = self.abstract_state.enter_loop(net_per_iter as i32);
 
                         // Lift existing expressions to parametric form
-                        self.abstract_state.lift_for_current_loop(net_per_iter as i32);
+                        self.abstract_state
+                            .lift_for_current_loop(net_per_iter as i32);
 
                         // Pop consumed inputs
                         self.pop_n(result.inputs);
@@ -1131,7 +1360,9 @@ mod tests {
         let uri = miden_debug_types::Uri::from("test://test.masm");
         source_manager.load(SourceLanguage::Masm, uri.clone(), source.to_string());
 
-        let source_file = source_manager.get_by_uri(&uri).expect("Failed to load source");
+        let source_file = source_manager
+            .get_by_uri(&uri)
+            .expect("Failed to load source");
         let mut module_path = miden_assembly_syntax::ast::PathBuf::default();
         module_path.push("test");
         let opts = ParseOptions {
@@ -1334,7 +1565,11 @@ end",
 
         // The procedure takes 1 input and uses it as a value (add)
         assert_eq!(sig.num_inputs(), 1);
-        assert!(!sig.inputs[0].is_address(), "Input should be Value, got {:?}", sig.inputs[0]);
+        assert!(
+            !sig.inputs[0].is_address(),
+            "Input should be Value, got {:?}",
+            sig.inputs[0]
+        );
         // Should have 1 output (doubled value)
         assert_eq!(sig.num_outputs(), 1);
     }
@@ -1548,12 +1783,18 @@ end",
 
         // Both outputs should be InputPassthrough from input 0
         assert!(
-            matches!(sig.outputs[0], OutputKind::InputPassthrough { input_pos: 0 }),
+            matches!(
+                sig.outputs[0],
+                OutputKind::InputPassthrough { input_pos: 0 }
+            ),
             "Output 0 should be passthrough from input 0, got {:?}",
             sig.outputs[0]
         );
         assert!(
-            matches!(sig.outputs[1], OutputKind::InputPassthrough { input_pos: 0 }),
+            matches!(
+                sig.outputs[1],
+                OutputKind::InputPassthrough { input_pos: 0 }
+            ),
             "Output 1 should be passthrough from input 0, got {:?}",
             sig.outputs[1]
         );
@@ -1579,7 +1820,12 @@ end",
 
         // Output should be MemoryRead from input 0
         assert!(
-            matches!(sig.outputs[0], OutputKind::MemoryRead { from_input: Some(0) }),
+            matches!(
+                sig.outputs[0],
+                OutputKind::MemoryRead {
+                    from_input: Some(0)
+                }
+            ),
             "Output should be MemoryRead from input 0, got {:?}",
             sig.outputs[0]
         );
@@ -1613,7 +1859,10 @@ end
         assert!(inner_sig.is_some(), "inner should have signature");
         let inner_sig = inner_sig.unwrap();
         assert_eq!(inner_sig.num_inputs(), 2);
-        assert!(inner_sig.inputs[0].is_output(), "inner input 0 should be OutputAddress");
+        assert!(
+            inner_sig.inputs[0].is_output(),
+            "inner input 0 should be OutputAddress"
+        );
 
         // Find the outer procedure
         let outer = contracts.iter().find(|c| c.path.name() == "outer");
@@ -1631,7 +1880,10 @@ end
                 assert_eq!(*outputs, 0, "outer should produce 0 outputs");
 
                 let sig = outer.signature.as_ref();
-                assert!(sig.is_some(), "outer should have signature with known stack effect");
+                assert!(
+                    sig.is_some(),
+                    "outer should have signature with known stack effect"
+                );
                 let sig = sig.unwrap();
 
                 assert_eq!(sig.num_inputs(), 1);
@@ -1674,22 +1926,49 @@ end
         );
 
         // All should have Known stack effects
-        let level1 = contracts.iter().find(|c| c.path.name() == "level1").unwrap();
-        let level2 = contracts.iter().find(|c| c.path.name() == "level2").unwrap();
-        let level3 = contracts.iter().find(|c| c.path.name() == "level3").unwrap();
+        let level1 = contracts
+            .iter()
+            .find(|c| c.path.name() == "level1")
+            .unwrap();
+        let level2 = contracts
+            .iter()
+            .find(|c| c.path.name() == "level2")
+            .unwrap();
+        let level3 = contracts
+            .iter()
+            .find(|c| c.path.name() == "level3")
+            .unwrap();
 
         assert!(
-            matches!(level1.stack_effect, StackEffect::Known { inputs: 2, outputs: 0 }),
+            matches!(
+                level1.stack_effect,
+                StackEffect::Known {
+                    inputs: 2,
+                    outputs: 0
+                }
+            ),
             "level1 should have Known(2, 0), got {:?}",
             level1.stack_effect
         );
         assert!(
-            matches!(level2.stack_effect, StackEffect::Known { inputs: 2, outputs: 0 }),
+            matches!(
+                level2.stack_effect,
+                StackEffect::Known {
+                    inputs: 2,
+                    outputs: 0
+                }
+            ),
             "level2 should have Known(2, 0), got {:?}",
             level2.stack_effect
         );
         assert!(
-            matches!(level3.stack_effect, StackEffect::Known { inputs: 2, outputs: 0 }),
+            matches!(
+                level3.stack_effect,
+                StackEffect::Known {
+                    inputs: 2,
+                    outputs: 0
+                }
+            ),
             "level3 should have Known(2, 0), got {:?}",
             level3.stack_effect
         );
@@ -1736,12 +2015,18 @@ end
         // With no input operations before the recursive call, inputs are 0
         // But outputs cannot be determined due to the cycle, so we get KnownInputs
         assert!(
-            matches!(a.stack_effect, StackEffect::KnownInputs { inputs: 0 } | StackEffect::Unknown),
+            matches!(
+                a.stack_effect,
+                StackEffect::KnownInputs { inputs: 0 } | StackEffect::Unknown
+            ),
             "a should have KnownInputs(0) or Unknown effect, got {:?}",
             a.stack_effect
         );
         assert!(
-            matches!(b.stack_effect, StackEffect::KnownInputs { inputs: 0 } | StackEffect::Unknown),
+            matches!(
+                b.stack_effect,
+                StackEffect::KnownInputs { inputs: 0 } | StackEffect::Unknown
+            ),
             "b should have KnownInputs(0) or Unknown effect, got {:?}",
             b.stack_effect
         );
@@ -1780,7 +2065,13 @@ end
         // Final depth should be: 4 - 2 + 2 - 3 + 2 = 3 outputs
 
         assert!(
-            matches!(contract.stack_effect, StackEffect::Known { inputs: 4, outputs: 3 }),
+            matches!(
+                contract.stack_effect,
+                StackEffect::Known {
+                    inputs: 4,
+                    outputs: 3
+                }
+            ),
             "overflowing_add should have Known(4, 3), got {:?}",
             contract.stack_effect
         );
@@ -1809,7 +2100,13 @@ end
 
         // This should discover 4 inputs and have 4 outputs
         assert!(
-            matches!(contract.stack_effect, StackEffect::Known { inputs: 4, outputs: 4 }),
+            matches!(
+                contract.stack_effect,
+                StackEffect::Known {
+                    inputs: 4,
+                    outputs: 4
+                }
+            ),
             "reverse should have Known(4, 4), got {:?}",
             contract.stack_effect
         );

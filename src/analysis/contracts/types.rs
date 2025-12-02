@@ -225,7 +225,9 @@ impl ProcSignature {
 
     /// Returns true if the input at the given position is an input address.
     pub fn is_input_address(&self, position: usize) -> bool {
-        self.inputs.get(position).map_or(false, |k| k.is_input_address())
+        self.inputs
+            .get(position)
+            .map_or(false, |k| k.is_input_address())
     }
 
     /// Get the number of inputs.
@@ -297,7 +299,11 @@ impl ProcSignature {
             })
             .collect();
 
-        format!("{proc_name}({}) -> ({})", inputs.join(", "), outputs.join(", "))
+        format!(
+            "{proc_name}({}) -> ({})",
+            inputs.join(", "),
+            outputs.join(", ")
+        )
     }
 }
 
@@ -423,12 +429,16 @@ impl ProcContract {
 
     /// Get the input kind for a specific position if known.
     pub fn get_input_kind(&self, position: usize) -> Option<InputKind> {
-        self.signature.as_ref().and_then(|sig| sig.get_input(position))
+        self.signature
+            .as_ref()
+            .and_then(|sig| sig.get_input(position))
     }
 
     /// Get the output kind for a specific position if known.
     pub fn get_output_kind(&self, position: usize) -> Option<OutputKind> {
-        self.signature.as_ref().and_then(|sig| sig.get_output(position))
+        self.signature
+            .as_ref()
+            .and_then(|sig| sig.get_output(position))
     }
 
     /// Get the full signature if available.
@@ -567,9 +577,16 @@ mod tests {
             uses_u32_ops: false,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Known { inputs: 3, outputs: 1 },
+            stack_effect: StackEffect::Known {
+                inputs: 3,
+                outputs: 1,
+            },
             signature: Some(ProcSignature {
-                inputs: vec![InputKind::Value, InputKind::OutputAddress, InputKind::InputAddress],
+                inputs: vec![
+                    InputKind::Value,
+                    InputKind::OutputAddress,
+                    InputKind::InputAddress,
+                ],
                 outputs: vec![OutputKind::Computed],
             }),
             definition_range: None,
@@ -624,16 +641,25 @@ mod tests {
         assert!(sig.is_input_address(1));
 
         sig.set_output(0, OutputKind::InputPassthrough { input_pos: 1 });
-        assert_eq!(sig.get_output(0), Some(OutputKind::InputPassthrough { input_pos: 1 }));
+        assert_eq!(
+            sig.get_output(0),
+            Some(OutputKind::InputPassthrough { input_pos: 1 })
+        );
     }
 
     #[test]
     fn test_output_kind_helpers() {
         assert_eq!(OutputKind::Computed.passthrough_input(), None);
-        assert_eq!(OutputKind::InputPassthrough { input_pos: 2 }.passthrough_input(), Some(2));
+        assert_eq!(
+            OutputKind::InputPassthrough { input_pos: 2 }.passthrough_input(),
+            Some(2)
+        );
 
         assert!(!OutputKind::Computed.is_memory_read());
-        assert!(OutputKind::MemoryRead { from_input: Some(0) }.is_memory_read());
+        assert!(OutputKind::MemoryRead {
+            from_input: Some(0)
+        }
+        .is_memory_read());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -649,7 +675,10 @@ mod tests {
         assert_eq!(known_inputs.inputs(), Some(3));
         assert_eq!(known_inputs.outputs(), None);
 
-        let known = StackEffect::Known { inputs: 2, outputs: 1 };
+        let known = StackEffect::Known {
+            inputs: 2,
+            outputs: 1,
+        };
         assert_eq!(known.inputs(), Some(2));
         assert_eq!(known.outputs(), Some(1));
     }
@@ -720,7 +749,9 @@ mod tests {
     fn test_proc_signature_format_with_memory_read() {
         let sig = ProcSignature {
             inputs: vec![InputKind::InputAddress],
-            outputs: vec![OutputKind::MemoryRead { from_input: Some(0) }],
+            outputs: vec![OutputKind::MemoryRead {
+                from_input: Some(0),
+            }],
         };
         assert_eq!(
             sig.format_for_display("pub proc load"),
@@ -748,7 +779,10 @@ mod tests {
             uses_u32_ops: false,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            stack_effect: StackEffect::Known {
+                inputs: 2,
+                outputs: 1,
+            },
             signature: Some(ProcSignature {
                 inputs: vec![InputKind::Value, InputKind::OutputAddress],
                 outputs: vec![OutputKind::Computed],
@@ -769,7 +803,10 @@ mod tests {
             uses_u32_ops: false,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Known { inputs: 3, outputs: 2 },
+            stack_effect: StackEffect::Known {
+                inputs: 3,
+                outputs: 2,
+            },
             signature: None,
             definition_range: None,
         };
@@ -809,6 +846,9 @@ mod tests {
             signature: None,
             definition_range: None,
         };
-        assert_eq!(contract.format_signature_for_display("pub proc unknown"), None);
+        assert_eq!(
+            contract.format_signature_for_display("pub proc unknown"),
+            None
+        );
     }
 }

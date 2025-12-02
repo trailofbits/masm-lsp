@@ -12,7 +12,9 @@ fn analyze_proc(source: &str) -> AnalysisState {
     let full_source = format!("proc test_proc\n{}\nend", source);
     source_manager.load(SourceLanguage::Masm, uri.clone(), full_source);
 
-    let source_file = source_manager.get_by_uri(&uri).expect("Failed to load source");
+    let source_file = source_manager
+        .get_by_uri(&uri)
+        .expect("Failed to load source");
     let mut module_path = miden_assembly_syntax::ast::PathBuf::default();
     module_path.push("test");
     let opts = ParseOptions {
@@ -35,10 +37,7 @@ fn analyze_proc(source: &str) -> AnalysisState {
     }
 
     impl<'a> Visit for EffectApplier<'a> {
-        fn visit_inst(
-            &mut self,
-            inst: &miden_debug_types::Span<Instruction>,
-        ) -> ControlFlow<()> {
+        fn visit_inst(&mut self, inst: &miden_debug_types::Span<Instruction>) -> ControlFlow<()> {
             apply_effect(inst.inner(), self.state, inst.span());
             ControlFlow::Continue(())
         }
@@ -393,9 +392,7 @@ fn test_loc_storew_be_pop4() {
 #[test]
 fn test_swapw_preserves_bounds() {
     // Push 8 values: [1,2,3,4] and [5,6,7,8]
-    let state = analyze_proc(
-        "push.1 push.2 push.3 push.4 push.5 push.6 push.7 push.8 swapw",
-    );
+    let state = analyze_proc("push.1 push.2 push.3 push.4 push.5 push.6 push.7 push.8 swapw");
 
     assert_eq!(state.stack.depth(), 8);
     // After swapw.1: word at 0-3 swapped with word at 4-7
@@ -578,9 +575,7 @@ fn test_hash_pop4_push4() {
 
 #[test]
 fn test_hmerge_pop8_push4() {
-    let state = analyze_proc(
-        "push.1 push.2 push.3 push.4 push.5 push.6 push.7 push.8 hmerge",
-    );
+    let state = analyze_proc("push.1 push.2 push.3 push.4 push.5 push.6 push.7 push.8 hmerge");
 
     assert_eq!(state.stack.depth(), 4);
 }
@@ -609,9 +604,7 @@ fn test_assertz_pops_value() {
 
 #[test]
 fn test_eqw_pop8_push_bool() {
-    let state = analyze_proc(
-        "push.1 push.2 push.3 push.4 push.1 push.2 push.3 push.4 eqw",
-    );
+    let state = analyze_proc("push.1 push.2 push.3 push.4 push.1 push.2 push.3 push.4 eqw");
 
     assert_eq!(state.stack.depth(), 1);
     assert_eq!(state.stack.peek(0).unwrap().bounds, Bounds::Bool);

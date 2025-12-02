@@ -9,7 +9,7 @@ use masm_lsp::client::PublishDiagnostics;
 use masm_lsp::server::Backend;
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::{
-    DidOpenTextDocumentParams, Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    Diagnostic, DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
     HoverParams, Location, Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
     TextDocumentItem, TextDocumentPositionParams, Url, WorkspaceSymbolParams,
 };
@@ -163,7 +163,12 @@ impl TestHarness {
     }
 
     /// Perform goto definition at a text needle.
-    pub async fn goto_definition_at(&self, uri: &Url, text: &str, needle: &str) -> Option<Location> {
+    pub async fn goto_definition_at(
+        &self,
+        uri: &Url,
+        text: &str,
+        needle: &str,
+    ) -> Option<Location> {
         let position = find_position(text, needle);
         self.goto_definition(uri, position).await
     }
@@ -208,7 +213,10 @@ impl TestHarness {
     }
 
     /// Search for workspace symbols.
-    pub async fn workspace_symbols(&self, query: &str) -> Vec<tower_lsp::lsp_types::SymbolInformation> {
+    pub async fn workspace_symbols(
+        &self,
+        query: &str,
+    ) -> Vec<tower_lsp::lsp_types::SymbolInformation> {
         let params = WorkspaceSymbolParams {
             query: query.to_string(),
             work_done_progress_params: Default::default(),

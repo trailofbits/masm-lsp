@@ -43,7 +43,9 @@ fn parse_masm(
         ..Default::default()
     };
 
-    let module = source_file.parse_with_options(sources.as_ref(), opts).ok()?;
+    let module = source_file
+        .parse_with_options(sources.as_ref(), opts)
+        .ok()?;
     Some((module, sources))
 }
 
@@ -91,7 +93,15 @@ fn bench_exponential_risk_files(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(source.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &(), |b, _| {
             b.iter(|| {
-                collect_decompilation_hints(&module, &sources, &uri, &visible_range, 4, &source, None)
+                collect_decompilation_hints(
+                    &module,
+                    &sources,
+                    &uri,
+                    &visible_range,
+                    4,
+                    &source,
+                    None,
+                )
             })
         });
     }
@@ -141,7 +151,15 @@ fn bench_stdlib_files(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(source.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &(), |b, _| {
             b.iter(|| {
-                collect_decompilation_hints(&module, &sources, &uri, &visible_range, 4, &source, None)
+                collect_decompilation_hints(
+                    &module,
+                    &sources,
+                    &uri,
+                    &visible_range,
+                    4,
+                    &source,
+                    None,
+                )
             })
         });
     }

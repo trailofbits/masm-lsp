@@ -222,7 +222,12 @@ impl<'a> LocalsAnalyzer<'a> {
     }
 
     /// Analyze a block of operations.
-    fn analyze_block(&mut self, block: &Block, state: &mut LocalsState, addr_stack: &mut AddressStack) {
+    fn analyze_block(
+        &mut self,
+        block: &Block,
+        state: &mut LocalsState,
+        addr_stack: &mut AddressStack,
+    ) {
         for op in block.iter() {
             self.analyze_op(op, state, addr_stack);
         }
@@ -233,9 +238,7 @@ impl<'a> LocalsAnalyzer<'a> {
         match op {
             Op::Inst(inst) => self.analyze_instruction(inst, state, addr_stack),
             Op::If {
-                then_blk,
-                else_blk,
-                ..
+                then_blk, else_blk, ..
             } => self.analyze_if_else(then_blk, else_blk, state, addr_stack),
             Op::While { body, .. } => self.analyze_while(body, state, addr_stack),
             Op::Repeat { count, body, .. } => self.analyze_repeat(*count, body, state, addr_stack),
@@ -246,7 +249,13 @@ impl<'a> LocalsAnalyzer<'a> {
     ///
     /// Both branches are analyzed independently, then states are merged
     /// at the join point using the meet operation.
-    fn analyze_if_else(&mut self, then_blk: &Block, else_blk: &Block, state: &mut LocalsState, addr_stack: &mut AddressStack) {
+    fn analyze_if_else(
+        &mut self,
+        then_blk: &Block,
+        else_blk: &Block,
+        state: &mut LocalsState,
+        addr_stack: &mut AddressStack,
+    ) {
         // if.true consumes the condition from the stack
         addr_stack.pop();
 
@@ -270,7 +279,12 @@ impl<'a> LocalsAnalyzer<'a> {
     ///
     /// Since while loops may execute zero times, any initialization inside
     /// the loop body cannot guarantee the local is initialized after the loop.
-    fn analyze_while(&mut self, body: &Block, state: &mut LocalsState, addr_stack: &mut AddressStack) {
+    fn analyze_while(
+        &mut self,
+        body: &Block,
+        state: &mut LocalsState,
+        addr_stack: &mut AddressStack,
+    ) {
         // Save entry state
         let entry_state = state.clone();
 
@@ -288,7 +302,13 @@ impl<'a> LocalsAnalyzer<'a> {
     ///
     /// Repeat loops with count > 0 always execute at least once, so
     /// initializations in the body are reliable.
-    fn analyze_repeat(&mut self, count: u32, body: &Block, state: &mut LocalsState, addr_stack: &mut AddressStack) {
+    fn analyze_repeat(
+        &mut self,
+        count: u32,
+        body: &Block,
+        state: &mut LocalsState,
+        addr_stack: &mut AddressStack,
+    ) {
         if count == 0 {
             return; // No execution, state unchanged
         }
@@ -300,7 +320,12 @@ impl<'a> LocalsAnalyzer<'a> {
     }
 
     /// Analyze a single instruction.
-    fn analyze_instruction(&mut self, inst: &Span<Instruction>, state: &mut LocalsState, addr_stack: &mut AddressStack) {
+    fn analyze_instruction(
+        &mut self,
+        inst: &Span<Instruction>,
+        state: &mut LocalsState,
+        addr_stack: &mut AddressStack,
+    ) {
         let span = inst.span();
 
         // First, try to handle as a pure stack manipulation
@@ -363,7 +388,9 @@ impl<'a> LocalsAnalyzer<'a> {
             // ─────────────────────────────────────────────────────────────────
             // Procedure calls - check for output address parameters
             // ─────────────────────────────────────────────────────────────────
-            Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
+            Instruction::Exec(target)
+            | Instruction::Call(target)
+            | Instruction::SysCall(target) => {
                 self.handle_procedure_call(target, state, addr_stack);
             }
 
@@ -377,14 +404,14 @@ impl<'a> LocalsAnalyzer<'a> {
             // Memory operations - track stack changes
             // ─────────────────────────────────────────────────────────────────
             Instruction::MemLoad => {
-                addr_stack.pop();  // address
-                addr_stack.push(StackElement::Other);  // loaded value
+                addr_stack.pop(); // address
+                addr_stack.push(StackElement::Other); // loaded value
             }
             Instruction::MemLoadImm(_) => {
-                addr_stack.push(StackElement::Other);  // loaded value
+                addr_stack.push(StackElement::Other); // loaded value
             }
             Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
-                addr_stack.pop();   // address
+                addr_stack.pop(); // address
                 addr_stack.pop_n(4); // overwritten word
                 addr_stack.push_defaults(4); // loaded word
             }
@@ -400,7 +427,7 @@ impl<'a> LocalsAnalyzer<'a> {
                 addr_stack.pop(); // value
             }
             Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
-                addr_stack.pop();   // address
+                addr_stack.pop(); // address
                 addr_stack.pop_n(4); // word
             }
             Instruction::MemStoreWBeImm(_) | Instruction::MemStoreWLeImm(_) => {
@@ -496,10 +523,7 @@ impl<'a> LocalsAnalyzer<'a> {
             }
             LocalState::MaybeInitialized => {
                 self.findings.push(LocalsFinding {
-                    message: format!(
-                        "Local {} may not be initialized on all code paths.",
-                        idx
-                    ),
+                    message: format!("Local {} may not be initialized on all code paths.", idx),
                     span,
                     severity: DiagnosticSeverity::WARNING,
                 });
@@ -688,7 +712,9 @@ mod tests {
         let miden_uri = Uri::from("test://test.masm");
         source_manager.load(SourceLanguage::Masm, miden_uri.clone(), source.to_string());
 
-        let source_file = source_manager.get_by_uri(&miden_uri).expect("Failed to load source");
+        let source_file = source_manager
+            .get_by_uri(&miden_uri)
+            .expect("Failed to load source");
         let mut module_path = miden_assembly_syntax::ast::PathBuf::default();
         module_path.push("test");
         let opts = ParseOptions {
@@ -718,7 +744,11 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 0, "Should not warn when local is initialized before read");
+        assert_eq!(
+            count_warnings(&diags),
+            0,
+            "Should not warn when local is initialized before read"
+        );
     }
 
     #[test]
@@ -731,7 +761,11 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 1, "Should warn when reading uninitialized local");
+        assert_eq!(
+            count_warnings(&diags),
+            1,
+            "Should warn when reading uninitialized local"
+        );
         assert!(diags[0].message.contains("uninitialized local 0."));
     }
 
@@ -750,8 +784,16 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 1, "Should warn when word contains uninitialized locals");
-        assert!(diags[0].message.contains("local 2") || diags[0].message.contains("local 3"), "message: {}", diags[0].message);
+        assert_eq!(
+            count_warnings(&diags),
+            1,
+            "Should warn when word contains uninitialized locals"
+        );
+        assert!(
+            diags[0].message.contains("local 2") || diags[0].message.contains("local 3"),
+            "message: {}",
+            diags[0].message
+        );
     }
 
     #[test]
@@ -766,7 +808,11 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 0, "Should not warn when full word is initialized");
+        assert_eq!(
+            count_warnings(&diags),
+            0,
+            "Should not warn when full word is initialized"
+        );
     }
 
     #[test]
@@ -787,7 +833,11 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 0, "Should not warn when both branches initialize");
+        assert_eq!(
+            count_warnings(&diags),
+            0,
+            "Should not warn when both branches initialize"
+        );
     }
 
     #[test]
@@ -807,8 +857,16 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 1, "Should warn when only one branch initializes");
-        assert!(diags[0].message.contains("may not be initialized"), "message: {}", diags[0].message);
+        assert_eq!(
+            count_warnings(&diags),
+            1,
+            "Should warn when only one branch initializes"
+        );
+        assert!(
+            diags[0].message.contains("may not be initialized"),
+            "message: {}",
+            diags[0].message
+        );
     }
 
     #[test]
@@ -827,8 +885,16 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 1, "Should warn when init is only in while loop body");
-        assert!(diags[0].message.contains("may not be initialized"), "message: {}", diags[0].message);
+        assert_eq!(
+            count_warnings(&diags),
+            1,
+            "Should warn when init is only in while loop body"
+        );
+        assert!(
+            diags[0].message.contains("may not be initialized"),
+            "message: {}",
+            diags[0].message
+        );
     }
 
     #[test]
@@ -845,7 +911,11 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 0, "Should not warn when init is in repeat.n (n>0) body");
+        assert_eq!(
+            count_warnings(&diags),
+            0,
+            "Should not warn when init is in repeat.n (n>0) body"
+        );
     }
 
     #[test]
@@ -858,8 +928,16 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 1, "Should warn when taking address of uninitialized local");
-        assert!(diags[0].message.contains("Taking address"), "message: {}", diags[0].message);
+        assert_eq!(
+            count_warnings(&diags),
+            1,
+            "Should warn when taking address of uninitialized local"
+        );
+        assert!(
+            diags[0].message.contains("Taking address"),
+            "message: {}",
+            diags[0].message
+        );
     }
 
     #[test]
@@ -874,7 +952,11 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 0, "Should not warn when taking address of initialized local");
+        assert_eq!(
+            count_warnings(&diags),
+            0,
+            "Should not warn when taking address of initialized local"
+        );
     }
 
     #[test]
@@ -895,7 +977,11 @@ proc bad
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 1, "Should only warn for the bad procedure");
+        assert_eq!(
+            count_warnings(&diags),
+            1,
+            "Should only warn for the bad procedure"
+        );
     }
 
     #[test]
@@ -910,8 +996,16 @@ proc test
 end
 "#;
         let diags = analyze_source(source);
-        assert_eq!(count_warnings(&diags), 1, "Should warn for uninitialized local 1");
-        assert!(diags[0].message.contains("local 1"), "message: {}", diags[0].message);
+        assert_eq!(
+            count_warnings(&diags),
+            1,
+            "Should warn for uninitialized local 1"
+        );
+        assert!(
+            diags[0].message.contains("local 1"),
+            "message: {}",
+            diags[0].message
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -926,7 +1020,9 @@ end
         let miden_uri = Uri::from("test://test.masm");
         source_manager.load(SourceLanguage::Masm, miden_uri.clone(), source.to_string());
 
-        let source_file = source_manager.get_by_uri(&miden_uri).expect("Failed to load source");
+        let source_file = source_manager
+            .get_by_uri(&miden_uri)
+            .expect("Failed to load source");
         let mut module_path = miden_assembly_syntax::ast::PathBuf::default();
         module_path.push("test");
         let opts = ParseOptions {
@@ -1022,8 +1118,11 @@ end
 "#;
         // Without contracts, locaddr of uninitialized local should warn
         let diags = analyze_source(source_no_contracts);
-        assert_eq!(count_warnings(&diags), 1,
-            "Without contracts, should warn when taking address of uninitialized local");
+        assert_eq!(
+            count_warnings(&diags),
+            1,
+            "Without contracts, should warn when taking address of uninitialized local"
+        );
     }
 
     #[test]
@@ -1046,9 +1145,12 @@ proc caller
 end
 "#;
         let diags = analyze_source_with_contracts(source);
-        assert_eq!(count_warnings(&diags), 0,
+        assert_eq!(
+            count_warnings(&diags),
+            0,
             "Should not warn - local is initialized via store_swapped. Got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1071,9 +1173,12 @@ proc caller
 end
 "#;
         let diags = analyze_source_with_contracts(source);
-        assert_eq!(count_warnings(&diags), 0,
+        assert_eq!(
+            count_warnings(&diags),
+            0,
             "Should not warn - local is initialized via store_with_movup. Got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1097,10 +1202,16 @@ proc caller
 end
 "#;
         let diags = analyze_source_with_contracts(source);
-        assert_eq!(count_warnings(&diags), 1,
+        assert_eq!(
+            count_warnings(&diags),
+            1,
             "Should warn only for local 1. Got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>());
-        assert!(diags[0].message.contains("local 1"), "Should warn about local 1");
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(
+            diags[0].message.contains("local 1"),
+            "Should warn about local 1"
+        );
     }
 
     #[test]
@@ -1124,9 +1235,12 @@ proc caller
 end
 "#;
         let diags = analyze_source_with_contracts(source);
-        assert_eq!(count_warnings(&diags), 0,
+        assert_eq!(
+            count_warnings(&diags),
+            0,
             "Should not warn - dup'd address passed to writer. Got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1154,9 +1268,12 @@ proc caller
 end
 "#;
         let diags = analyze_source_with_contracts(source);
-        assert_eq!(count_warnings(&diags), 0,
+        assert_eq!(
+            count_warnings(&diags),
+            0,
             "Should not warn - transitive output address. Got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1185,9 +1302,12 @@ pub proc truncate_stack()
 end
 "#;
         let diags = analyze_source_with_contracts(source);
-        assert_eq!(count_warnings(&diags), 0,
+        assert_eq!(
+            count_warnings(&diags),
+            0,
             "stdlib sys::truncate_stack should not produce warnings. Got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1212,8 +1332,11 @@ proc find_partial_key_value
 end
 "#;
         let diags = analyze_source_with_contracts(source);
-        assert_eq!(count_warnings(&diags), 0,
+        assert_eq!(
+            count_warnings(&diags),
+            0,
             "sorted_array find_partial_key_value pattern should not produce warnings. Got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 }

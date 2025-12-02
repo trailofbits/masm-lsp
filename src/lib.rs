@@ -1,12 +1,12 @@
 pub mod analysis;
 pub mod client;
+pub mod cursor_resolution;
 pub mod decompiler;
+pub mod descriptions;
 pub mod diagnostics;
 pub mod index;
 pub mod inlay_hints;
-pub mod descriptions;
 pub mod module_path;
-pub mod cursor_resolution;
 pub mod server;
 pub mod service;
 pub mod symbol_path;

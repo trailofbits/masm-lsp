@@ -65,8 +65,8 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         DupW0 | DupW1 | DupW2 | DupW3 => StaticEffect::new(0, 4),
 
         // Swap: pop 0, push 0 (reorder only)
-        Swap1 | Swap2 | Swap3 | Swap4 | Swap5 | Swap6 | Swap7 | Swap8 | Swap9 | Swap10
-        | Swap11 | Swap12 | Swap13 | Swap14 | Swap15 => StaticEffect::new(0, 0),
+        Swap1 | Swap2 | Swap3 | Swap4 | Swap5 | Swap6 | Swap7 | Swap8 | Swap9 | Swap10 | Swap11
+        | Swap12 | Swap13 | Swap14 | Swap15 => StaticEffect::new(0, 0),
 
         // SwapW: swap words (reorder only)
         SwapW1 | SwapW2 | SwapW3 | SwapDw => StaticEffect::new(0, 0),
@@ -117,10 +117,12 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
 
         // Assertions (no stack change, may trap)
-        U32Assert | U32Assert2 | U32AssertW
-        | U32AssertWithError(_) | U32Assert2WithError(_) | U32AssertWWithError(_) => {
-            StaticEffect::new(0, 0)
-        }
+        U32Assert
+        | U32Assert2
+        | U32AssertW
+        | U32AssertWithError(_)
+        | U32Assert2WithError(_)
+        | U32AssertWWithError(_) => StaticEffect::new(0, 0),
 
         // Test: push bool without consuming value
         U32Test => StaticEffect::new(0, 1),
@@ -175,7 +177,6 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
         // Push operations
         // ─────────────────────────────────────────────────────────────────────
-
         Push(_) => StaticEffect::new(0, 1),
         PushFeltList(values) => StaticEffect::new(0, values.len()),
         PadW => StaticEffect::new(0, 4),
@@ -209,7 +210,6 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
         // Local memory operations
         // ─────────────────────────────────────────────────────────────────────
-
         LocLoad(_) => StaticEffect::new(0, 1),
         LocStore(_) => StaticEffect::new(1, 0),
         LocLoadWBe(_) | LocLoadWLe(_) => StaticEffect::new(0, 4),
@@ -219,7 +219,6 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
         // Advice operations
         // ─────────────────────────────────────────────────────────────────────
-
         AdvPush(n) => {
             let count = match n {
                 Immediate::Value(v) => v.into_inner() as usize,
@@ -233,7 +232,6 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
         // Cryptographic operations
         // ─────────────────────────────────────────────────────────────────────
-
         Hash => StaticEffect::new(4, 4),
         HMerge => StaticEffect::new(8, 4),
         HPerm => StaticEffect::new(12, 12),
@@ -241,8 +239,7 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
         // Merkle tree operations
         // ─────────────────────────────────────────────────────────────────────
-
-        MTreeGet => StaticEffect::new(6, 4),  // Pop (depth, index, root), push value
+        MTreeGet => StaticEffect::new(6, 4), // Pop (depth, index, root), push value
         MTreeSet => StaticEffect::new(10, 4), // Pop (depth, index, old_root, value), push new_root
         MTreeMerge => StaticEffect::new(8, 4),
         MTreeVerify | MTreeVerifyWithError(_) => StaticEffect::new(0, 0),
@@ -260,7 +257,6 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
         // Assertions
         // ─────────────────────────────────────────────────────────────────────
-
         Assert | AssertWithError(_) => StaticEffect::new(1, 0),
         AssertEq | AssertEqWithError(_) => StaticEffect::new(2, 0),
         Assertz | AssertzWithError(_) => StaticEffect::new(1, 0),
@@ -282,7 +278,6 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
         // Other operations
         // ─────────────────────────────────────────────────────────────────────
-
         Sdepth => StaticEffect::new(0, 1),
         Clk => StaticEffect::new(0, 1),
         Caller => StaticEffect::new(0, 4),
@@ -300,7 +295,6 @@ pub fn static_effect(inst: &Instruction) -> Option<StaticEffect> {
         // ─────────────────────────────────────────────────────────────────────
         // Procedure calls - DYNAMIC (unknown effects)
         // ─────────────────────────────────────────────────────────────────────
-
         Exec(_) | Call(_) | SysCall(_) => return None,
         DynExec | DynCall => return None,
 
@@ -612,11 +606,7 @@ impl<'a> SimpleStackAnalysis<'a> {
         let then_effect = match then_state.analyze_block(then_blk) {
             Some(e) => e,
             None => {
-                self.invalidate(
-                    then_state
-                        .invalid_reason()
-                        .unwrap_or("then branch failed"),
-                );
+                self.invalidate(then_state.invalid_reason().unwrap_or("then branch failed"));
                 return false;
             }
         };
@@ -629,11 +619,7 @@ impl<'a> SimpleStackAnalysis<'a> {
             match else_state.analyze_block(else_blk) {
                 Some(e) => e,
                 None => {
-                    self.invalidate(
-                        else_state
-                            .invalid_reason()
-                            .unwrap_or("else branch failed"),
-                    );
+                    self.invalidate(else_state.invalid_reason().unwrap_or("else branch failed"));
                     return false;
                 }
             }
@@ -650,8 +636,14 @@ impl<'a> SimpleStackAnalysis<'a> {
 
         // Update state
         self.depth = entry_depth + then_effect;
-        self.min_depth = self.min_depth.min(then_state.min_depth).min(else_state.min_depth);
-        self.max_depth = self.max_depth.max(then_state.max_depth).max(else_state.max_depth);
+        self.min_depth = self
+            .min_depth
+            .min(then_state.min_depth)
+            .min(else_state.min_depth);
+        self.max_depth = self
+            .max_depth
+            .max(then_state.max_depth)
+            .max(else_state.max_depth);
 
         true
     }
@@ -670,11 +662,7 @@ impl<'a> SimpleStackAnalysis<'a> {
         let body_effect = match body_state.analyze_block(body) {
             Some(e) => e,
             None => {
-                self.invalidate(
-                    body_state
-                        .invalid_reason()
-                        .unwrap_or("while body failed"),
-                );
+                self.invalidate(body_state.invalid_reason().unwrap_or("while body failed"));
                 return false;
             }
         };
@@ -683,7 +671,9 @@ impl<'a> SimpleStackAnalysis<'a> {
         // So if body_effect == 1, the loop is stack-neutral (pushes condition to replace consumed one)
         // If body_effect != 1, the loop has variable stack effect based on iterations
         if body_effect != 1 {
-            self.invalidate("while loop with non-neutral stack effect requires abstract interpretation");
+            self.invalidate(
+                "while loop with non-neutral stack effect requires abstract interpretation",
+            );
             return false;
         }
 
@@ -709,11 +699,7 @@ impl<'a> SimpleStackAnalysis<'a> {
         let body_effect = match body_state.analyze_block(body) {
             Some(e) => e,
             None => {
-                self.invalidate(
-                    body_state
-                        .invalid_reason()
-                        .unwrap_or("repeat body failed"),
-                );
+                self.invalidate(body_state.invalid_reason().unwrap_or("repeat body failed"));
                 return false;
             }
         };
@@ -785,10 +771,7 @@ pub fn analyze_procedure_simple_with_contracts(
         }
         None => StackEffectResult::Dynamic {
             min_inputs: analysis.inputs_required(),
-            reason: analysis
-                .invalid_reason()
-                .unwrap_or("unknown")
-                .to_string(),
+            reason: analysis.invalid_reason().unwrap_or("unknown").to_string(),
         },
     }
 }
@@ -1024,50 +1007,164 @@ where
         }
 
         // Dup operations
-        Dup0 => { stack.dup(0); StackManipResult::Applied }
-        Dup1 => { stack.dup(1); StackManipResult::Applied }
-        Dup2 => { stack.dup(2); StackManipResult::Applied }
-        Dup3 => { stack.dup(3); StackManipResult::Applied }
-        Dup4 => { stack.dup(4); StackManipResult::Applied }
-        Dup5 => { stack.dup(5); StackManipResult::Applied }
-        Dup6 => { stack.dup(6); StackManipResult::Applied }
-        Dup7 => { stack.dup(7); StackManipResult::Applied }
-        Dup8 => { stack.dup(8); StackManipResult::Applied }
-        Dup9 => { stack.dup(9); StackManipResult::Applied }
-        Dup10 => { stack.dup(10); StackManipResult::Applied }
-        Dup11 => { stack.dup(11); StackManipResult::Applied }
-        Dup12 => { stack.dup(12); StackManipResult::Applied }
-        Dup13 => { stack.dup(13); StackManipResult::Applied }
-        Dup14 => { stack.dup(14); StackManipResult::Applied }
-        Dup15 => { stack.dup(15); StackManipResult::Applied }
+        Dup0 => {
+            stack.dup(0);
+            StackManipResult::Applied
+        }
+        Dup1 => {
+            stack.dup(1);
+            StackManipResult::Applied
+        }
+        Dup2 => {
+            stack.dup(2);
+            StackManipResult::Applied
+        }
+        Dup3 => {
+            stack.dup(3);
+            StackManipResult::Applied
+        }
+        Dup4 => {
+            stack.dup(4);
+            StackManipResult::Applied
+        }
+        Dup5 => {
+            stack.dup(5);
+            StackManipResult::Applied
+        }
+        Dup6 => {
+            stack.dup(6);
+            StackManipResult::Applied
+        }
+        Dup7 => {
+            stack.dup(7);
+            StackManipResult::Applied
+        }
+        Dup8 => {
+            stack.dup(8);
+            StackManipResult::Applied
+        }
+        Dup9 => {
+            stack.dup(9);
+            StackManipResult::Applied
+        }
+        Dup10 => {
+            stack.dup(10);
+            StackManipResult::Applied
+        }
+        Dup11 => {
+            stack.dup(11);
+            StackManipResult::Applied
+        }
+        Dup12 => {
+            stack.dup(12);
+            StackManipResult::Applied
+        }
+        Dup13 => {
+            stack.dup(13);
+            StackManipResult::Applied
+        }
+        Dup14 => {
+            stack.dup(14);
+            StackManipResult::Applied
+        }
+        Dup15 => {
+            stack.dup(15);
+            StackManipResult::Applied
+        }
 
         // DupW operations
-        DupW0 => { stack.dupw(0); StackManipResult::Applied }
-        DupW1 => { stack.dupw(1); StackManipResult::Applied }
-        DupW2 => { stack.dupw(2); StackManipResult::Applied }
-        DupW3 => { stack.dupw(3); StackManipResult::Applied }
+        DupW0 => {
+            stack.dupw(0);
+            StackManipResult::Applied
+        }
+        DupW1 => {
+            stack.dupw(1);
+            StackManipResult::Applied
+        }
+        DupW2 => {
+            stack.dupw(2);
+            StackManipResult::Applied
+        }
+        DupW3 => {
+            stack.dupw(3);
+            StackManipResult::Applied
+        }
 
         // Swap operations
-        Swap1 => { stack.swap(0, 1); StackManipResult::Applied }
-        Swap2 => { stack.swap(0, 2); StackManipResult::Applied }
-        Swap3 => { stack.swap(0, 3); StackManipResult::Applied }
-        Swap4 => { stack.swap(0, 4); StackManipResult::Applied }
-        Swap5 => { stack.swap(0, 5); StackManipResult::Applied }
-        Swap6 => { stack.swap(0, 6); StackManipResult::Applied }
-        Swap7 => { stack.swap(0, 7); StackManipResult::Applied }
-        Swap8 => { stack.swap(0, 8); StackManipResult::Applied }
-        Swap9 => { stack.swap(0, 9); StackManipResult::Applied }
-        Swap10 => { stack.swap(0, 10); StackManipResult::Applied }
-        Swap11 => { stack.swap(0, 11); StackManipResult::Applied }
-        Swap12 => { stack.swap(0, 12); StackManipResult::Applied }
-        Swap13 => { stack.swap(0, 13); StackManipResult::Applied }
-        Swap14 => { stack.swap(0, 14); StackManipResult::Applied }
-        Swap15 => { stack.swap(0, 15); StackManipResult::Applied }
+        Swap1 => {
+            stack.swap(0, 1);
+            StackManipResult::Applied
+        }
+        Swap2 => {
+            stack.swap(0, 2);
+            StackManipResult::Applied
+        }
+        Swap3 => {
+            stack.swap(0, 3);
+            StackManipResult::Applied
+        }
+        Swap4 => {
+            stack.swap(0, 4);
+            StackManipResult::Applied
+        }
+        Swap5 => {
+            stack.swap(0, 5);
+            StackManipResult::Applied
+        }
+        Swap6 => {
+            stack.swap(0, 6);
+            StackManipResult::Applied
+        }
+        Swap7 => {
+            stack.swap(0, 7);
+            StackManipResult::Applied
+        }
+        Swap8 => {
+            stack.swap(0, 8);
+            StackManipResult::Applied
+        }
+        Swap9 => {
+            stack.swap(0, 9);
+            StackManipResult::Applied
+        }
+        Swap10 => {
+            stack.swap(0, 10);
+            StackManipResult::Applied
+        }
+        Swap11 => {
+            stack.swap(0, 11);
+            StackManipResult::Applied
+        }
+        Swap12 => {
+            stack.swap(0, 12);
+            StackManipResult::Applied
+        }
+        Swap13 => {
+            stack.swap(0, 13);
+            StackManipResult::Applied
+        }
+        Swap14 => {
+            stack.swap(0, 14);
+            StackManipResult::Applied
+        }
+        Swap15 => {
+            stack.swap(0, 15);
+            StackManipResult::Applied
+        }
 
         // SwapW operations
-        SwapW1 => { stack.swapw(0, 1); StackManipResult::Applied }
-        SwapW2 => { stack.swapw(0, 2); StackManipResult::Applied }
-        SwapW3 => { stack.swapw(0, 3); StackManipResult::Applied }
+        SwapW1 => {
+            stack.swapw(0, 1);
+            StackManipResult::Applied
+        }
+        SwapW2 => {
+            stack.swapw(0, 2);
+            StackManipResult::Applied
+        }
+        SwapW3 => {
+            stack.swapw(0, 3);
+            StackManipResult::Applied
+        }
 
         // SwapDW
         SwapDw => {
@@ -1079,44 +1176,140 @@ where
         }
 
         // MovUp operations
-        MovUp2 => { stack.movup(2); StackManipResult::Applied }
-        MovUp3 => { stack.movup(3); StackManipResult::Applied }
-        MovUp4 => { stack.movup(4); StackManipResult::Applied }
-        MovUp5 => { stack.movup(5); StackManipResult::Applied }
-        MovUp6 => { stack.movup(6); StackManipResult::Applied }
-        MovUp7 => { stack.movup(7); StackManipResult::Applied }
-        MovUp8 => { stack.movup(8); StackManipResult::Applied }
-        MovUp9 => { stack.movup(9); StackManipResult::Applied }
-        MovUp10 => { stack.movup(10); StackManipResult::Applied }
-        MovUp11 => { stack.movup(11); StackManipResult::Applied }
-        MovUp12 => { stack.movup(12); StackManipResult::Applied }
-        MovUp13 => { stack.movup(13); StackManipResult::Applied }
-        MovUp14 => { stack.movup(14); StackManipResult::Applied }
-        MovUp15 => { stack.movup(15); StackManipResult::Applied }
+        MovUp2 => {
+            stack.movup(2);
+            StackManipResult::Applied
+        }
+        MovUp3 => {
+            stack.movup(3);
+            StackManipResult::Applied
+        }
+        MovUp4 => {
+            stack.movup(4);
+            StackManipResult::Applied
+        }
+        MovUp5 => {
+            stack.movup(5);
+            StackManipResult::Applied
+        }
+        MovUp6 => {
+            stack.movup(6);
+            StackManipResult::Applied
+        }
+        MovUp7 => {
+            stack.movup(7);
+            StackManipResult::Applied
+        }
+        MovUp8 => {
+            stack.movup(8);
+            StackManipResult::Applied
+        }
+        MovUp9 => {
+            stack.movup(9);
+            StackManipResult::Applied
+        }
+        MovUp10 => {
+            stack.movup(10);
+            StackManipResult::Applied
+        }
+        MovUp11 => {
+            stack.movup(11);
+            StackManipResult::Applied
+        }
+        MovUp12 => {
+            stack.movup(12);
+            StackManipResult::Applied
+        }
+        MovUp13 => {
+            stack.movup(13);
+            StackManipResult::Applied
+        }
+        MovUp14 => {
+            stack.movup(14);
+            StackManipResult::Applied
+        }
+        MovUp15 => {
+            stack.movup(15);
+            StackManipResult::Applied
+        }
 
         // MovUpW operations
-        MovUpW2 => { stack.movupw(2); StackManipResult::Applied }
-        MovUpW3 => { stack.movupw(3); StackManipResult::Applied }
+        MovUpW2 => {
+            stack.movupw(2);
+            StackManipResult::Applied
+        }
+        MovUpW3 => {
+            stack.movupw(3);
+            StackManipResult::Applied
+        }
 
         // MovDn operations
-        MovDn2 => { stack.movdn(2); StackManipResult::Applied }
-        MovDn3 => { stack.movdn(3); StackManipResult::Applied }
-        MovDn4 => { stack.movdn(4); StackManipResult::Applied }
-        MovDn5 => { stack.movdn(5); StackManipResult::Applied }
-        MovDn6 => { stack.movdn(6); StackManipResult::Applied }
-        MovDn7 => { stack.movdn(7); StackManipResult::Applied }
-        MovDn8 => { stack.movdn(8); StackManipResult::Applied }
-        MovDn9 => { stack.movdn(9); StackManipResult::Applied }
-        MovDn10 => { stack.movdn(10); StackManipResult::Applied }
-        MovDn11 => { stack.movdn(11); StackManipResult::Applied }
-        MovDn12 => { stack.movdn(12); StackManipResult::Applied }
-        MovDn13 => { stack.movdn(13); StackManipResult::Applied }
-        MovDn14 => { stack.movdn(14); StackManipResult::Applied }
-        MovDn15 => { stack.movdn(15); StackManipResult::Applied }
+        MovDn2 => {
+            stack.movdn(2);
+            StackManipResult::Applied
+        }
+        MovDn3 => {
+            stack.movdn(3);
+            StackManipResult::Applied
+        }
+        MovDn4 => {
+            stack.movdn(4);
+            StackManipResult::Applied
+        }
+        MovDn5 => {
+            stack.movdn(5);
+            StackManipResult::Applied
+        }
+        MovDn6 => {
+            stack.movdn(6);
+            StackManipResult::Applied
+        }
+        MovDn7 => {
+            stack.movdn(7);
+            StackManipResult::Applied
+        }
+        MovDn8 => {
+            stack.movdn(8);
+            StackManipResult::Applied
+        }
+        MovDn9 => {
+            stack.movdn(9);
+            StackManipResult::Applied
+        }
+        MovDn10 => {
+            stack.movdn(10);
+            StackManipResult::Applied
+        }
+        MovDn11 => {
+            stack.movdn(11);
+            StackManipResult::Applied
+        }
+        MovDn12 => {
+            stack.movdn(12);
+            StackManipResult::Applied
+        }
+        MovDn13 => {
+            stack.movdn(13);
+            StackManipResult::Applied
+        }
+        MovDn14 => {
+            stack.movdn(14);
+            StackManipResult::Applied
+        }
+        MovDn15 => {
+            stack.movdn(15);
+            StackManipResult::Applied
+        }
 
         // MovDnW operations
-        MovDnW2 => { stack.movdnw(2); StackManipResult::Applied }
-        MovDnW3 => { stack.movdnw(3); StackManipResult::Applied }
+        MovDnW2 => {
+            stack.movdnw(2);
+            StackManipResult::Applied
+        }
+        MovDnW3 => {
+            stack.movdnw(3);
+            StackManipResult::Applied
+        }
 
         // Not a pure stack manipulation (handled separately)
         _ => StackManipResult::NotStackManip,
@@ -1133,17 +1326,38 @@ mod tests {
 
     #[test]
     fn test_static_effect_arithmetic() {
-        assert_eq!(static_effect(&Instruction::Add), Some(StaticEffect::new(2, 1)));
-        assert_eq!(static_effect(&Instruction::Sub), Some(StaticEffect::new(2, 1)));
-        assert_eq!(static_effect(&Instruction::Neg), Some(StaticEffect::new(1, 1)));
+        assert_eq!(
+            static_effect(&Instruction::Add),
+            Some(StaticEffect::new(2, 1))
+        );
+        assert_eq!(
+            static_effect(&Instruction::Sub),
+            Some(StaticEffect::new(2, 1))
+        );
+        assert_eq!(
+            static_effect(&Instruction::Neg),
+            Some(StaticEffect::new(1, 1))
+        );
     }
 
     #[test]
     fn test_static_effect_stack_ops() {
-        assert_eq!(static_effect(&Instruction::Drop), Some(StaticEffect::new(1, 0)));
-        assert_eq!(static_effect(&Instruction::DropW), Some(StaticEffect::new(4, 0)));
-        assert_eq!(static_effect(&Instruction::Dup0), Some(StaticEffect::new(0, 1)));
-        assert_eq!(static_effect(&Instruction::Swap1), Some(StaticEffect::new(0, 0)));
+        assert_eq!(
+            static_effect(&Instruction::Drop),
+            Some(StaticEffect::new(1, 0))
+        );
+        assert_eq!(
+            static_effect(&Instruction::DropW),
+            Some(StaticEffect::new(4, 0))
+        );
+        assert_eq!(
+            static_effect(&Instruction::Dup0),
+            Some(StaticEffect::new(0, 1))
+        );
+        assert_eq!(
+            static_effect(&Instruction::Swap1),
+            Some(StaticEffect::new(0, 0))
+        );
     }
 
     #[test]

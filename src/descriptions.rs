@@ -178,13 +178,18 @@ impl ToDescription for Instruction {
 
             // === Stack position: swapw ===
             Instruction::SwapW1 => Some("Swaps the top two stack words.".into()),
-            Instruction::SwapW2 => Some(format!("Swaps the top word with the {} word.", ordinal(2))),
-            Instruction::SwapW3 => Some(format!("Swaps the top word with the {} word.", ordinal(3))),
+            Instruction::SwapW2 => {
+                Some(format!("Swaps the top word with the {} word.", ordinal(2)))
+            }
+            Instruction::SwapW3 => {
+                Some(format!("Swaps the top word with the {} word.", ordinal(3)))
+            }
 
             // === Push instructions ===
-            Instruction::Push(imm) => {
-                Some(format!("Pushes {} onto the stack.", format_push_immediate(imm)))
-            }
+            Instruction::Push(imm) => Some(format!(
+                "Pushes {} onto the stack.",
+                format_push_immediate(imm)
+            )),
             Instruction::PushFeltList(values) => Some(format!(
                 "Pushes the field elements {} onto the stack.",
                 format_felt_list(values)
@@ -236,9 +241,10 @@ impl ToDescription for Instruction {
                 "c = floor(a / {}). Fails if b = 0.",
                 format_u32_immediate(v)
             )),
-            Instruction::U32ModImm(v) => {
-                Some(format!("c = a mod {}. Fails if b = 0.", format_u32_immediate(v)))
-            }
+            Instruction::U32ModImm(v) => Some(format!(
+                "c = a mod {}. Fails if b = 0.",
+                format_u32_immediate(v)
+            )),
             Instruction::U32DivModImm(v) => Some(format!(
                 "c = floor(a / {}), d = a mod {}. Fails if b = 0.",
                 format_u32_immediate(v),
@@ -330,9 +336,10 @@ impl ToDescription for Instruction {
             )),
 
             // === Emit/Trace ===
-            Instruction::EmitImm(v) => {
-                Some(format!("Emits event {} to the host.", format_felt_immediate(v)))
-            }
+            Instruction::EmitImm(v) => Some(format!(
+                "Emits event {} to the host.",
+                format_felt_immediate(v)
+            )),
             Instruction::Trace(v) => Some(format!(
                 "Emits trace {} to the host.",
                 format_u32_immediate(v)
@@ -529,7 +536,10 @@ mod tests {
     fn hint_mem_load_imm() {
         let imm = Immediate::from(42u32);
         let hint = Instruction::MemLoadImm(imm).to_description();
-        assert_eq!(hint, Some("v = mem[42]. Pushes element from memory.".into()));
+        assert_eq!(
+            hint,
+            Some("v = mem[42]. Pushes element from memory.".into())
+        );
     }
 
     #[test]

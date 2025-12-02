@@ -5,8 +5,8 @@ use miden_assembly_syntax::ast::{Instruction, InvocationTarget, Module};
 use miden_debug_types::{DefaultSourceManager, Span, Spanned};
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range};
 
-use crate::diagnostics::span_to_range;
 use crate::descriptions::{format_push_immediate, ToDescription};
+use crate::diagnostics::span_to_range;
 
 // Include the compile-time generated instruction map
 include!(concat!(env!("OUT_DIR"), "/instruction_map.rs"));

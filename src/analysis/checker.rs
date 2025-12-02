@@ -157,9 +157,9 @@ pub fn u32_op_input_count(inst: &Instruction) -> usize {
 
         // Binary: pop 2
         U32WrappingAdd | U32WrappingSub | U32WrappingMul | U32OverflowingAdd
-        | U32OverflowingSub | U32OverflowingMul | U32DivMod | U32Div | U32Mod | U32And
-        | U32Or | U32Xor | U32Shl | U32Shr | U32Rotl | U32Rotr | U32Lt | U32Lte | U32Gt
-        | U32Gte | U32Min | U32Max => 2,
+        | U32OverflowingSub | U32OverflowingMul | U32DivMod | U32Div | U32Mod | U32And | U32Or
+        | U32Xor | U32Shl | U32Shr | U32Rotl | U32Rotr | U32Lt | U32Lte | U32Gt | U32Gte
+        | U32Min | U32Max => 2,
 
         // Unary with immediate: pop 1
         U32WrappingAddImm(_)

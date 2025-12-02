@@ -155,7 +155,10 @@ impl MemoryOp {
     pub fn has_stack_address(&self) -> bool {
         matches!(
             self,
-            MemoryOp::LoadStack | MemoryOp::StoreStack | MemoryOp::LoadWStack | MemoryOp::StoreWStack
+            MemoryOp::LoadStack
+                | MemoryOp::StoreStack
+                | MemoryOp::LoadWStack
+                | MemoryOp::StoreWStack
         )
     }
 }

@@ -103,7 +103,9 @@ impl Checker for ProcedureCallChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::contracts::{ContractStore, ProcContract, StackEffect, ValidationBehavior};
+    use crate::analysis::contracts::{
+        ContractStore, ProcContract, StackEffect, ValidationBehavior,
+    };
     use crate::analysis::types::AnalysisState;
     use crate::symbol_path::SymbolPath;
     use miden_assembly_syntax::ast::Ident;
@@ -143,7 +145,10 @@ mod tests {
             uses_u32_ops: true,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            stack_effect: StackEffect::Known {
+                inputs: 2,
+                outputs: 1,
+            },
             signature: None,
             definition_range: None,
         }]);
@@ -173,7 +178,10 @@ mod tests {
             uses_u32_ops: true,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            stack_effect: StackEffect::Known {
+                inputs: 2,
+                outputs: 1,
+            },
             signature: None,
             definition_range: None,
         }]);
@@ -226,7 +234,10 @@ mod tests {
             uses_u32_ops: true,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            stack_effect: StackEffect::Known {
+                inputs: 2,
+                outputs: 1,
+            },
             signature: None,
             definition_range: None,
         }]);
@@ -263,7 +274,10 @@ mod tests {
             uses_u32_ops: true,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Known { inputs: 1, outputs: 1 },
+            stack_effect: StackEffect::Known {
+                inputs: 1,
+                outputs: 1,
+            },
             signature: None,
             definition_range: None,
         }]);
@@ -298,7 +312,10 @@ mod tests {
             uses_u32_ops: true,
             reads_advice: false,
             uses_merkle_ops: false,
-            stack_effect: StackEffect::Known { inputs: 2, outputs: 1 },
+            stack_effect: StackEffect::Known {
+                inputs: 2,
+                outputs: 1,
+            },
             signature: None,
             definition_range: None,
         }]);

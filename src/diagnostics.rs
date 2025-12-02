@@ -102,9 +102,7 @@ fn build_error_message(
     offset: usize,
 ) -> String {
     // Check if label message is unhelpful (LALRPOP-generated)
-    let label_is_unhelpful = label_msg
-        .map(is_unhelpful_label_message)
-        .unwrap_or(true);
+    let label_is_unhelpful = label_msg.map(is_unhelpful_label_message).unwrap_or(true);
 
     // If we have a helpful label message, use it
     if !label_is_unhelpful {
@@ -126,10 +124,7 @@ fn build_error_message(
             // Try to get the actual text at the error location
             if let Some(actual_text) = get_text_at_offset(source, offset) {
                 if actual_text != *token && !actual_text.is_empty() {
-                    return format!(
-                        "Unexpected '{}'; {}",
-                        actual_text, simplified_expected
-                    );
+                    return format!("Unexpected '{}'; {}", actual_text, simplified_expected);
                 }
             }
             return format!("Unexpected {}; {}", token, simplified_expected);
@@ -279,7 +274,10 @@ fn get_context_error_message(
         // Check if it looks like an unknown instruction
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2 {
-            return Some(format!("Unknown instruction or invalid syntax: '{}'", parts[1]));
+            return Some(format!(
+                "Unknown instruction or invalid syntax: '{}'",
+                parts[1]
+            ));
         }
     }
     if found_token == Some("identifier") {

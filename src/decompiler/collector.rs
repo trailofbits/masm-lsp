@@ -13,16 +13,20 @@ use tower_lsp::lsp_types::{
     InlayHintLabel, Location, Position, Range, Url,
 };
 
-use crate::analysis::{pre_analyze_procedure, ContractStore, StackEffect};
+use crate::analysis::{
+    abstract_interpretation::{analyze_repeat_loop, analyze_while_loop, LoopTerm},
+    pre_analyze_procedure, ContractStore, StackEffect, SymbolicExpr,
+};
 use crate::diagnostics::{span_to_range, SOURCE_DECOMPILATION};
 use crate::symbol_resolution::SymbolResolver;
 
-use super::pseudocode::{extract_declaration_prefix, format_procedure_signature};
+use crate::decompiler::ssa::{PseudocodeBuilder, extract_declaration_prefix, format_procedure_signature};
 use super::ssa::{
-    PseudocodeTemplate, SsaContext, SsaDecompilerState,
-    TemplateOutput, PseudocodeOutput,
+    PseudocodeTemplate, SsaContext, DecompilerState,
+    // Helper functions for pseudocode generation
+    binary_op, binary_imm_op, comparison, comparison_imm,
+    unary_op, unary_fn, ext2_binary_op, ext2_unary_op, ext2_unary_fn,
 };
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Hint Collection Types
 // ═══════════════════════════════════════════════════════════════════════════
@@ -49,6 +53,1662 @@ pub(crate) struct TrackingFailure {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Parametric Types for Resolution-Time Computation
+// ═══════════════════════════════════════════════════════════════════════════
+
+use super::ssa::SsaId;
+
+/// A term in a parametric expression representing `stride * counter`.
+///
+/// Used at hint resolution time to compute parametric variable names
+/// based on the loop context at the time the hint was created.
+#[derive(Debug, Clone)]
+struct ParametricTerm {
+    /// Coefficient of the loop counter (negative for decrementing access)
+    stride: i32,
+    /// Index into the counter names list (0 = outermost loop)
+    counter_idx: usize,
+}
+
+impl ParametricTerm {
+    fn new(stride: i32, counter_idx: usize) -> Self {
+        Self {
+            stride,
+            counter_idx,
+        }
+    }
+}
+
+/// A parametric expression of the form `base + stride_0 * counter_0 + stride_1 * counter_1 + ...`
+///
+/// Computed at hint creation time based on the active loops and their stack effects.
+/// Used at resolution time to generate display names like `a_(3-i)`.
+#[derive(Debug, Clone)]
+struct ParametricExpr {
+    /// Variable prefix ("a" for arguments, "v" for locals)
+    prefix: char,
+    /// Base index (constant part)
+    base: i32,
+    /// Loop terms - each represents dependency on one loop counter
+    terms: Vec<ParametricTerm>,
+}
+
+impl ParametricExpr {
+    /// Create a new parametric expression for an argument.
+    fn argument(base: i32, terms: Vec<ParametricTerm>) -> Self {
+        Self {
+            prefix: 'a',
+            base,
+            terms,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Instruction Handlers (defined here, called from PseudocodeCollector)
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl<'a> PseudocodeCollector<'a> {
+    fn handle_memory_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::MemLoad => {
+                let addr = state.pop();
+                let var = state.new_local();
+                state.push(var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
+                out.text(" = mem[");
+                out.var(addr);
+                out.text("]");
+                Some(out.build())
+            }
+            Instruction::MemLoadImm(imm) => {
+                let addr = Self::format_imm(imm);
+                let var = state.new_local();
+                state.push(var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
+                out.text(&format!(" = mem[{}]", addr));
+                Some(out.build())
+            }
+            Instruction::MemStore => {
+                let addr = state.pop();
+                let val = state.pop();
+                let mut out = PseudocodeBuilder::new();
+                out.text("mem[");
+                out.var(addr);
+                out.text("] = ");
+                out.var(val);
+                Some(out.build())
+            }
+            Instruction::MemStoreImm(imm) => {
+                let addr = Self::format_imm(imm);
+                let val = state.pop();
+                let mut out = PseudocodeBuilder::new();
+                out.text(&format!("mem[{}] = ", addr));
+                out.var(val);
+                Some(out.build())
+            }
+            Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
+                let addr = state.pop();
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = mem_w[");
+                out.var(addr);
+                out.text("]");
+                Some(out.build())
+            }
+            Instruction::MemLoadWBeImm(imm) | Instruction::MemLoadWLeImm(imm) => {
+                let addr = Self::format_imm(imm);
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(&format!(") = mem_w[{}]", addr));
+                Some(out.build())
+            }
+            Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
+                let addr = state.pop();
+                let mut vals = Vec::new();
+                for _ in 0..4 {
+                    vals.push(state.pop());
+                }
+                vals.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("mem_w[");
+                out.var(addr);
+                out.text("] = (");
+                for (i, val) in vals.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*val);
+                }
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::MemStoreWBeImm(imm) | Instruction::MemStoreWLeImm(imm) => {
+                let addr = Self::format_imm(imm);
+                let mut vals = Vec::new();
+                for _ in 0..4 {
+                    vals.push(state.pop());
+                }
+                vals.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text(&format!("mem_w[{}] = (", addr));
+                for (i, val) in vals.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*val);
+                }
+                out.text(")");
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_local_memory_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::LocLoad(idx) => {
+                let var = state.new_local();
+                state.push(var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
+                out.text(&format!(" = local[{}]", idx));
+                Some(out.build())
+            }
+            Instruction::LocStore(idx) => {
+                let val = state.pop();
+                let mut out = PseudocodeBuilder::new();
+                out.text(&format!("local[{}] = ", idx));
+                out.var(val);
+                Some(out.build())
+            }
+            Instruction::LocLoadWBe(idx) | Instruction::LocLoadWLe(idx) => {
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(&format!(") = local_w[{}]", idx));
+                Some(out.build())
+            }
+            Instruction::LocStoreWBe(idx) | Instruction::LocStoreWLe(idx) => {
+                let mut vals = Vec::new();
+                for _ in 0..4 {
+                    vals.push(state.pop());
+                }
+                vals.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text(&format!("local_w[{}] = (", idx));
+                for (i, val) in vals.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*val);
+                }
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::Locaddr(idx) => {
+                let var = state.new_local();
+                state.push(var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
+                out.text(&format!(" = &local[{}]", idx));
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_advice_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::AdvPush(n) => {
+                let count = match n {
+                    miden_assembly_syntax::ast::Immediate::Value(v) => v.into_inner() as usize,
+                    _ => 1,
+                };
+                let mut vars = Vec::new();
+                for _ in 0..count {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = advice()");
+                Some(out.build())
+            }
+            Instruction::AdvLoadW => {
+                for _ in 0..4 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = advice_w()");
+                Some(out.build())
+            }
+            Instruction::AdvPipe => {
+                for _ in 0..8 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..8 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = advice_pipe()");
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_crypto_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::Hash => {
+                let mut args = Vec::new();
+                for _ in 0..4 {
+                    args.push(state.pop());
+                }
+                args.reverse();
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = hash((");
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*arg);
+                }
+                out.text("))");
+                Some(out.build())
+            }
+            Instruction::HMerge => {
+                for _ in 0..8 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = hmerge(...)");
+                Some(out.build())
+            }
+            Instruction::HPerm => {
+                let mut inputs = Vec::new();
+                for i in 0..12 {
+                    if let Some(id) = state.peek(i) {
+                        inputs.push(id);
+                    }
+                }
+                inputs.reverse();
+
+                for _ in 0..12 {
+                    state.pop();
+                }
+
+                let mut outputs = Vec::new();
+                for _ in 0..12 {
+                    let var = state.new_local();
+                    state.push(var);
+                    outputs.push(var);
+                }
+                outputs.reverse();
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in outputs.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = hperm(");
+                for (i, var) in inputs.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(")");
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_merkle_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::MTreeGet => {
+                state.pop();
+                state.pop();
+                for _ in 0..4 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = mtree_get()");
+                Some(out.build())
+            }
+            Instruction::MTreeSet => {
+                state.pop();
+                state.pop();
+                for _ in 0..4 {
+                    state.pop();
+                }
+                for _ in 0..4 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = mtree_set()");
+                Some(out.build())
+            }
+            Instruction::MTreeMerge => {
+                for _ in 0..8 {
+                    state.pop();
+                }
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = mtree_merge()");
+                Some(out.build())
+            }
+            Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
+                Some(PseudocodeTemplate::new().literal("mtree_verify()"))
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_word_stack_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+        _span: SourceSpan,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::SwapW1 => {
+                self.swapw(0, 1);
+                None
+            }
+            Instruction::SwapW2 => {
+                self.swapw(0, 2);
+                None
+            }
+            Instruction::SwapW3 => {
+                self.swapw(0, 3);
+                None
+            }
+            Instruction::SwapDw => {
+                for i in 0..8 {
+                    state.swap(i, 8 + i);
+                }
+                None
+            }
+            Instruction::MovUpW2 => {
+                self.movupw(2);
+                None
+            }
+            Instruction::MovUpW3 => {
+                self.movupw(3);
+                None
+            }
+            Instruction::MovDnW2 => {
+                self.movdnw(2);
+                None
+            }
+            Instruction::MovDnW3 => {
+                self.movdnw(3);
+                None
+            }
+            Instruction::DupW0 => self.dupw_template(0),
+            Instruction::DupW1 => self.dupw_template(1),
+            Instruction::DupW2 => self.dupw_template(2),
+            Instruction::DupW3 => self.dupw_template(3),
+            Instruction::PadW => {
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = (0, 0, 0, 0)");
+                Some(out.build())
+            }
+            Instruction::Reversew => {
+                state.swap(0, 3);
+                state.swap(1, 2);
+                None
+            }
+            Instruction::Reversedw => {
+                for i in 0..4 {
+                    state.swap(i, 7 - i);
+                }
+                None
+            }
+            Instruction::Eqw => {
+                for _ in 0..8 {
+                    state.pop();
+                }
+                let var = state.new_local();
+                state.push(var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
+                out.text(" = eqw()");
+                Some(out.build())
+            }
+            Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
+                for _ in 0..8 {
+                    state.pop();
+                }
+                Some(PseudocodeTemplate::new().literal("assert_eqw()"))
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_conditional_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::CSwap => {
+                let cond = state.pop();
+                let top0 = state.pop();
+                let top1 = state.pop();
+
+                let lower = state.new_local();
+                let upper = state.new_local();
+                state.push(lower);
+                state.push(upper);
+
+                state.ctx.add_phi(lower, vec![top1, top0]);
+                state.ctx.add_phi(upper, vec![top0, top1]);
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(lower);
+                out.text(", ");
+                out.var(upper);
+                out.text(") = cswap(");
+                out.var(cond);
+                out.text(", ");
+                out.var(top1);
+                out.text(", ");
+                out.var(top0);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::CSwapW => {
+                let cond = state.pop();
+
+                let mut upper = Vec::new();
+                for _ in 0..4 {
+                    upper.push(state.pop());
+                }
+                let mut lower = Vec::new();
+                for _ in 0..4 {
+                    lower.push(state.pop());
+                }
+
+                let mut lower_new = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    lower_new.push(var);
+                }
+                let mut upper_new = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    upper_new.push(var);
+                }
+
+                for i in 0..4 {
+                    state.ctx.add_phi(lower_new[i], vec![lower[i], upper[i]]);
+                    state.ctx.add_phi(upper_new[i], vec![upper[i], lower[i]]);
+                }
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("cswapw(");
+                out.var(cond);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::CDrop => {
+                let cond = state.pop();
+                state.pop();
+                let mut out = PseudocodeBuilder::new();
+                out.text("cdrop(");
+                out.var(cond);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::CDropW => {
+                let cond = state.pop();
+                for _ in 0..4 {
+                    state.pop();
+                }
+                let mut out = PseudocodeBuilder::new();
+                out.text("cdropw(");
+                out.var(cond);
+                out.text(")");
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_assertions(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::Assert | Instruction::AssertWithError(_) => {
+                let cond = state.pop();
+                let mut out = PseudocodeBuilder::new();
+                out.text("assert(");
+                out.var(cond);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::AssertEq | Instruction::AssertEqWithError(_) => {
+                let b = state.pop();
+                let a = state.pop();
+                let mut out = PseudocodeBuilder::new();
+                out.text("assert(");
+                out.var(a);
+                out.text(" == ");
+                out.var(b);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::Assertz | Instruction::AssertzWithError(_) => {
+                let val = state.pop();
+                let mut out = PseudocodeBuilder::new();
+                out.text("assert(");
+                out.var(val);
+                out.text(" == 0)");
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_misc_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::ILog2 => Some(unary_fn(state, "ilog2")),
+            Instruction::Pow2 => Some(unary_fn(state, "pow2")),
+            Instruction::Exp => Some(binary_op(state, "**")),
+            Instruction::ExpImm(imm) => Some(binary_imm_op(state, "**", &Self::format_imm(imm))),
+            Instruction::ExpBitLength(bits) => {
+                let exp = state.pop();
+                let base = state.pop();
+                let var = state.new_local();
+                state.push(var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
+                out.text(" = ");
+                out.var(base);
+                out.text(&format!(" ** ("));
+                out.var(exp);
+                out.text(&format!(", {}-bit)", bits));
+                Some(out.build())
+            }
+            Instruction::IsOdd => Some(unary_fn(state, "is_odd")),
+            Instruction::Nop
+            | Instruction::Breakpoint
+            | Instruction::Debug(_)
+            | Instruction::Emit
+            | Instruction::EmitImm(_)
+            | Instruction::Trace(_)
+            | Instruction::SysEvent(_) => None,
+            _ => None,
+        }
+    }
+
+    fn handle_complex_stark_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::HornerBase => {
+                let mut inputs = Vec::new();
+                for _ in 0..16 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                for i in 0..16 {
+                    if i == 0 || i == 1 {
+                        let var = state.new_local();
+                        state.push(var);
+                    } else {
+                        state.push(inputs[i]);
+                    }
+                }
+
+                let acc0_new = state.peek(15).unwrap_or_else(|| state.new_local());
+                let acc1_new = state.peek(14).unwrap_or_else(|| state.new_local());
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(acc1_new);
+                out.text(", ");
+                out.var(acc0_new);
+                out.text(") = horner_eval_base(");
+                for i in 0..8 {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(inputs[i]);
+                }
+                out.text(", alpha@");
+                out.var(inputs[13]);
+                out.text(", ");
+                out.var(inputs[14]);
+                out.text(", ");
+                out.var(inputs[15]);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::HornerExt => {
+                let mut inputs = Vec::new();
+                for _ in 0..16 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                for i in 0..16 {
+                    if i == 0 || i == 1 {
+                        let var = state.new_local();
+                        state.push(var);
+                    } else {
+                        state.push(inputs[i]);
+                    }
+                }
+
+                let acc0_new = state.peek(15).unwrap_or_else(|| state.new_local());
+                let acc1_new = state.peek(14).unwrap_or_else(|| state.new_local());
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(acc1_new);
+                out.text(", ");
+                out.var(acc0_new);
+                out.text(") = horner_eval_ext(");
+                for i in 0..8 {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(inputs[i]);
+                }
+                out.text(", alpha@");
+                out.var(inputs[13]);
+                out.text(", ");
+                out.var(inputs[14]);
+                out.text(", ");
+                out.var(inputs[15]);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::FriExt2Fold4 => {
+                let mut inputs = Vec::new();
+                for _ in 0..17 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                let mut outputs = Vec::new();
+                for _ in 0..16 {
+                    let var = state.new_local();
+                    state.push(var);
+                    outputs.push(var);
+                }
+
+                let out_vars: Vec<_> = (0..16).filter_map(|i| state.peek(i)).collect();
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("(_, _, _, _, _, _, _, _, _, _, ");
+                if out_vars.len() >= 6 {
+                    out.var(out_vars[5]);
+                    out.text(", ");
+                    out.var(out_vars[4]);
+                    out.text(", ");
+                    out.var(out_vars[3]);
+                    out.text(", ");
+                    out.var(out_vars[2]);
+                    out.text(", ");
+                    out.var(out_vars[1]);
+                    out.text(", ");
+                    out.var(out_vars[0]);
+                }
+                out.text(") = fri_ext2fold4(");
+                for i in 0..8.min(inputs.len()) {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(inputs[i]);
+                }
+                out.text(", ...)");
+                Some(out.build())
+            }
+            Instruction::EvalCircuit => {
+                let n_eval = state.peek(0);
+                let n_read = state.peek(1);
+                let ptr = state.peek(2);
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("eval_circuit(ptr=");
+                if let Some(p) = ptr {
+                    out.var(p);
+                }
+                out.text(", n_read=");
+                if let Some(n) = n_read {
+                    out.var(n);
+                }
+                out.text(", n_eval=");
+                if let Some(n) = n_eval {
+                    out.var(n);
+                }
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::LogPrecompile => {
+                let mut inputs = Vec::new();
+                for _ in 0..8 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                for _ in 0..12 {
+                    let var = state.new_local();
+                    state.push(var);
+                }
+
+                let out_vars: Vec<_> = (0..12).filter_map(|i| state.peek(i)).collect();
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in out_vars.iter().rev().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = log_precompile(");
+                for (i, var) in inputs.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(")");
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_memory_stream_op(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::MemStream => {
+                let mut inputs = Vec::new();
+                for _ in 0..13 {
+                    inputs.push(state.pop());
+                }
+                inputs.reverse();
+
+                let mut outputs = Vec::new();
+                for _ in 0..13 {
+                    let var = state.new_local();
+                    state.push(var);
+                    outputs.push(var);
+                }
+                outputs.reverse();
+
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in outputs.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(") = mem_stream(");
+                for (i, var) in inputs.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(")");
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_proc_ref(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::ProcRef(target) => {
+                let mut vars = Vec::new();
+                for _ in 0..4 {
+                    let var = state.new_local();
+                    state.push(var);
+                    vars.push(var);
+                }
+                vars.reverse();
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                for (i, var) in vars.iter().enumerate() {
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
+                }
+                out.text(&format!(") = procref({})", target));
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_calls(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+        span: SourceSpan,
+    ) -> Option<PseudocodeTemplate> {
+        use crate::analysis::contracts::StackEffect;
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
+                let resolved_path = self.resolver.resolve_target(target);
+                let stack_effect = resolved_path
+                    .as_ref()
+                    .and_then(|path| self.contracts.and_then(|c| c.get(path)))
+                    .map(|c| c.stack_effect.clone());
+
+                match stack_effect {
+                    Some(StackEffect::Known { inputs, outputs }) => {
+                        let mut input_vars = Vec::new();
+                        for _ in 0..inputs {
+                            input_vars.push(state.pop());
+                        }
+                        input_vars.reverse();
+
+                        let mut output_vars = Vec::new();
+                        for _ in 0..outputs {
+                            let var = state.new_local();
+                            state.push(var);
+                            output_vars.push(var);
+                        }
+                        output_vars.reverse();
+
+                        let mut out = PseudocodeBuilder::new();
+                        if !output_vars.is_empty() {
+                            out.text("(");
+                            for (i, var) in output_vars.iter().enumerate() {
+                                if i > 0 {
+                                    out.text(", ");
+                                }
+                                out.var(*var);
+                            }
+                            out.text(") = ");
+                        }
+                        out.text(&format!("{}(", target));
+                        for (i, var) in input_vars.iter().enumerate() {
+                            if i > 0 {
+                                out.text(", ");
+                            }
+                            out.var(*var);
+                        }
+                        out.text(")");
+                        Some(out.build())
+                    }
+                    Some(StackEffect::KnownInputs { inputs }) => {
+                        let mut input_vars = Vec::new();
+                        for _ in 0..inputs {
+                            input_vars.push(state.pop());
+                        }
+                        input_vars.reverse();
+                        let mut output_vars = Vec::new();
+                        for _ in 0..inputs {
+                            let var = state.new_local();
+                            state.push(var);
+                            output_vars.push(var);
+                        }
+                        output_vars.reverse();
+
+                        let mut out = PseudocodeBuilder::new();
+                        if !output_vars.is_empty() {
+                            out.text("(");
+                            for (i, var) in output_vars.iter().enumerate() {
+                                if i > 0 {
+                                    out.text(", ");
+                                }
+                                out.var(*var);
+                            }
+                            out.text(") = ");
+                        }
+                        out.text(&format!("{}(", target));
+                        for (i, var) in input_vars.iter().enumerate() {
+                            if i > 0 {
+                                out.text(", ");
+                            }
+                            out.var(*var);
+                        }
+                        out.text(")");
+                        Some(out.build())
+                    }
+                    _ => {
+                        self.fail_decompilation(
+                            span,
+                            &format!("call target `{target}` has no known stack effect"),
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_dynamic_calls(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+        span: SourceSpan,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+
+        match inst {
+            Instruction::DynExec | Instruction::DynCall => {
+                let name = if matches!(inst, Instruction::DynExec) {
+                    "dynexec"
+                } else {
+                    "dyncall"
+                };
+                self.fail_decompilation(
+                    span,
+                    &format!("dynamic call `{name}` prevents decompilation"),
+                );
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_comparison_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::Eq => Some(comparison(state, "==")),
+            Instruction::Neq => Some(comparison(state, "!=")),
+            Instruction::Lt => Some(comparison(state, "<")),
+            Instruction::Lte => Some(comparison(state, "<=")),
+            Instruction::Gt => Some(comparison(state, ">")),
+            Instruction::Gte => Some(comparison(state, ">=")),
+            Instruction::EqImm(imm) => Some(comparison_imm(state, "==", &Self::format_imm(imm))),
+            Instruction::NeqImm(imm) => Some(comparison_imm(state, "!=", &Self::format_imm(imm))),
+            _ => None,
+        }
+    }
+
+    fn handle_boolean_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::And => Some(binary_op(state, "&&")),
+            Instruction::Or => Some(binary_op(state, "||")),
+            Instruction::Xor => Some(binary_op(state, "^")),
+            Instruction::Not => Some(unary_op(state, "!")),
+            _ => None,
+        }
+    }
+
+    fn handle_ext2_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::Ext2Add => Some(ext2_binary_op(state, "+")),
+            Instruction::Ext2Sub => Some(ext2_binary_op(state, "-")),
+            Instruction::Ext2Mul => Some(ext2_binary_op(state, "*")),
+            Instruction::Ext2Div => Some(ext2_binary_op(state, "/")),
+            Instruction::Ext2Neg => Some(ext2_unary_op(state, "-")),
+            Instruction::Ext2Inv => Some(ext2_unary_fn(state, "inv")),
+            _ => None,
+        }
+    }
+
+    fn handle_u32_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
+
+        match inst {
+            Instruction::U32And => Some(binary_op(state, "&")),
+            Instruction::U32Or => Some(binary_op(state, "|")),
+            Instruction::U32Xor => Some(binary_op(state, "^")),
+            Instruction::U32Not => Some(unary_op(state, "~")),
+            Instruction::U32WrappingAdd => Some(binary_op(state, "+")),
+            Instruction::U32WrappingSub => Some(binary_op(state, "-")),
+            Instruction::U32WrappingMul => Some(binary_op(state, "*")),
+            Instruction::U32Div => Some(binary_op(state, "/")),
+            Instruction::U32Mod => Some(binary_op(state, "%")),
+            Instruction::U32WrappingAddImm(imm) => Some(binary_imm_op(state, "+", &Self::format_imm(imm))),
+            Instruction::U32WrappingSubImm(imm) => Some(binary_imm_op(state, "-", &Self::format_imm(imm))),
+            Instruction::U32WrappingMulImm(imm) => Some(binary_imm_op(state, "*", &Self::format_imm(imm))),
+            Instruction::U32DivImm(imm) => Some(binary_imm_op(state, "/", &Self::format_imm(imm))),
+            Instruction::U32ModImm(imm) => Some(binary_imm_op(state, "%", &Self::format_imm(imm))),
+            Instruction::U32Shl => Some(binary_op(state, "<<")),
+            Instruction::U32Shr => Some(binary_op(state, ">>")),
+            Instruction::U32ShlImm(imm) => Some(binary_imm_op(state, "<<", &Self::format_imm(imm))),
+            Instruction::U32ShrImm(imm) => Some(binary_imm_op(state, ">>", &Self::format_imm(imm))),
+            Instruction::U32Rotl => Some(binary_op(state, "rotl")),
+            Instruction::U32Rotr => Some(binary_op(state, "rotr")),
+            Instruction::U32RotlImm(imm) => Some(binary_imm_op(state, "rotl", &Self::format_imm(imm))),
+            Instruction::U32RotrImm(imm) => Some(binary_imm_op(state, "rotr", &Self::format_imm(imm))),
+            Instruction::U32Lt => Some(comparison(state, "<")),
+            Instruction::U32Lte => Some(comparison(state, "<=")),
+            Instruction::U32Gt => Some(comparison(state, ">")),
+            Instruction::U32Gte => Some(comparison(state, ">=")),
+            Instruction::U32Min => Some(binary_op(state, "min")),
+            Instruction::U32Max => Some(binary_op(state, "max")),
+            Instruction::U32Popcnt => Some(unary_fn(state, "popcnt")),
+            Instruction::U32Clz => Some(unary_fn(state, "clz")),
+            Instruction::U32Ctz => Some(unary_fn(state, "ctz")),
+            Instruction::U32Clo => Some(unary_fn(state, "clo")),
+            Instruction::U32Cto => Some(unary_fn(state, "cto")),
+            Instruction::U32Cast => Some(unary_fn(state, "u32")),
+            Instruction::U32Assert
+            | Instruction::U32AssertWithError(_)
+            | Instruction::U32Assert2
+            | Instruction::U32Assert2WithError(_)
+            | Instruction::U32AssertW
+            | Instruction::U32AssertWWithError(_) => None,
+            Instruction::U32OverflowingAdd => {
+                let b = state.pop();
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(result);
+                out.text(", ");
+                out.var(overflow);
+                out.text(") = ");
+                out.var(a);
+                out.text(" + ");
+                out.var(b);
+                out.text(" (overflow)");
+                Some(out.build())
+            }
+            Instruction::U32OverflowingSub => {
+                let b = state.pop();
+                let a = state.pop();
+                let underflow = state.new_local();
+                let result = state.new_local();
+                state.push(underflow);
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(result);
+                out.text(", ");
+                out.var(underflow);
+                out.text(") = ");
+                out.var(a);
+                out.text(" - ");
+                out.var(b);
+                out.text(" (underflow)");
+                Some(out.build())
+            }
+            Instruction::U32OverflowingMul => {
+                let b = state.pop();
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(result);
+                out.text(", ");
+                out.var(overflow);
+                out.text(") = ");
+                out.var(a);
+                out.text(" * ");
+                out.var(b);
+                out.text(" (overflow)");
+                Some(out.build())
+            }
+            Instruction::U32OverflowingAddImm(imm) => {
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(result);
+                out.text(", ");
+                out.var(overflow);
+                out.text(") = ");
+                out.var(a);
+                out.text(&format!(" + {} (overflow)", Self::format_imm(imm)));
+                Some(out.build())
+            }
+            Instruction::U32OverflowingSubImm(imm) => {
+                let a = state.pop();
+                let underflow = state.new_local();
+                let result = state.new_local();
+                state.push(underflow);
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(result);
+                out.text(", ");
+                out.var(underflow);
+                out.text(") = ");
+                out.var(a);
+                out.text(&format!(" - {} (underflow)", Self::format_imm(imm)));
+                Some(out.build())
+            }
+            Instruction::U32OverflowingMulImm(imm) => {
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(result);
+                out.text(", ");
+                out.var(overflow);
+                out.text(") = ");
+                out.var(a);
+                out.text(&format!(" * {} (overflow)", Self::format_imm(imm)));
+                Some(out.build())
+            }
+            Instruction::U32OverflowingAdd3 => {
+                let c = state.pop();
+                let b = state.pop();
+                let a = state.pop();
+                let carry = state.new_local();
+                let result = state.new_local();
+                state.push(carry);
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(result);
+                out.text(", ");
+                out.var(carry);
+                out.text(") = ");
+                out.var(a);
+                out.text(" + ");
+                out.var(b);
+                out.text(" + ");
+                out.var(c);
+                out.text(" (carry)");
+                Some(out.build())
+            }
+            Instruction::U32WrappingAdd3 => {
+                let c = state.pop();
+                let b = state.pop();
+                let a = state.pop();
+                let result = state.new_local();
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.var(result);
+                out.text(" = ");
+                out.var(a);
+                out.text(" + ");
+                out.var(b);
+                out.text(" + ");
+                out.var(c);
+                Some(out.build())
+            }
+            Instruction::U32OverflowingMadd => {
+                let c = state.pop();
+                let b = state.pop();
+                let a = state.pop();
+                let overflow = state.new_local();
+                let result = state.new_local();
+                state.push(overflow);
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(result);
+                out.text(", ");
+                out.var(overflow);
+                out.text(") = ");
+                out.var(a);
+                out.text(" * ");
+                out.var(b);
+                out.text(" + ");
+                out.var(c);
+                out.text(" (overflow)");
+                Some(out.build())
+            }
+            Instruction::U32WrappingMadd => {
+                let c = state.pop();
+                let b = state.pop();
+                let a = state.pop();
+                let result = state.new_local();
+                state.push(result);
+                let mut out = PseudocodeBuilder::new();
+                out.var(result);
+                out.text(" = ");
+                out.var(a);
+                out.text(" * ");
+                out.var(b);
+                out.text(" + ");
+                out.var(c);
+                Some(out.build())
+            }
+            Instruction::U32DivMod => {
+                let b = state.pop();
+                let a = state.pop();
+                let remainder = state.new_local();
+                let quotient = state.new_local();
+                state.push(remainder);
+                state.push(quotient);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(quotient);
+                out.text(", ");
+                out.var(remainder);
+                out.text(") = divmod(");
+                out.var(a);
+                out.text(", ");
+                out.var(b);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::U32DivModImm(imm) => {
+                let a = state.pop();
+                let remainder = state.new_local();
+                let quotient = state.new_local();
+                state.push(remainder);
+                state.push(quotient);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(quotient);
+                out.text(", ");
+                out.var(remainder);
+                out.text(") = divmod(");
+                out.var(a);
+                out.text(&format!(", {})", Self::format_imm(imm)));
+                Some(out.build())
+            }
+            Instruction::U32Split => {
+                let a = state.pop();
+                let lo = state.new_local();
+                let hi = state.new_local();
+                state.push(lo);
+                state.push(hi);
+                let mut out = PseudocodeBuilder::new();
+                out.text("(");
+                out.var(hi);
+                out.text(", ");
+                out.var(lo);
+                out.text(") = split(");
+                out.var(a);
+                out.text(")");
+                Some(out.build())
+            }
+            Instruction::U32Test | Instruction::U32TestW => {
+                let var = state.new_local();
+                state.push(var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
+                out.text(" = is_u32(top)");
+                Some(out.build())
+            }
+            _ => None,
+        }
+    }
+}
+
+impl ParametricExpr {
+    /// Format the parametric expression using the given counter names.
+    ///
+    /// Applies simplification rules:
+    /// - If only one term with base=0 and stride=1: `a_i` instead of `a_(i)`
+    /// - Zero base is omitted: `a_(3*i)` instead of `a_(0+3*i)`
+    /// - Coefficient of 1 is omitted: `a_(3+i)` instead of `a_(3+1*i)`
+    fn format(&self, counter_names: &[String]) -> String {
+        let loop_terms: Vec<LoopTerm> = self
+            .terms
+            .iter()
+            .map(|t| LoopTerm::new(t.stride, t.counter_idx))
+            .collect();
+        let symbolic = if loop_terms.is_empty() {
+            SymbolicExpr::Input(self.base as usize)
+        } else {
+            SymbolicExpr::ParametricInput {
+                base: self.base,
+                loop_terms,
+            }
+        };
+
+        let counters: Vec<&str> = counter_names.iter().map(|s| s.as_str()).collect();
+        let formatted = symbolic.to_pseudocode_multi(&counters);
+        // Replace the default "a_" prefix with the requested one (currently only 'a').
+        formatted.replacen("a_", &format!("{}_", self.prefix), 1)
+    }
+
+    fn from_symbolic(expr: &SymbolicExpr) -> Option<Self> {
+        match expr {
+            SymbolicExpr::ParametricInput { base, loop_terms } => {
+                let terms = loop_terms
+                    .iter()
+                    .map(|t| ParametricTerm::new(t.stride, t.loop_depth))
+                    .collect();
+                Some(ParametricExpr::argument(*base, terms))
+            }
+            SymbolicExpr::Input(i) => Some(ParametricExpr::argument(*i as i32, Vec::new())),
+            _ => None,
+        }
+    }
+
+}
+
+/// Information about an active loop during decompilation.
+///
+/// Stored in the collector's loop_stack to track loop context for parametric naming.
+#[derive(Debug, Clone)]
+struct ActiveLoop {
+    /// Counter variable name (e.g., "i", "j", "k")
+    counter_name: String,
+    /// Symbolic stack snapshot after one iteration (with loop term offsets applied)
+    analyzed_stack: Vec<SymbolicExpr>,
+}
+
+impl ActiveLoop {
+    fn new(counter_name: String, analyzed_stack: Vec<SymbolicExpr>) -> Self {
+        Self {
+            counter_name,
+            analyzed_stack,
+        }
+    }
+
+    fn expr_for_argument(&self, arg_idx: usize) -> Option<SymbolicExpr> {
+        // Prefer the topmost occurrence of this argument (by base index).
+        self.analyzed_stack
+            .iter()
+            .rev()
+            .find_map(|expr| find_param_expr(expr, arg_idx))
+    }
+}
+
+fn find_param_expr(expr: &SymbolicExpr, arg_idx: usize) -> Option<SymbolicExpr> {
+    match expr {
+        SymbolicExpr::Input(i) if *i == arg_idx => Some(SymbolicExpr::Input(*i)),
+        SymbolicExpr::ParametricInput { base, .. } if *base == arg_idx as i32 => {
+            Some(expr.clone())
+        }
+        SymbolicExpr::BinaryOp { left, right, .. } => {
+            find_param_expr(left, arg_idx).or_else(|| find_param_expr(right, arg_idx))
+        }
+        SymbolicExpr::UnaryOp { operand, .. } => find_param_expr(operand, arg_idx),
+        SymbolicExpr::MemoryLoad { address } => find_param_expr(address, arg_idx),
+        _ => None,
+    }
+}
+
+fn shift_loop_depth(expr: &SymbolicExpr, offset: usize) -> SymbolicExpr {
+    match expr {
+        SymbolicExpr::ParametricInput { base, loop_terms } => {
+            let shifted_terms = loop_terms
+                .iter()
+                .map(|t| LoopTerm::new(t.stride, t.loop_depth + offset))
+                .collect();
+            SymbolicExpr::ParametricInput {
+                base: *base,
+                loop_terms: shifted_terms,
+            }
+        }
+        SymbolicExpr::BinaryOp { op, left, right } => SymbolicExpr::BinaryOp {
+            op: *op,
+            left: Box::new(shift_loop_depth(left, offset)),
+            right: Box::new(shift_loop_depth(right, offset)),
+        },
+        SymbolicExpr::UnaryOp { op, operand } => SymbolicExpr::UnaryOp {
+            op: *op,
+            operand: Box::new(shift_loop_depth(operand, offset)),
+        },
+        SymbolicExpr::MemoryLoad { address } => SymbolicExpr::MemoryLoad {
+            address: Box::new(shift_loop_depth(address, offset)),
+        },
+        _ => expr.clone(),
+    }
+}
+
+fn shift_loop_stack(stack: &[SymbolicExpr], offset: usize) -> Vec<SymbolicExpr> {
+    stack
+        .iter()
+        .map(|expr| shift_loop_depth(expr, offset))
+        .collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SSA-based Decompilation Collector
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -61,17 +1721,50 @@ struct SsaHint {
     template: PseudocodeTemplate,
     /// Indentation level when this hint was created
     indent_level: usize,
+    /// Map from SSA IDs to parametric expressions (computed at hint creation time)
+    parametric_map: HashMap<SsaId, ParametricExpr>,
+    /// Counter names at the time of hint creation (for formatting parametric expressions)
+    counter_names: Vec<String>,
 }
 
 impl SsaHint {
     fn new(line: u32, template: PseudocodeTemplate, indent_level: usize) -> Self {
-        Self { line, template, indent_level }
+        Self {
+            line,
+            template,
+            indent_level,
+            parametric_map: HashMap::new(),
+            counter_names: Vec::new(),
+        }
+    }
+
+    fn with_parametric(
+        line: u32,
+        template: PseudocodeTemplate,
+        indent_level: usize,
+        parametric_map: HashMap<SsaId, ParametricExpr>,
+        counter_names: Vec<String>,
+    ) -> Self {
+        Self {
+            line,
+            template,
+            indent_level,
+            parametric_map,
+            counter_names,
+        }
     }
 
     /// Resolve to a final hint string with proper indentation.
+    ///
+    /// Uses the parametric_map to override display names for SSA IDs that
+    /// represent loop-dependent positions.
     fn resolve(&self, ctx: &SsaContext) -> String {
         let indent = "    ".repeat(self.indent_level);
-        let content = self.template.resolve(ctx);
+        let content = self.template.resolve_with_overrides(ctx, |id| {
+            self.parametric_map
+                .get(&id)
+                .map(|expr| expr.format(&self.counter_names))
+        });
         format!("{}{}", indent, content)
     }
 }
@@ -81,9 +1774,9 @@ impl SsaHint {
 /// This collector uses a two-pass approach:
 /// 1. **Pass 1**: Visit AST, generate templates with SSA IDs, create phi nodes at merge points
 /// 2. **Pass 2**: Resolve phi relationships, convert templates to final strings
-pub struct SsaDecompilationCollector<'a> {
+pub struct PseudocodeCollector<'a> {
     /// Current SSA decompiler state
-    state: Option<SsaDecompilerState>,
+    state: Option<DecompilerState>,
     /// Collected hint templates: (line, template, indent_level)
     hints: Vec<SsaHint>,
     /// Index of the first hint for the current procedure
@@ -107,9 +1800,15 @@ pub struct SsaDecompilationCollector<'a> {
     indent_level: usize,
     /// Finalized hints (after resolution)
     resolved_hints: Vec<(u32, String)>,
+    /// Stack of active loops for parametric variable naming
+    loop_stack: Vec<ActiveLoop>,
+    /// Counter for generating loop counter names
+    next_counter_id: usize,
+    /// Current procedure name (for diagnostics)
+    current_proc_name: Option<String>,
 }
 
-impl<'a> SsaDecompilationCollector<'a> {
+impl<'a> PseudocodeCollector<'a> {
     pub fn new(
         module: &'a Module,
         sources: &'a DefaultSourceManager,
@@ -129,18 +1828,190 @@ impl<'a> SsaDecompilationCollector<'a> {
             source_text,
             indent_level: 0,
             resolved_hints: Vec::new(),
+            loop_stack: Vec::new(),
+            next_counter_id: 0,
+            current_proc_name: None,
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Loop Context Methods
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Generate a new loop counter name (i, j, k, ...).
+    fn new_counter(&mut self) -> String {
+        let name = if self.next_counter_id < super::ssa::LOOP_COUNTER_NAMES.len() {
+            super::ssa::LOOP_COUNTER_NAMES[self.next_counter_id].to_string()
+        } else {
+            format!(
+                "i{}",
+                self.next_counter_id - super::ssa::LOOP_COUNTER_NAMES.len()
+            )
+        };
+        self.next_counter_id += 1;
+        name
+    }
+
+    /// Enter a new loop context.
+    ///
+    /// # Arguments
+    /// * `analyzed_stack` - Symbolic stack snapshot after one iteration
+    ///
+    /// # Returns
+    /// The counter name for this loop (e.g., "i", "j", "k")
+    fn enter_loop_context(&mut self, analyzed_stack: Vec<SymbolicExpr>) -> String {
+        let counter = self.new_counter();
+        self.loop_stack
+            .push(ActiveLoop::new(counter.clone(), analyzed_stack));
+        counter
+    }
+
+    /// Exit the current (innermost) loop context.
+    fn exit_loop_context(&mut self) {
+        self.loop_stack.pop();
+    }
+
+    /// Get counter names for all active loops.
+    fn counter_names(&self) -> Vec<String> {
+        self.loop_stack
+            .iter()
+            .map(|info| info.counter_name.clone())
+            .collect()
+    }
+
+    /// Build a parametric map for the current template.
+    ///
+    /// This computes parametric expressions for any SSA IDs on the stack
+    /// that represent loop-dependent positions (i.e., arguments accessed
+    /// within loops).
+    fn build_parametric_map(
+        &self,
+        template: &PseudocodeTemplate,
+        counter_len: usize,
+    ) -> HashMap<SsaId, ParametricExpr> {
+        let mut map = HashMap::new();
+
+        if self.loop_stack.is_empty() {
+            return map;
+        }
+
+        let state = match &self.state {
+            Some(s) => s,
+            None => return map,
+        };
+
+        // For each SSA ID referenced in the template, check if it needs parametric naming
+        for id in template.ssa_ids() {
+            if let Some(expr) = self.compute_parametric_expr(state, id, counter_len) {
+                map.insert(id, expr);
+            }
+        }
+
+        map
+    }
+
+    /// Compute a parametric expression for an SSA ID if it represents
+    /// a loop-dependent position.
+    fn compute_parametric_expr(
+        &self,
+        state: &DecompilerState,
+        id: SsaId,
+        counter_len: usize,
+    ) -> Option<ParametricExpr> {
+        use super::ssa::VarKind;
+
+        let value = state.ctx.get_value(id)?;
+
+        // Prefer direct argument; otherwise see if phi-equivalent to an argument
+        let base_idx = match &value.kind {
+            VarKind::Argument(idx) => *idx,
+            _ => match state.ctx.argument_index_via_phi(id) {
+                Some(idx) => idx,
+                None => return None,
+            },
+        };
+
+        let mut merged: Option<ParametricExpr> = None;
+
+        // Walk outermost → innermost, merging loop terms for the same base argument.
+        for loop_ctx in &self.loop_stack {
+            if let Some(expr) = loop_ctx.expr_for_argument(base_idx) {
+                match &expr {
+                    SymbolicExpr::ParametricInput { loop_terms, .. } => {
+                        if loop_terms.iter().all(|t| t.loop_depth < counter_len) {
+                            if let Some(param_expr) = ParametricExpr::from_symbolic(&expr) {
+                                merged = Some(match merged {
+                                    None => param_expr,
+                                    Some(mut existing) => {
+                                        if existing.base == param_expr.base {
+                                            existing.terms.extend(param_expr.terms);
+                                            existing
+                                        } else {
+                                            existing
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    SymbolicExpr::Input(i) if *i == base_idx => {
+                        if let Some(param_expr) = ParametricExpr::from_symbolic(&expr) {
+                            merged.get_or_insert(param_expr);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        merged
+    }
+
+    /// Record a fatal decompilation failure for the current procedure.
+    fn fail_decompilation(&mut self, span: SourceSpan, reason: &str) {
+        // Mark SSA state as failed to stop further collection
+        if let Some(ref mut state) = self.state {
+            state.fail();
+        }
+
+        // Drop any hints collected for this procedure
+        self.hints.truncate(self.proc_hint_start);
+
+        // Record diagnostic
+        let proc_name = self
+            .current_proc_name
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string());
+        self.failures.push(TrackingFailure {
+            span,
+            reason: reason.to_string(),
+            proc_name,
+            related: None,
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Hint Collection Methods
+    // ─────────────────────────────────────────────────────────────────────────
 
     /// Add a literal hint (no SSA references to resolve).
     fn add_literal_hint(&mut self, line: u32, text: &str) {
         let template = PseudocodeTemplate::new().literal(text);
-        self.hints.push(SsaHint::new(line, template, self.indent_level));
+        self.hints
+            .push(SsaHint::new(line, template, self.indent_level));
     }
 
-    /// Add a hint from a template.
+    /// Add a hint from a template, computing parametric map for loop-dependent positions.
     fn add_template_hint(&mut self, line: u32, template: PseudocodeTemplate) {
-        self.hints.push(SsaHint::new(line, template, self.indent_level));
+        let counter_names = self.counter_names();
+        let parametric_map = self.build_parametric_map(&template, counter_names.len());
+        self.hints.push(SsaHint::with_parametric(
+            line,
+            template,
+            self.indent_level,
+            parametric_map,
+            counter_names,
+        ));
     }
 
     /// Generate pseudocode template for an instruction.
@@ -149,34 +2020,107 @@ impl<'a> SsaDecompilationCollector<'a> {
     fn instruction_to_template(
         &mut self,
         inst: &miden_assembly_syntax::ast::Instruction,
-        _span: SourceSpan,
+        span: SourceSpan,
     ) -> Option<PseudocodeTemplate> {
-        use miden_assembly_syntax::ast::Instruction;
-        use super::ssa::{binary_op, binary_imm_op, comparison, comparison_imm, unary_op, unary_fn, ext2_binary_op, ext2_unary_op, ext2_unary_fn};
-
-        let state = self.state.as_mut()?;
-        if state.tracking_failed {
+        // Check if tracking has already failed
+        if self.state.as_ref().map_or(true, |s| s.tracking_failed) {
             return None;
         }
 
-        // Helper to format immediate values
-        fn format_imm<T: std::fmt::Display>(imm: &miden_assembly_syntax::ast::Immediate<T>) -> String {
-            format!("{}", imm)
+        if let Some(t) = self.handle_push_ops(inst) {
+            return Some(t);
         }
+        if let Some(t) = self.handle_stack_ops(inst, span) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_arithmetic_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_comparison_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_boolean_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_ext2_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_u32_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_memory_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_local_memory_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_advice_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_crypto_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_merkle_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_word_stack_ops(inst, span) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_conditional_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_assertions(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_misc_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_complex_stark_ops(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_memory_stream_op(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_proc_ref(inst) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_calls(inst, span) {
+            return Some(t);
+        }
+        if let Some(t) = self.handle_dynamic_calls(inst, span) {
+            return Some(t);
+        }
+        None
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Instruction category helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[inline]
+    fn format_imm<T: std::fmt::Display>(
+        imm: &miden_assembly_syntax::ast::Immediate<T>,
+    ) -> String {
+        format!("{}", imm)
+    }
+
+    fn handle_push_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
 
         match inst {
-            // ─────────────────────────────────────────────────────────────────────
-            // Push operations
-            // ─────────────────────────────────────────────────────────────────────
             Instruction::Push(imm) => {
                 let value = format!("{}", imm);
                 let var = state.new_local();
                 state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
                 out.text(" = ");
                 out.text(&value);
-                Some(out.into_template())
+                Some(out.build())
             }
             Instruction::PushSlice(imm, range) => {
                 let count = range.len();
@@ -187,14 +2131,16 @@ impl<'a> SsaDecompilationCollector<'a> {
                     vars.push(var);
                 }
                 vars.reverse();
-                let mut out = TemplateOutput::default();
+                let mut out = PseudocodeBuilder::new();
                 out.text("(");
                 for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
                 }
                 out.text(&format!(") = {}[{}..{}]", imm, range.start, range.end));
-                Some(out.into_template())
+                Some(out.build())
             }
             Instruction::PushFeltList(values) => {
                 let count = values.len();
@@ -205,35 +2151,39 @@ impl<'a> SsaDecompilationCollector<'a> {
                     vars.push(var);
                 }
                 vars.reverse();
-                let mut out = TemplateOutput::default();
+                let mut out = PseudocodeBuilder::new();
                 out.text("(");
                 for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
                 }
                 out.text(") = [");
                 for (i, val) in values.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
+                    if i > 0 {
+                        out.text(", ");
+                    }
                     out.text(&format!("{}", val));
                 }
                 out.text("]");
-                Some(out.into_template())
+                Some(out.build())
             }
             Instruction::Sdepth => {
                 let var = state.new_local();
                 state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
                 out.text(" = stack_depth()");
-                Some(out.into_template())
+                Some(out.build())
             }
             Instruction::Clk => {
                 let var = state.new_local();
                 state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
                 out.text(" = clk()");
-                Some(out.into_template())
+                Some(out.build())
             }
             Instruction::Caller => {
                 let mut vars = Vec::new();
@@ -243,1368 +2193,231 @@ impl<'a> SsaDecompilationCollector<'a> {
                     vars.push(var);
                 }
                 vars.reverse();
-                let mut out = TemplateOutput::default();
+                let mut out = PseudocodeBuilder::new();
                 out.text("(");
                 for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
+                    if i > 0 {
+                        out.text(", ");
+                    }
+                    out.var(*var);
                 }
                 out.text(") = caller()");
-                Some(out.into_template())
+                Some(out.build())
             }
+            _ => None,
+        }
+    }
 
-            // ─────────────────────────────────────────────────────────────────────
-            // Stack manipulation - Dup
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Dup0 => self.dup_template(0),
-            Instruction::Dup1 => self.dup_template(1),
-            Instruction::Dup2 => self.dup_template(2),
-            Instruction::Dup3 => self.dup_template(3),
-            Instruction::Dup4 => self.dup_template(4),
-            Instruction::Dup5 => self.dup_template(5),
-            Instruction::Dup6 => self.dup_template(6),
-            Instruction::Dup7 => self.dup_template(7),
-            Instruction::Dup8 => self.dup_template(8),
-            Instruction::Dup9 => self.dup_template(9),
-            Instruction::Dup10 => self.dup_template(10),
-            Instruction::Dup11 => self.dup_template(11),
-            Instruction::Dup12 => self.dup_template(12),
-            Instruction::Dup13 => self.dup_template(13),
-            Instruction::Dup14 => self.dup_template(14),
-            Instruction::Dup15 => self.dup_template(15),
+    fn handle_stack_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+        _span: SourceSpan,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
 
-            // ─────────────────────────────────────────────────────────────────────
-            // Stack manipulation - Drop
-            // ─────────────────────────────────────────────────────────────────────
+        match inst {
+            Instruction::Dup0
+            | Instruction::Dup1
+            | Instruction::Dup2
+            | Instruction::Dup3
+            | Instruction::Dup4
+            | Instruction::Dup5
+            | Instruction::Dup6
+            | Instruction::Dup7
+            | Instruction::Dup8
+            | Instruction::Dup9
+            | Instruction::Dup10
+            | Instruction::Dup11
+            | Instruction::Dup12
+            | Instruction::Dup13
+            | Instruction::Dup14
+            | Instruction::Dup15 => {
+                let n = match inst {
+                    Instruction::Dup0 => 0,
+                    Instruction::Dup1 => 1,
+                    Instruction::Dup2 => 2,
+                    Instruction::Dup3 => 3,
+                    Instruction::Dup4 => 4,
+                    Instruction::Dup5 => 5,
+                    Instruction::Dup6 => 6,
+                    Instruction::Dup7 => 7,
+                    Instruction::Dup8 => 8,
+                    Instruction::Dup9 => 9,
+                    Instruction::Dup10 => 10,
+                    Instruction::Dup11 => 11,
+                    Instruction::Dup12 => 12,
+                    Instruction::Dup13 => 13,
+                    Instruction::Dup14 => 14,
+                    Instruction::Dup15 => 15,
+                    _ => unreachable!(),
+                };
+                return self.dup_template(n);
+            }
             Instruction::Drop => {
                 state.pop();
-                None
+                return None;
             }
             Instruction::DropW => {
                 for _ in 0..4 {
                     state.pop();
                 }
-                None
+                return None;
             }
+            Instruction::Swap1
+            | Instruction::Swap2
+            | Instruction::Swap3
+            | Instruction::Swap4
+            | Instruction::Swap5
+            | Instruction::Swap6
+            | Instruction::Swap7
+            | Instruction::Swap8
+            | Instruction::Swap9
+            | Instruction::Swap10
+            | Instruction::Swap11
+            | Instruction::Swap12
+            | Instruction::Swap13
+            | Instruction::Swap14
+            | Instruction::Swap15 => {
+                let n = match inst {
+                    Instruction::Swap1 => 1,
+                    Instruction::Swap2 => 2,
+                    Instruction::Swap3 => 3,
+                    Instruction::Swap4 => 4,
+                    Instruction::Swap5 => 5,
+                    Instruction::Swap6 => 6,
+                    Instruction::Swap7 => 7,
+                    Instruction::Swap8 => 8,
+                    Instruction::Swap9 => 9,
+                    Instruction::Swap10 => 10,
+                    Instruction::Swap11 => 11,
+                    Instruction::Swap12 => 12,
+                    Instruction::Swap13 => 13,
+                    Instruction::Swap14 => 14,
+                    Instruction::Swap15 => 15,
+                    _ => unreachable!(),
+                };
+                state.swap(0, n);
+                return None;
+            }
+            Instruction::MovUp2
+            | Instruction::MovUp3
+            | Instruction::MovUp4
+            | Instruction::MovUp5
+            | Instruction::MovUp6
+            | Instruction::MovUp7
+            | Instruction::MovUp8
+            | Instruction::MovUp9
+            | Instruction::MovUp10
+            | Instruction::MovUp11
+            | Instruction::MovUp12
+            | Instruction::MovUp13
+            | Instruction::MovUp14
+            | Instruction::MovUp15 => {
+                let n = match inst {
+                    Instruction::MovUp2 => 2,
+                    Instruction::MovUp3 => 3,
+                    Instruction::MovUp4 => 4,
+                    Instruction::MovUp5 => 5,
+                    Instruction::MovUp6 => 6,
+                    Instruction::MovUp7 => 7,
+                    Instruction::MovUp8 => 8,
+                    Instruction::MovUp9 => 9,
+                    Instruction::MovUp10 => 10,
+                    Instruction::MovUp11 => 11,
+                    Instruction::MovUp12 => 12,
+                    Instruction::MovUp13 => 13,
+                    Instruction::MovUp14 => 14,
+                    Instruction::MovUp15 => 15,
+                    _ => unreachable!(),
+                };
+                state.movup(n);
+                return None;
+            }
+            Instruction::MovDn2
+            | Instruction::MovDn3
+            | Instruction::MovDn4
+            | Instruction::MovDn5
+            | Instruction::MovDn6
+            | Instruction::MovDn7
+            | Instruction::MovDn8
+            | Instruction::MovDn9
+            | Instruction::MovDn10
+            | Instruction::MovDn11
+            | Instruction::MovDn12
+            | Instruction::MovDn13
+            | Instruction::MovDn14
+            | Instruction::MovDn15 => {
+                let n = match inst {
+                    Instruction::MovDn2 => 2,
+                    Instruction::MovDn3 => 3,
+                    Instruction::MovDn4 => 4,
+                    Instruction::MovDn5 => 5,
+                    Instruction::MovDn6 => 6,
+                    Instruction::MovDn7 => 7,
+                    Instruction::MovDn8 => 8,
+                    Instruction::MovDn9 => 9,
+                    Instruction::MovDn10 => 10,
+                    Instruction::MovDn11 => 11,
+                    Instruction::MovDn12 => 12,
+                    Instruction::MovDn13 => 13,
+                    Instruction::MovDn14 => 14,
+                    Instruction::MovDn15 => 15,
+                    _ => unreachable!(),
+                };
+                state.movdn(n);
+                return None;
+            }
+            _ => {}
+        }
+        None
+    }
 
-            // ─────────────────────────────────────────────────────────────────────
-            // Stack manipulation - Swap
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Swap1 => { state.swap(0, 1); None }
-            Instruction::Swap2 => { state.swap(0, 2); None }
-            Instruction::Swap3 => { state.swap(0, 3); None }
-            Instruction::Swap4 => { state.swap(0, 4); None }
-            Instruction::Swap5 => { state.swap(0, 5); None }
-            Instruction::Swap6 => { state.swap(0, 6); None }
-            Instruction::Swap7 => { state.swap(0, 7); None }
-            Instruction::Swap8 => { state.swap(0, 8); None }
-            Instruction::Swap9 => { state.swap(0, 9); None }
-            Instruction::Swap10 => { state.swap(0, 10); None }
-            Instruction::Swap11 => { state.swap(0, 11); None }
-            Instruction::Swap12 => { state.swap(0, 12); None }
-            Instruction::Swap13 => { state.swap(0, 13); None }
-            Instruction::Swap14 => { state.swap(0, 14); None }
-            Instruction::Swap15 => { state.swap(0, 15); None }
+    fn handle_arithmetic_ops(
+        &mut self,
+        inst: &miden_assembly_syntax::ast::Instruction,
+    ) -> Option<PseudocodeTemplate> {
+        use miden_assembly_syntax::ast::Instruction;
+        let state = self.state.as_mut()?;
 
-            // ─────────────────────────────────────────────────────────────────────
-            // Stack manipulation - Move
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::MovUp2 => { state.movup(2); None }
-            Instruction::MovUp3 => { state.movup(3); None }
-            Instruction::MovUp4 => { state.movup(4); None }
-            Instruction::MovUp5 => { state.movup(5); None }
-            Instruction::MovUp6 => { state.movup(6); None }
-            Instruction::MovUp7 => { state.movup(7); None }
-            Instruction::MovUp8 => { state.movup(8); None }
-            Instruction::MovUp9 => { state.movup(9); None }
-            Instruction::MovUp10 => { state.movup(10); None }
-            Instruction::MovUp11 => { state.movup(11); None }
-            Instruction::MovUp12 => { state.movup(12); None }
-            Instruction::MovUp13 => { state.movup(13); None }
-            Instruction::MovUp14 => { state.movup(14); None }
-            Instruction::MovUp15 => { state.movup(15); None }
+        fn format_imm<T: std::fmt::Display>(
+            imm: &miden_assembly_syntax::ast::Immediate<T>,
+        ) -> String {
+            format!("{}", imm)
+        }
 
-            Instruction::MovDn2 => { state.movdn(2); None }
-            Instruction::MovDn3 => { state.movdn(3); None }
-            Instruction::MovDn4 => { state.movdn(4); None }
-            Instruction::MovDn5 => { state.movdn(5); None }
-            Instruction::MovDn6 => { state.movdn(6); None }
-            Instruction::MovDn7 => { state.movdn(7); None }
-            Instruction::MovDn8 => { state.movdn(8); None }
-            Instruction::MovDn9 => { state.movdn(9); None }
-            Instruction::MovDn10 => { state.movdn(10); None }
-            Instruction::MovDn11 => { state.movdn(11); None }
-            Instruction::MovDn12 => { state.movdn(12); None }
-            Instruction::MovDn13 => { state.movdn(13); None }
-            Instruction::MovDn14 => { state.movdn(14); None }
-            Instruction::MovDn15 => { state.movdn(15); None }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Arithmetic operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Add => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "+").into_template()),
-            Instruction::Sub => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "-").into_template()),
-            Instruction::Mul => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "*").into_template()),
-            Instruction::Div => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "/").into_template()),
-
-            Instruction::AddImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "+", &format_imm(imm)).into_template()),
-            Instruction::SubImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "-", &format_imm(imm)).into_template()),
-            Instruction::MulImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "*", &format_imm(imm)).into_template()),
-            Instruction::DivImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "/", &format_imm(imm)).into_template()),
-
-            Instruction::Neg => Some(unary_op::<SsaDecompilerState, TemplateOutput>(state, "-").into_template()),
+        match inst {
+            Instruction::Add => Some(binary_op(state, "+")),
+            Instruction::Sub => Some(binary_op(state, "-")),
+            Instruction::Mul => Some(binary_op(state, "*")),
+            Instruction::Div => Some(binary_op(state, "/")),
+            Instruction::AddImm(imm) => Some(binary_imm_op(state, "+", &format_imm(imm))),
+            Instruction::SubImm(imm) => Some(binary_imm_op(state, "-", &format_imm(imm))),
+            Instruction::MulImm(imm) => Some(binary_imm_op(state, "*", &format_imm(imm))),
+            Instruction::DivImm(imm) => Some(binary_imm_op(state, "/", &format_imm(imm))),
+            Instruction::Neg => Some(unary_op(state, "-")),
             Instruction::Inv => {
                 let a = state.pop();
                 let var = state.new_local();
                 state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
                 out.text(" = 1/");
-                out.var(&a);
-                Some(out.into_template())
+                out.var(a);
+                Some(out.build())
             }
             Instruction::Incr => {
                 let a = state.pop();
                 let var = state.new_local();
                 state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
+                let mut out = PseudocodeBuilder::new();
+                out.var(var);
                 out.text(" = ");
-                out.var(&a);
+                out.var(a);
                 out.text(" + 1");
-                Some(out.into_template())
+                Some(out.build())
             }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Comparison operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Eq => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, "==").into_template()),
-            Instruction::Neq => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, "!=").into_template()),
-            Instruction::Lt => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, "<").into_template()),
-            Instruction::Lte => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, "<=").into_template()),
-            Instruction::Gt => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, ">").into_template()),
-            Instruction::Gte => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, ">=").into_template()),
-
-            Instruction::EqImm(imm) => Some(comparison_imm::<SsaDecompilerState, TemplateOutput>(state, "==", &format_imm(imm)).into_template()),
-            Instruction::NeqImm(imm) => Some(comparison_imm::<SsaDecompilerState, TemplateOutput>(state, "!=", &format_imm(imm)).into_template()),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Boolean operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::And => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "&&").into_template()),
-            Instruction::Or => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "||").into_template()),
-            Instruction::Xor => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "^").into_template()),
-            Instruction::Not => Some(unary_op::<SsaDecompilerState, TemplateOutput>(state, "!").into_template()),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Extension field (ext2) operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Ext2Add => Some(ext2_binary_op::<SsaDecompilerState, TemplateOutput>(state, "+").into_template()),
-            Instruction::Ext2Sub => Some(ext2_binary_op::<SsaDecompilerState, TemplateOutput>(state, "-").into_template()),
-            Instruction::Ext2Mul => Some(ext2_binary_op::<SsaDecompilerState, TemplateOutput>(state, "*").into_template()),
-            Instruction::Ext2Div => Some(ext2_binary_op::<SsaDecompilerState, TemplateOutput>(state, "/").into_template()),
-            Instruction::Ext2Neg => Some(ext2_unary_op::<SsaDecompilerState, TemplateOutput>(state, "-").into_template()),
-            Instruction::Ext2Inv => Some(ext2_unary_fn::<SsaDecompilerState, TemplateOutput>(state, "inv").into_template()),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // u32 operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::U32And => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "&").into_template()),
-            Instruction::U32Or => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "|").into_template()),
-            Instruction::U32Xor => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "^").into_template()),
-            Instruction::U32Not => Some(unary_op::<SsaDecompilerState, TemplateOutput>(state, "~").into_template()),
-
-            Instruction::U32WrappingAdd => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "+").into_template()),
-            Instruction::U32WrappingSub => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "-").into_template()),
-            Instruction::U32WrappingMul => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "*").into_template()),
-            Instruction::U32Div => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "/").into_template()),
-            Instruction::U32Mod => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "%").into_template()),
-
-            Instruction::U32WrappingAddImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "+", &format_imm(imm)).into_template()),
-            Instruction::U32WrappingSubImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "-", &format_imm(imm)).into_template()),
-            Instruction::U32WrappingMulImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "*", &format_imm(imm)).into_template()),
-            Instruction::U32DivImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "/", &format_imm(imm)).into_template()),
-            Instruction::U32ModImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "%", &format_imm(imm)).into_template()),
-
-            Instruction::U32Shl => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "<<").into_template()),
-            Instruction::U32Shr => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, ">>").into_template()),
-            Instruction::U32ShlImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "<<", &format_imm(imm)).into_template()),
-            Instruction::U32ShrImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, ">>", &format_imm(imm)).into_template()),
-
-            Instruction::U32Rotl => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "rotl").into_template()),
-            Instruction::U32Rotr => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "rotr").into_template()),
-            Instruction::U32RotlImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "rotl", &format_imm(imm)).into_template()),
-            Instruction::U32RotrImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "rotr", &format_imm(imm)).into_template()),
-
-            Instruction::U32Lt => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, "<").into_template()),
-            Instruction::U32Lte => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, "<=").into_template()),
-            Instruction::U32Gt => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, ">").into_template()),
-            Instruction::U32Gte => Some(comparison::<SsaDecompilerState, TemplateOutput>(state, ">=").into_template()),
-            Instruction::U32Min => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "min").into_template()),
-            Instruction::U32Max => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "max").into_template()),
-
-            // u32 special operations
-            Instruction::U32Popcnt => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "popcnt").into_template()),
-            Instruction::U32Clz => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "clz").into_template()),
-            Instruction::U32Ctz => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "ctz").into_template()),
-            Instruction::U32Clo => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "clo").into_template()),
-            Instruction::U32Cto => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "cto").into_template()),
-
-            Instruction::U32Cast => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "u32").into_template()),
-
-            // u32 assertions - no output
-            Instruction::U32Assert | Instruction::U32AssertWithError(_) |
-            Instruction::U32Assert2 | Instruction::U32Assert2WithError(_) |
-            Instruction::U32AssertW | Instruction::U32AssertWWithError(_) => None,
-
-            // u32 overflowing operations (produce 2 values)
-            Instruction::U32OverflowingAdd => {
-                let b = state.pop();
-                let a = state.pop();
-                let overflow = state.new_local();
-                let result = state.new_local();
-                state.push(overflow);
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&result);
-                out.text(", ");
-                out.var(&overflow);
-                out.text(") = ");
-                out.var(&a);
-                out.text(" + ");
-                out.var(&b);
-                out.text(" (overflow)");
-                Some(out.into_template())
-            }
-            Instruction::U32OverflowingSub => {
-                let b = state.pop();
-                let a = state.pop();
-                let underflow = state.new_local();
-                let result = state.new_local();
-                state.push(underflow);
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&result);
-                out.text(", ");
-                out.var(&underflow);
-                out.text(") = ");
-                out.var(&a);
-                out.text(" - ");
-                out.var(&b);
-                out.text(" (underflow)");
-                Some(out.into_template())
-            }
-            Instruction::U32OverflowingMul => {
-                let b = state.pop();
-                let a = state.pop();
-                let overflow = state.new_local();
-                let result = state.new_local();
-                state.push(overflow);
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&result);
-                out.text(", ");
-                out.var(&overflow);
-                out.text(") = ");
-                out.var(&a);
-                out.text(" * ");
-                out.var(&b);
-                out.text(" (overflow)");
-                Some(out.into_template())
-            }
-            Instruction::U32OverflowingAddImm(imm) => {
-                let a = state.pop();
-                let overflow = state.new_local();
-                let result = state.new_local();
-                state.push(overflow);
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&result);
-                out.text(", ");
-                out.var(&overflow);
-                out.text(") = ");
-                out.var(&a);
-                out.text(&format!(" + {} (overflow)", format_imm(imm)));
-                Some(out.into_template())
-            }
-            Instruction::U32OverflowingSubImm(imm) => {
-                let a = state.pop();
-                let underflow = state.new_local();
-                let result = state.new_local();
-                state.push(underflow);
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&result);
-                out.text(", ");
-                out.var(&underflow);
-                out.text(") = ");
-                out.var(&a);
-                out.text(&format!(" - {} (underflow)", format_imm(imm)));
-                Some(out.into_template())
-            }
-            Instruction::U32OverflowingMulImm(imm) => {
-                let a = state.pop();
-                let overflow = state.new_local();
-                let result = state.new_local();
-                state.push(overflow);
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&result);
-                out.text(", ");
-                out.var(&overflow);
-                out.text(") = ");
-                out.var(&a);
-                out.text(&format!(" * {} (overflow)", format_imm(imm)));
-                Some(out.into_template())
-            }
-
-            // u32 ternary operations
-            Instruction::U32OverflowingAdd3 => {
-                let c = state.pop();
-                let b = state.pop();
-                let a = state.pop();
-                let carry = state.new_local();
-                let result = state.new_local();
-                state.push(carry);
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&result);
-                out.text(", ");
-                out.var(&carry);
-                out.text(") = ");
-                out.var(&a);
-                out.text(" + ");
-                out.var(&b);
-                out.text(" + ");
-                out.var(&c);
-                out.text(" (carry)");
-                Some(out.into_template())
-            }
-            Instruction::U32WrappingAdd3 => {
-                let c = state.pop();
-                let b = state.pop();
-                let a = state.pop();
-                let result = state.new_local();
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.var(&result);
-                out.text(" = ");
-                out.var(&a);
-                out.text(" + ");
-                out.var(&b);
-                out.text(" + ");
-                out.var(&c);
-                Some(out.into_template())
-            }
-            Instruction::U32OverflowingMadd => {
-                let c = state.pop();
-                let b = state.pop();
-                let a = state.pop();
-                let overflow = state.new_local();
-                let result = state.new_local();
-                state.push(overflow);
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&result);
-                out.text(", ");
-                out.var(&overflow);
-                out.text(") = ");
-                out.var(&a);
-                out.text(" * ");
-                out.var(&b);
-                out.text(" + ");
-                out.var(&c);
-                out.text(" (overflow)");
-                Some(out.into_template())
-            }
-            Instruction::U32WrappingMadd => {
-                let c = state.pop();
-                let b = state.pop();
-                let a = state.pop();
-                let result = state.new_local();
-                state.push(result);
-                let mut out = TemplateOutput::default();
-                out.var(&result);
-                out.text(" = ");
-                out.var(&a);
-                out.text(" * ");
-                out.var(&b);
-                out.text(" + ");
-                out.var(&c);
-                Some(out.into_template())
-            }
-
-            // u32 divmod
-            Instruction::U32DivMod => {
-                let b = state.pop();
-                let a = state.pop();
-                let remainder = state.new_local();
-                let quotient = state.new_local();
-                state.push(remainder);
-                state.push(quotient);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&quotient);
-                out.text(", ");
-                out.var(&remainder);
-                out.text(") = divmod(");
-                out.var(&a);
-                out.text(", ");
-                out.var(&b);
-                out.text(")");
-                Some(out.into_template())
-            }
-            Instruction::U32DivModImm(imm) => {
-                let a = state.pop();
-                let remainder = state.new_local();
-                let quotient = state.new_local();
-                state.push(remainder);
-                state.push(quotient);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&quotient);
-                out.text(", ");
-                out.var(&remainder);
-                out.text(") = divmod(");
-                out.var(&a);
-                out.text(&format!(", {})", format_imm(imm)));
-                Some(out.into_template())
-            }
-
-            // u32split
-            Instruction::U32Split => {
-                let a = state.pop();
-                let lo = state.new_local();
-                let hi = state.new_local();
-                state.push(lo);
-                state.push(hi);
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&hi);
-                out.text(", ");
-                out.var(&lo);
-                out.text(") = split(");
-                out.var(&a);
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // u32 test
-            Instruction::U32Test | Instruction::U32TestW => {
-                let var = state.new_local();
-                state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
-                out.text(" = is_u32(top)");
-                Some(out.into_template())
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Memory operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::MemLoad => {
-                let addr = state.pop();
-                let var = state.new_local();
-                state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
-                out.text(" = mem[");
-                out.var(&addr);
-                out.text("]");
-                Some(out.into_template())
-            }
-            Instruction::MemLoadImm(imm) => {
-                let addr = format_imm(imm);
-                let var = state.new_local();
-                state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
-                out.text(&format!(" = mem[{}]", addr));
-                Some(out.into_template())
-            }
-            Instruction::MemStore => {
-                let addr = state.pop();
-                let val = state.pop();
-                let mut out = TemplateOutput::default();
-                out.text("mem[");
-                out.var(&addr);
-                out.text("] = ");
-                out.var(&val);
-                Some(out.into_template())
-            }
-            Instruction::MemStoreImm(imm) => {
-                let addr = format_imm(imm);
-                let val = state.pop();
-                let mut out = TemplateOutput::default();
-                out.text(&format!("mem[{}] = ", addr));
-                out.var(&val);
-                Some(out.into_template())
-            }
-
-            // Word memory operations
-            Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
-                let addr = state.pop();
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = mem_w[");
-                out.var(&addr);
-                out.text("]");
-                Some(out.into_template())
-            }
-            Instruction::MemLoadWBeImm(imm) | Instruction::MemLoadWLeImm(imm) => {
-                let addr = format_imm(imm);
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(&format!(") = mem_w[{}]", addr));
-                Some(out.into_template())
-            }
-            Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
-                let addr = state.pop();
-                let mut vals = Vec::new();
-                for _ in 0..4 {
-                    vals.push(state.pop());
-                }
-                vals.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("mem_w[");
-                out.var(&addr);
-                out.text("] = (");
-                for (i, val) in vals.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(val);
-                }
-                out.text(")");
-                Some(out.into_template())
-            }
-            Instruction::MemStoreWBeImm(imm) | Instruction::MemStoreWLeImm(imm) => {
-                let addr = format_imm(imm);
-                let mut vals = Vec::new();
-                for _ in 0..4 {
-                    vals.push(state.pop());
-                }
-                vals.reverse();
-                let mut out = TemplateOutput::default();
-                out.text(&format!("mem_w[{}] = (", addr));
-                for (i, val) in vals.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(val);
-                }
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // Local memory - single element
-            Instruction::LocLoad(idx) => {
-                let var = state.new_local();
-                state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
-                out.text(&format!(" = local[{}]", idx));
-                Some(out.into_template())
-            }
-            Instruction::LocStore(idx) => {
-                let val = state.pop();
-                let mut out = TemplateOutput::default();
-                out.text(&format!("local[{}] = ", idx));
-                out.var(&val);
-                Some(out.into_template())
-            }
-
-            // Local memory - word level
-            Instruction::LocLoadWBe(idx) | Instruction::LocLoadWLe(idx) => {
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(&format!(") = local_w[{}]", idx));
-                Some(out.into_template())
-            }
-            Instruction::LocStoreWBe(idx) | Instruction::LocStoreWLe(idx) => {
-                let mut vals = Vec::new();
-                for _ in 0..4 {
-                    vals.push(state.pop());
-                }
-                vals.reverse();
-                let mut out = TemplateOutput::default();
-                out.text(&format!("local_w[{}] = (", idx));
-                for (i, val) in vals.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(val);
-                }
-                out.text(")");
-                Some(out.into_template())
-            }
-            Instruction::Locaddr(idx) => {
-                let var = state.new_local();
-                state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
-                out.text(&format!(" = &local[{}]", idx));
-                Some(out.into_template())
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Advice operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::AdvPush(n) => {
-                let count = match n {
-                    miden_assembly_syntax::ast::Immediate::Value(v) => v.into_inner() as usize,
-                    _ => 1,
-                };
-                let mut vars = Vec::new();
-                for _ in 0..count {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = advice()");
-                Some(out.into_template())
-            }
-            Instruction::AdvLoadW => {
-                // Pop 4 values (address), push 4 values (loaded word)
-                for _ in 0..4 {
-                    state.pop();
-                }
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = advice_w()");
-                Some(out.into_template())
-            }
-            Instruction::AdvPipe => {
-                // Pop 8, push 8
-                for _ in 0..8 {
-                    state.pop();
-                }
-                let mut vars = Vec::new();
-                for _ in 0..8 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = advice_pipe()");
-                Some(out.into_template())
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Cryptographic operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Hash => {
-                let mut args = Vec::new();
-                for _ in 0..4 {
-                    args.push(state.pop());
-                }
-                args.reverse();
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = hash((");
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(arg);
-                }
-                out.text("))");
-                Some(out.into_template())
-            }
-            Instruction::HMerge => {
-                // Pop 8, push 4
-                for _ in 0..8 {
-                    state.pop();
-                }
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = hmerge(...)");
-                Some(out.into_template())
-            }
-            Instruction::HPerm => {
-                // Capture input variables before popping (C, B, A - 3 words = 12 elements)
-                let mut inputs = Vec::new();
-                for i in 0..12 {
-                    if let Some(id) = state.peek(i) {
-                        inputs.push(id);
-                    }
-                }
-                inputs.reverse(); // Show bottom-to-top order (A, B, C)
-
-                // Pop 12 inputs
-                for _ in 0..12 {
-                    state.pop();
-                }
-
-                // Push 12 new outputs (D, E, F - 3 words)
-                let mut outputs = Vec::new();
-                for _ in 0..12 {
-                    let var = state.new_local();
-                    state.push(var);
-                    outputs.push(var);
-                }
-                outputs.reverse();
-
-                // Format: (F, E, D) = hperm(A, B, C)
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in outputs.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = hperm(");
-                for (i, var) in inputs.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // Merkle tree operations
-            Instruction::MTreeGet => {
-                state.pop(); // depth
-                state.pop(); // index
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = mtree_get()");
-                Some(out.into_template())
-            }
-            Instruction::MTreeSet => {
-                state.pop(); // depth
-                state.pop(); // index
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = mtree_set()");
-                Some(out.into_template())
-            }
-            Instruction::MTreeMerge => {
-                // Pop 8, push 4
-                for _ in 0..8 {
-                    state.pop();
-                }
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = mtree_merge()");
-                Some(out.into_template())
-            }
-            Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
-                Some(PseudocodeTemplate::new().literal("mtree_verify()"))
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Word stack operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::SwapW1 => { self.swapw(0, 1); None }
-            Instruction::SwapW2 => { self.swapw(0, 2); None }
-            Instruction::SwapW3 => { self.swapw(0, 3); None }
-            Instruction::SwapDw => {
-                // Swap double words: positions 0-7 with 8-15
-                for i in 0..8 {
-                    state.swap(i, 8 + i);
-                }
-                None
-            }
-
-            Instruction::MovUpW2 => { self.movupw(2); None }
-            Instruction::MovUpW3 => { self.movupw(3); None }
-            Instruction::MovDnW2 => { self.movdnw(2); None }
-            Instruction::MovDnW3 => { self.movdnw(3); None }
-
-            Instruction::DupW0 => self.dupw_template(0),
-            Instruction::DupW1 => self.dupw_template(1),
-            Instruction::DupW2 => self.dupw_template(2),
-            Instruction::DupW3 => self.dupw_template(3),
-
-            Instruction::PadW => {
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = (0, 0, 0, 0)");
-                Some(out.into_template())
-            }
-
-            Instruction::Reversew => {
-                // Reverse top 4 elements - swap (0,3) and (1,2)
-                state.swap(0, 3);
-                state.swap(1, 2);
-                None
-            }
-            Instruction::Reversedw => {
-                // Reverse top 8 elements
-                for i in 0..4 {
-                    state.swap(i, 7 - i);
-                }
-                None
-            }
-
-            // Word equality test
-            Instruction::Eqw => {
-                // Pop 8, push 1
-                for _ in 0..8 {
-                    state.pop();
-                }
-                let var = state.new_local();
-                state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
-                out.text(" = eqw()");
-                Some(out.into_template())
-            }
-
-            // Assert word equality
-            Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
-                // Pop 8 (two words)
-                for _ in 0..8 {
-                    state.pop();
-                }
-                Some(PseudocodeTemplate::new().literal("assert_eqw()"))
-            }
-
-            // Conditional operations
-            Instruction::CSwap => {
-                let cond = state.pop();
-                let mut out = TemplateOutput::default();
-                out.text("cswap(");
-                out.var(&cond);
-                out.text(")");
-                Some(out.into_template())
-            }
-            Instruction::CSwapW => {
-                let cond = state.pop();
-                let mut out = TemplateOutput::default();
-                out.text("cswapw(");
-                out.var(&cond);
-                out.text(")");
-                Some(out.into_template())
-            }
-            Instruction::CDrop => {
-                let cond = state.pop();
-                state.pop();
-                let mut out = TemplateOutput::default();
-                out.text("cdrop(");
-                out.var(&cond);
-                out.text(")");
-                Some(out.into_template())
-            }
-            Instruction::CDropW => {
-                let cond = state.pop();
-                for _ in 0..4 {
-                    state.pop();
-                }
-                let mut out = TemplateOutput::default();
-                out.text("cdropw(");
-                out.var(&cond);
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Assertions
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Assert | Instruction::AssertWithError(_) => {
-                let cond = state.pop();
-                let mut out = TemplateOutput::default();
-                out.text("assert(");
-                out.var(&cond);
-                out.text(")");
-                Some(out.into_template())
-            }
-            Instruction::AssertEq | Instruction::AssertEqWithError(_) => {
-                let b = state.pop();
-                let a = state.pop();
-                let mut out = TemplateOutput::default();
-                out.text("assert(");
-                out.var(&a);
-                out.text(" == ");
-                out.var(&b);
-                out.text(")");
-                Some(out.into_template())
-            }
-            Instruction::Assertz | Instruction::AssertzWithError(_) => {
-                let val = state.pop();
-                let mut out = TemplateOutput::default();
-                out.text("assert(");
-                out.var(&val);
-                out.text(" == 0)");
-                Some(out.into_template())
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Other operations
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::ILog2 => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "ilog2").into_template()),
-            Instruction::Pow2 => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "pow2").into_template()),
-            Instruction::Exp => Some(binary_op::<SsaDecompilerState, TemplateOutput>(state, "**").into_template()),
-            Instruction::ExpImm(imm) => Some(binary_imm_op::<SsaDecompilerState, TemplateOutput>(state, "**", &format_imm(imm)).into_template()),
-            Instruction::ExpBitLength(bits) => {
-                let exp = state.pop();
-                let base = state.pop();
-                let var = state.new_local();
-                state.push(var);
-                let mut out = TemplateOutput::default();
-                out.var(&var);
-                out.text(" = ");
-                out.var(&base);
-                out.text(&format!(" ** ("));
-                out.var(&exp);
-                out.text(&format!(", {}-bit)", bits));
-                Some(out.into_template())
-            }
-            Instruction::IsOdd => Some(unary_fn::<SsaDecompilerState, TemplateOutput>(state, "is_odd").into_template()),
-
-            // No-ops
-            Instruction::Nop | Instruction::Breakpoint | Instruction::Debug(_) |
-            Instruction::Emit | Instruction::EmitImm(_) | Instruction::Trace(_) |
-            Instruction::SysEvent(_) => None,
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Complex STARK operations
-            // ─────────────────────────────────────────────────────────────────────
-
-            // horner_eval_base: [c7..c0, -, -, -, -, -, alpha_addr, acc1, acc0, ...]
-            // Updates acc in place (positions 14-15) while keeping other values unchanged
-            Instruction::HornerBase => {
-                // Capture input variables (16 elements)
-                let mut inputs = Vec::new();
-                for _ in 0..16 {
-                    inputs.push(state.pop());
-                }
-                inputs.reverse();
-
-                // Push 16 outputs - most are unchanged, acc is modified
-                // Positions 0-1 (bottom, which is acc) get new values
-                for i in 0..16 {
-                    if i == 0 || i == 1 {
-                        // acc' (new accumulator values)
-                        let var = state.new_local();
-                        state.push(var);
-                    } else {
-                        // Unchanged from input
-                        state.push(inputs[i]);
-                    }
-                }
-
-                // Get the new acc values (at bottom of what we just pushed)
-                let acc0_new = state.peek(15).unwrap_or_else(|| state.new_local());
-                let acc1_new = state.peek(14).unwrap_or_else(|| state.new_local());
-
-                // Format: (acc1', acc0') = horner_eval_base(c7..c0, alpha@addr, acc1, acc0)
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&acc1_new);
-                out.text(", ");
-                out.var(&acc0_new);
-                out.text(") = horner_eval_base(");
-                // Show coefficients c7..c0
-                for i in 0..8 {
-                    if i > 0 { out.text(", "); }
-                    out.var(&inputs[i]);
-                }
-                out.text(", alpha@");
-                out.var(&inputs[13]); // alpha_addr
-                out.text(", ");
-                out.var(&inputs[14]); // acc1
-                out.text(", ");
-                out.var(&inputs[15]); // acc0
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // horner_eval_ext: similar to horner_eval_base but with extension field coefficients
-            Instruction::HornerExt => {
-                // Capture input variables (16 elements)
-                let mut inputs = Vec::new();
-                for _ in 0..16 {
-                    inputs.push(state.pop());
-                }
-                inputs.reverse();
-
-                // Push 16 outputs - most are unchanged, acc is modified
-                for i in 0..16 {
-                    if i == 0 || i == 1 {
-                        let var = state.new_local();
-                        state.push(var);
-                    } else {
-                        state.push(inputs[i]);
-                    }
-                }
-
-                let acc0_new = state.peek(15).unwrap_or_else(|| state.new_local());
-                let acc1_new = state.peek(14).unwrap_or_else(|| state.new_local());
-
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                out.var(&acc1_new);
-                out.text(", ");
-                out.var(&acc0_new);
-                out.text(") = horner_eval_ext(");
-                // Show coefficients c3..c0 (extension field pairs)
-                for i in 0..8 {
-                    if i > 0 { out.text(", "); }
-                    out.var(&inputs[i]);
-                }
-                out.text(", alpha@");
-                out.var(&inputs[13]);
-                out.text(", ");
-                out.var(&inputs[14]);
-                out.text(", ");
-                out.var(&inputs[15]);
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // fri_ext2fold4: FRI folding operation
-            // Input: [v7..v0, f_pos, d_seg, poe, e1, e0, a1, a0, layer_ptr, rem_ptr, ...]
-            // Output: [garbage*10, layer_ptr+8, poe^4, f_pos, ne1, ne0, rem_ptr, ...]
-            Instruction::FriExt2Fold4 => {
-                // Capture inputs (17 elements)
-                let mut inputs = Vec::new();
-                for _ in 0..17 {
-                    inputs.push(state.pop());
-                }
-                inputs.reverse();
-
-                // Push 16 outputs
-                let mut outputs = Vec::new();
-                for _ in 0..16 {
-                    let var = state.new_local();
-                    state.push(var);
-                    outputs.push(var);
-                }
-
-                // Get output references from stack (top to bottom)
-                let out_vars: Vec<_> = (0..16).filter_map(|i| state.peek(i)).collect();
-
-                let mut out = TemplateOutput::default();
-                out.text("(_, _, _, _, _, _, _, _, _, _, ");
-                // Show meaningful outputs: layer_ptr+8, poe^4, f_pos, ne1, ne0, rem_ptr
-                if out_vars.len() >= 6 {
-                    out.var(&out_vars[5]); out.text(", ");
-                    out.var(&out_vars[4]); out.text(", ");
-                    out.var(&out_vars[3]); out.text(", ");
-                    out.var(&out_vars[2]); out.text(", ");
-                    out.var(&out_vars[1]); out.text(", ");
-                    out.var(&out_vars[0]);
-                }
-                out.text(") = fri_ext2fold4(");
-                // Show query values v7..v0
-                for i in 0..8.min(inputs.len()) {
-                    if i > 0 { out.text(", "); }
-                    out.var(&inputs[i]);
-                }
-                out.text(", ...)");
-                Some(out.into_template())
-            }
-
-            // eval_circuit: [ptr, n_read, n_eval, ...] -> [ptr, n_read, n_eval, ...]
-            // Stack unchanged, evaluates a circuit from memory
-            Instruction::EvalCircuit => {
-                // Peek at inputs without popping (stack is unchanged)
-                let n_eval = state.peek(0);
-                let n_read = state.peek(1);
-                let ptr = state.peek(2);
-
-                let mut out = TemplateOutput::default();
-                out.text("eval_circuit(ptr=");
-                if let Some(p) = ptr { out.var(&p); }
-                out.text(", n_read=");
-                if let Some(n) = n_read { out.var(&n); }
-                out.text(", n_eval=");
-                if let Some(n) = n_eval { out.var(&n); }
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // log_precompile: [COMM (4), TAG (4), ...] -> [R1 (4), R0 (4), CAP_NEXT (4), ...]
-            Instruction::LogPrecompile => {
-                // Capture inputs (8 elements)
-                let mut inputs = Vec::new();
-                for _ in 0..8 {
-                    inputs.push(state.pop());
-                }
-                inputs.reverse();
-
-                // Push 12 outputs
-                for _ in 0..12 {
-                    let var = state.new_local();
-                    state.push(var);
-                }
-
-                // Get output references
-                let out_vars: Vec<_> = (0..12).filter_map(|i| state.peek(i)).collect();
-
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in out_vars.iter().rev().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = log_precompile(");
-                for (i, var) in inputs.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Memory stream operation
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::MemStream => {
-                // Pop 13 elements (addr + 12 hasher state), push 13 (new addr + new state)
-                let mut inputs = Vec::new();
-                for _ in 0..13 {
-                    inputs.push(state.pop());
-                }
-                inputs.reverse();
-
-                let mut outputs = Vec::new();
-                for _ in 0..13 {
-                    let var = state.new_local();
-                    state.push(var);
-                    outputs.push(var);
-                }
-                outputs.reverse();
-
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in outputs.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(") = mem_stream(");
-                for (i, var) in inputs.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(")");
-                Some(out.into_template())
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Procedure reference
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::ProcRef(target) => {
-                // Push 4 elements (MAST root hash)
-                let mut vars = Vec::new();
-                for _ in 0..4 {
-                    let var = state.new_local();
-                    state.push(var);
-                    vars.push(var);
-                }
-                vars.reverse();
-                let mut out = TemplateOutput::default();
-                out.text("(");
-                for (i, var) in vars.iter().enumerate() {
-                    if i > 0 { out.text(", "); }
-                    out.var(var);
-                }
-                out.text(&format!(") = procref({})", target));
-                Some(out.into_template())
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Procedure calls - use contracts for stack effects when available
-            // ─────────────────────────────────────────────────────────────────────
-            Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
-                use crate::analysis::contracts::StackEffect;
-
-                // Try to resolve the target to get its contract
-                let resolved_path = self.resolver.resolve_target(target);
-                let stack_effect = resolved_path
-                    .as_ref()
-                    .and_then(|path| self.contracts.and_then(|c| c.get(path)))
-                    .map(|c| c.stack_effect.clone());
-
-                match stack_effect {
-                    Some(StackEffect::Known { inputs, outputs }) => {
-                        // Known stack effect - pop inputs, push outputs
-                        let mut input_vars = Vec::new();
-                        for _ in 0..inputs {
-                            input_vars.push(state.pop());
-                        }
-                        input_vars.reverse();
-
-                        let mut output_vars = Vec::new();
-                        for _ in 0..outputs {
-                            let var = state.new_local();
-                            state.push(var);
-                            output_vars.push(var);
-                        }
-                        output_vars.reverse();
-
-                        let mut out = TemplateOutput::default();
-                        if !output_vars.is_empty() {
-                            out.text("(");
-                            for (i, var) in output_vars.iter().enumerate() {
-                                if i > 0 { out.text(", "); }
-                                out.var(var);
-                            }
-                            out.text(") = ");
-                        }
-                        out.text(&format!("{}(", target));
-                        for (i, var) in input_vars.iter().enumerate() {
-                            if i > 0 { out.text(", "); }
-                            out.var(var);
-                        }
-                        out.text(")");
-                        Some(out.into_template())
-                    }
-                    Some(StackEffect::KnownInputs { inputs }) => {
-                        // Known inputs but unknown outputs - pop inputs, fail tracking
-                        let mut input_vars = Vec::new();
-                        for _ in 0..inputs {
-                            input_vars.push(state.pop());
-                        }
-                        input_vars.reverse();
-                        state.fail();
-
-                        let mut out = TemplateOutput::default();
-                        out.text(&format!("{}(", target));
-                        for (i, var) in input_vars.iter().enumerate() {
-                            if i > 0 { out.text(", "); }
-                            out.var(var);
-                        }
-                        out.text(")");
-                        Some(out.into_template())
-                    }
-                    _ => {
-                        // Unknown stack effect - fail tracking
-                        state.fail();
-                        Some(PseudocodeTemplate::new().literal(&format!("{}", target)))
-                    }
-                }
-            }
-            Instruction::DynExec | Instruction::DynCall => {
-                // Dynamic calls have unknown targets - always fail tracking
-                state.fail();
-                let name = if matches!(inst, Instruction::DynExec) { "dynexec" } else { "dyncall" };
-                Some(PseudocodeTemplate::new().literal(name))
-            }
+            _ => None,
         }
     }
 
@@ -1618,11 +2431,11 @@ impl<'a> SsaDecompilationCollector<'a> {
         state.pop();
         state.push(var);
 
-        let mut out = TemplateOutput::default();
-        out.var(&var);
+        let mut out = PseudocodeBuilder::new();
+        out.var(var);
         out.text(" = ");
-        out.var(&src);
-        Some(out.into_template())
+        out.var(src);
+        Some(out.build())
     }
 
     /// Generate dupw template for word duplication.
@@ -1641,11 +2454,9 @@ impl<'a> SsaDecompilationCollector<'a> {
             return None;
         }
 
-        // Duplicate the 4 values
-        for _ in 0..4 {
-            if let Some(src) = state.peek(base + 3) {
-                state.push(src);
-            }
+        // Duplicate the collected values (preserve order)
+        for src in sources.iter().rev() {
+            state.push(*src);
         }
 
         // Create new variable names for the duplicated values
@@ -1658,19 +2469,23 @@ impl<'a> SsaDecompilationCollector<'a> {
         }
         new_vars.reverse();
 
-        let mut out = TemplateOutput::default();
+        let mut out = PseudocodeBuilder::new();
         out.text("(");
         for (i, var) in new_vars.iter().enumerate() {
-            if i > 0 { out.text(", "); }
+            if i > 0 {
+                out.text(", ");
+            }
             out.var(var);
         }
         out.text(") = (");
         for (i, src) in sources.iter().rev().enumerate() {
-            if i > 0 { out.text(", "); }
+            if i > 0 {
+                out.text(", ");
+            }
             out.var(src);
         }
         out.text(")");
-        Some(out.into_template())
+        Some(out.build())
     }
 
     /// Swap two words on the stack.
@@ -1698,10 +2513,10 @@ impl<'a> SsaDecompilationCollector<'a> {
     /// Move top word to position n.
     fn movdnw(&mut self, word_n: usize) {
         if let Some(ref mut state) = self.state {
-            // Move 4 elements down
+            // Move 4 elements down; adjust target as stack grows
             let target = word_n * 4;
-            for _ in 0..4 {
-                state.movdn(target - 1);
+            for i in 0..4 {
+                state.movdn(target + i);
             }
         }
     }
@@ -1709,6 +2524,9 @@ impl<'a> SsaDecompilationCollector<'a> {
     /// Visit all operations in a block, handling control flow.
     fn visit_block_ssa(&mut self, block: &Block) {
         for op in block.iter() {
+            if self.state.as_ref().map_or(false, |s| s.tracking_failed) {
+                break;
+            }
             self.visit_op_ssa(op);
         }
     }
@@ -1723,9 +2541,11 @@ impl<'a> SsaDecompilationCollector<'a> {
                     }
                 }
             }
-            Op::If { then_blk, else_blk, .. } => {
+            Op::If {
+                then_blk, else_blk, ..
+            } => {
                 // Get condition variable SSA ID
-                let condition_id = self.state.as_ref().and_then(|s| s.peek(0));
+                let condition_id = self.state.as_mut().and_then(|s| s.peek(0));
 
                 // Pop the condition and save state for else branch
                 let entry_stack = if let Some(ref mut state) = self.state {
@@ -1763,7 +2583,8 @@ impl<'a> SsaDecompilationCollector<'a> {
                     }
 
                     // Restore entry state for else branch
-                    if let (Some(ref mut state), Some(ref saved)) = (&mut self.state, &entry_stack) {
+                    if let (Some(ref mut state), Some(ref saved)) = (&mut self.state, &entry_stack)
+                    {
                         state.restore_stack(saved);
                     }
 
@@ -1772,8 +2593,17 @@ impl<'a> SsaDecompilationCollector<'a> {
                     self.indent_level -= 1;
 
                     // Create phi nodes at merge point
-                    if let (Some(ref mut state), Some(ref then_stack)) = (&mut self.state, &then_exit_stack) {
+                    if let (Some(ref mut state), Some(ref then_stack)) =
+                        (&mut self.state, &then_exit_stack)
+                    {
                         let else_stack = state.save_stack();
+                        if then_stack.len() != else_stack.len() {
+                            self.fail_decompilation(
+                                op.span(),
+                                "if branches have different stack effects",
+                            );
+                            return;
+                        }
                         state.create_if_else_phis(then_stack, &else_stack);
                     }
                 }
@@ -1784,8 +2614,26 @@ impl<'a> SsaDecompilationCollector<'a> {
                 }
             }
             Op::While { body, .. } => {
+                // Analyze loop with abstract interpretation
+                let analysis = analyze_while_loop(body);
+                if analysis.failure_reason.is_some() || !analysis.is_consistent {
+                    let span = op.span();
+                    let reason = analysis
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("while loop stack effect unknown");
+                    self.fail_decompilation(span, reason);
+                    return;
+                }
+
+                let depth_offset = self.loop_stack.len();
+                let analyzed_stack = shift_loop_stack(&analysis.post_iteration_stack, depth_offset);
+
                 // Get condition variable SSA ID
-                let condition_id = self.state.as_ref().and_then(|s| s.peek(0));
+                let condition_id = self.state.as_mut().and_then(|s| s.peek(0));
+
+                // Enter loop context (use consuming stride if known)
+                self.enter_loop_context(analyzed_stack);
 
                 // Save loop entry state (with condition on top)
                 let loop_entry_stack = self.state.as_ref().map(|s| s.save_stack());
@@ -1813,9 +2661,20 @@ impl<'a> SsaDecompilationCollector<'a> {
                 self.indent_level -= 1;
 
                 // Create phi nodes for loop (at loop exit, stack should match entry with new condition)
-                if let (Some(ref mut state), Some(ref entry_stack)) = (&mut self.state, &loop_entry_stack) {
-                    state.create_loop_phis(entry_stack);
+                if let (Some(ref mut state), Some(ref entry_stack)) =
+                    (&mut self.state, &loop_entry_stack)
+                {
+                    if let Err(err) = state.create_loop_phis(entry_stack) {
+                        self.fail_decompilation(
+                            op.span(),
+                            &format!("while loop phi creation failed: {err}"),
+                        );
+                        return;
+                    }
                 }
+
+                // Exit loop context
+                self.exit_loop_context();
 
                 // Generate "end" hint
                 if let Some(range) = span_to_range(self.sources, op.span()) {
@@ -1823,8 +2682,27 @@ impl<'a> SsaDecompilationCollector<'a> {
                 }
             }
             Op::Repeat { count, body, .. } => {
-                // Generate a loop counter
-                let counter = self.state.as_mut().map(|s| s.new_counter()).unwrap_or_else(|| "i".to_string());
+                // Analyze loop to get per-iteration net effect via abstract interpretation
+                let loop_analysis = analyze_repeat_loop(body, *count as usize);
+                let net_effect = loop_analysis.net_effect_per_iteration;
+
+                // Fail decompilation if analysis failed or is inconsistent
+                if loop_analysis.failure_reason.is_some() || !loop_analysis.is_consistent {
+                    let span = op.span();
+                    let reason = loop_analysis
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("repeat loop stack effect unknown");
+                    self.fail_decompilation(span, reason);
+                    return;
+                }
+
+                let depth_offset = self.loop_stack.len();
+                let analyzed_stack =
+                    shift_loop_stack(&loop_analysis.post_iteration_stack, depth_offset);
+
+                // Enter loop context (collector now manages loop stack)
+                let counter = self.enter_loop_context(analyzed_stack);
 
                 // Save loop entry state
                 let loop_entry_stack = self.state.as_ref().map(|s| s.save_stack());
@@ -1840,9 +2718,51 @@ impl<'a> SsaDecompilationCollector<'a> {
                 self.visit_block_ssa(body);
                 self.indent_level -= 1;
 
-                // Create phi nodes for loop
-                if let (Some(ref mut state), Some(ref entry_stack)) = (&mut self.state, &loop_entry_stack) {
-                    state.create_loop_phis(entry_stack);
+                // Create phi nodes only for stack-neutral loops
+                if net_effect == 0 {
+                    if let (Some(ref mut state), Some(ref entry_stack)) =
+                        (&mut self.state, &loop_entry_stack)
+                    {
+                        if state.depth() != entry_stack.len() {
+                            self.fail_decompilation(
+                                op.span(),
+                                "repeat loop branches with mismatched stack depth",
+                            );
+                            return;
+                        }
+                        if let Err(err) = state.create_loop_phis(entry_stack) {
+                            self.fail_decompilation(
+                                op.span(),
+                                &format!("repeat loop phi creation failed: {err}"),
+                            );
+                            return;
+                        }
+                    }
+                }
+
+                // Exit loop context
+                self.exit_loop_context();
+
+                // Apply remaining iterations' net effect to the SSA stack.
+                if let Some(ref mut state) = self.state {
+                    let iterations_remaining = count.saturating_sub(1) as i32;
+                    if iterations_remaining > 0 && net_effect != 0 {
+                        let total_effect = net_effect * iterations_remaining;
+                        if total_effect < 0 && state.depth() < (-total_effect) as usize {
+                            self.fail_decompilation(
+                                op.span(),
+                                "repeat loop consumes more stack elements than available",
+                            );
+                            return;
+                        }
+                        if state.apply_net_effect(total_effect).is_err() {
+                            self.fail_decompilation(
+                                op.span(),
+                                "repeat loop consumes more stack elements than available",
+                            );
+                            return;
+                        }
+                    }
                 }
 
                 // Generate "end" hint
@@ -1873,12 +2793,17 @@ impl<'a> SsaDecompilationCollector<'a> {
     }
 }
 
-impl<'a> Visit for SsaDecompilationCollector<'a> {
+impl<'a> Visit for PseudocodeCollector<'a> {
     fn visit_procedure(&mut self, proc: &Procedure) -> core::ops::ControlFlow<()> {
         let proc_name = proc.name().as_str().to_string();
+        self.current_proc_name = Some(proc_name.clone());
 
         let decl_range = span_to_range(self.sources, proc.name().span());
         let decl_line = decl_range.as_ref().map(|r| r.start.line);
+
+        // Reset loop context for new procedure
+        self.loop_stack.clear();
+        self.next_counter_id = 0;
 
         // Get contract info
         let contract = self.contracts.and_then(|c| c.get_by_name(&proc_name));
@@ -1915,12 +2840,18 @@ impl<'a> Visit for SsaDecompilationCollector<'a> {
         // Generate signature hint (as literal - no SSA refs needed)
         if let Some(line) = decl_line {
             let decl_prefix = extract_declaration_prefix(self.source_text, line);
-            let signature = format_procedure_signature(&decl_prefix, &proc_name, initial_input_count, output_count, contract_signature.as_ref());
+            let signature = format_procedure_signature(
+                &decl_prefix,
+                &proc_name,
+                initial_input_count,
+                output_count,
+                contract_signature.as_ref(),
+            );
             self.add_literal_hint(line, &signature);
         }
 
         // Initialize SSA state
-        self.state = Some(SsaDecompilerState::new(initial_input_count));
+        self.state = Some(DecompilerState::new(initial_input_count));
 
         // Visit procedure body (Pass 1)
         self.indent_level = 1;
@@ -1939,28 +2870,52 @@ impl<'a> Visit for SsaDecompilationCollector<'a> {
             }
         }
 
+        // If additional inputs were discovered, refresh the signature hint (unless contract overrides).
+        if contract_signature.is_none() {
+            if let Some(ref state) = self.state {
+                let final_input_count = state.ctx.argument_count();
+                if final_input_count != initial_input_count {
+                    if let Some(line) = decl_line {
+                        let decl_prefix = extract_declaration_prefix(self.source_text, line);
+                        let signature = format_procedure_signature(
+                            &decl_prefix,
+                            &proc_name,
+                            final_input_count,
+                            output_count,
+                            None,
+                        );
+                        if let Some(sig_hint) = self.hints.get_mut(self.proc_hint_start) {
+                            *sig_hint = SsaHint::new(
+                                sig_hint.line,
+                                PseudocodeTemplate::new().literal(&signature),
+                                sig_hint.indent_level,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // Resolve hints (Pass 2)
         self.resolve_all_hints();
 
         // Add "end" hint for the procedure
-        // We need to find the procedure's "end", not any control flow "end" that might come first
         if let Some(body_range) = span_to_range(self.sources, proc.body().span()) {
-            let start_line = body_range.end.line as usize;
-            for (offset, line_text) in self.source_text.lines().skip(start_line).enumerate() {
-                if line_text.trim() == "end" {
-                    let end_line = (start_line + offset) as u32;
-                    // Check if this line already has an "end" hint from control flow
-                    let already_has_end = self.resolved_hints.iter().any(|(line, hint)| {
-                        *line == end_line && hint.trim() == "end"
-                    });
-                    if already_has_end {
-                        // This "end" belongs to a control flow block, continue scanning
-                        // for the procedure's "end" on a subsequent line
-                        continue;
-                    }
-                    self.resolved_hints.push((end_line, "end".to_string()));
-                    break;
-                }
+            let search_start = body_range.end.line as usize;
+            let end_line = self
+                .source_text
+                .lines()
+                .enumerate()
+                .skip(search_start)
+                .find_map(|(idx, line)| (line.trim() == "end").then_some(idx as u32))
+                .unwrap_or(body_range.end.line);
+
+            let already_has_end = self
+                .resolved_hints
+                .iter()
+                .any(|(line, hint)| *line == end_line && hint.trim() == "end");
+            if !already_has_end {
+                self.resolved_hints.push((end_line, "end".to_string()));
             }
         }
 
@@ -1968,6 +2923,7 @@ impl<'a> Visit for SsaDecompilationCollector<'a> {
         self.state = None;
         self.proc_outputs = None;
         self.proc_decl_line = None;
+        self.current_proc_name = None;
 
         core::ops::ControlFlow::Continue(())
     }
@@ -1998,7 +2954,7 @@ pub fn collect_decompilation_hints(
     source_text: &str,
     contracts: Option<&ContractStore>,
 ) -> DecompilationResult {
-    let mut collector = SsaDecompilationCollector::new(module, sources, contracts, source_text);
+    let mut collector = PseudocodeCollector::new(module, sources, contracts, source_text);
     let _ = visit::visit_module(&mut collector, module);
 
     // Fixed padding (in columns) between instruction end and hint.
@@ -2014,7 +2970,7 @@ pub fn collect_decompilation_hints(
     let mut line_hints: HashMap<u32, Vec<String>> = HashMap::new();
     for (line, hint) in collector.resolved_hints {
         // Filter by visible range
-        if line >= visible_range.start.line && line <= visible_range.end.line {
+        if line >= visible_range.start.line && line < visible_range.end.line {
             line_hints.entry(line).or_default().push(hint);
         }
     }
@@ -2141,12 +3097,12 @@ mod tests {
     #[test]
     fn test_instruction_to_template_add() {
         // Create a mock collector with some initial state
-        let mut state = SsaDecompilerState::new(2);
+        let mut state = DecompilerState::new(2);
 
         // Simulate add instruction: pop 2, push 1
         let template = {
-            use super::super::ssa::{binary_op, TemplateOutput};
-            binary_op::<SsaDecompilerState, TemplateOutput>(&mut state, "+").into_template()
+            use super::super::ssa::binary_op;
+            binary_op(&mut state, "+")
         };
 
         // Resolve
@@ -2160,7 +3116,7 @@ mod tests {
     /// Test that loop phi resolution unifies variables.
     #[test]
     fn test_loop_phi_unification() {
-        let mut state = SsaDecompilerState::new(1);
+        let mut state = DecompilerState::new(1);
 
         // Initial: [a_0] on stack
         let entry_stack = state.save_stack();
@@ -2171,7 +3127,7 @@ mod tests {
         state.push(v0);
 
         // Create loop phis
-        state.create_loop_phis(&entry_stack);
+        state.create_loop_phis(&entry_stack).unwrap();
         state.ctx.resolve_names();
 
         // v_0 should now display as a_0 (unified via phi)
@@ -2199,19 +3155,20 @@ mod tests {
     /// (new condition after body) should resolve to the SAME display name via phi nodes.
     #[test]
     fn test_memcopy_elements_while_loop_condition() {
-        use super::super::ssa::{binary_imm_op, comparison_imm, unary_op, TemplateOutput};
+        use super::super::ssa::{binary_imm_op, comparison_imm, unary_op};
 
         // Initialize with 3 inputs: [n, read_ptr, write_ptr] with n (a_0) on top
-        let mut state = SsaDecompilerState::new(3);
+        let mut state = DecompilerState::new(3);
 
         // neg: v_0 = -a_0
-        let neg_template: PseudocodeTemplate = unary_op::<SsaDecompilerState, TemplateOutput>(&mut state, "-").into_template();
+        let neg_template: PseudocodeTemplate = unary_op(&mut state, "-");
 
         // dup: duplicate v_0 to top
         state.dup(0);
 
         // neq.0: v_1 = (dup_v_0 != 0) - this is the INITIAL loop condition
-        let initial_cond_template: PseudocodeTemplate = comparison_imm::<SsaDecompilerState, TemplateOutput>(&mut state, "!=", "0").into_template();
+        let initial_cond_template: PseudocodeTemplate =
+            comparison_imm(&mut state, "!=", "0");
         let initial_condition = state.peek(0).unwrap();
 
         // Save loop entry state (with condition on top)
@@ -2234,10 +3191,11 @@ mod tests {
         // This pops the value and address
         let _write_ptr = state.peek(3).unwrap();
         let _stored_val = state.pop(); // v_2
-        // Stack: [v_0, a_1, a_2]
+                                       // Stack: [v_0, a_1, a_2]
 
         // add.1: v_3 = v_0 + 1 (update counter)
-        let _counter_update: PseudocodeTemplate = binary_imm_op::<SsaDecompilerState, TemplateOutput>(&mut state, "+", "1").into_template();
+        let _counter_update: PseudocodeTemplate =
+            binary_imm_op(&mut state, "+", "1");
         // Stack: [v_3, a_1, a_2]
 
         // movup.2: bring a_2 to top
@@ -2245,7 +3203,8 @@ mod tests {
         // Stack: [a_2, v_3, a_1]
 
         // add.1: v_4 = a_2 + 1 (update write_ptr)
-        let _write_ptr_update: PseudocodeTemplate = binary_imm_op::<SsaDecompilerState, TemplateOutput>(&mut state, "+", "1").into_template();
+        let _write_ptr_update: PseudocodeTemplate =
+            binary_imm_op(&mut state, "+", "1");
         // Stack: [v_4, v_3, a_1]
 
         // movup.2: bring a_1 to top
@@ -2253,7 +3212,8 @@ mod tests {
         // Stack: [a_1, v_4, v_3]
 
         // add.1: v_5 = a_1 + 1 (update read_ptr)
-        let _read_ptr_update: PseudocodeTemplate = binary_imm_op::<SsaDecompilerState, TemplateOutput>(&mut state, "+", "1").into_template();
+        let _read_ptr_update: PseudocodeTemplate =
+            binary_imm_op(&mut state, "+", "1");
         // Stack: [v_5, v_4, v_3]
 
         // movup.2: bring v_3 (counter) to top
@@ -2264,15 +3224,19 @@ mod tests {
         state.dup(0);
 
         // neq.0: v_6 = (v_3 != 0) - this is the END-OF-LOOP condition
-        let end_cond_template: PseudocodeTemplate = comparison_imm::<SsaDecompilerState, TemplateOutput>(&mut state, "!=", "0").into_template();
+        let end_cond_template: PseudocodeTemplate =
+            comparison_imm(&mut state, "!=", "0");
         let end_condition = state.peek(0).unwrap();
         // Stack: [v_6 (new condition), v_3 (counter), v_5 (read_ptr), v_4 (write_ptr)]
 
         // Before phi resolution, the conditions have different SSA IDs
-        assert_ne!(initial_condition, end_condition, "Before phi, conditions should have different SSA IDs");
+        assert_ne!(
+            initial_condition, end_condition,
+            "Before phi, conditions should have different SSA IDs"
+        );
 
         // Create phi nodes at loop end
-        state.create_loop_phis(&loop_entry_stack);
+        state.create_loop_phis(&loop_entry_stack).unwrap();
 
         // Resolve names
         state.ctx.resolve_names();
@@ -2310,7 +3274,13 @@ mod tests {
 
         // Print the resolved templates for debugging
         println!("neg template: {}", neg_template.resolve(&state.ctx));
-        println!("initial condition template: {}", initial_cond_template.resolve(&state.ctx));
-        println!("end condition template: {}", end_cond_template.resolve(&state.ctx));
+        println!(
+            "initial condition template: {}",
+            initial_cond_template.resolve(&state.ctx)
+        );
+        println!(
+            "end condition template: {}",
+            end_cond_template.resolve(&state.ctx)
+        );
     }
 }

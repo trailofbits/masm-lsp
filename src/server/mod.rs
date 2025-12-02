@@ -29,11 +29,11 @@ use tracing::{debug, error, info};
 
 use crate::{
     client::PublishDiagnostics,
+    cursor_resolution::{resolve_symbol_at_position, ResolutionError, ResolvedSymbol},
     diagnostics::{diagnostics_from_report, unresolved_to_diagnostics},
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
     inlay_hints::{collect_inlay_hints, get_instruction_hover},
     module_path::ModulePathResolver,
-    cursor_resolution::{resolve_symbol_at_position, ResolvedSymbol, ResolutionError},
     service::{DocumentService, WorkspaceService},
     symbol_path::SymbolPath,
     util::{
@@ -121,7 +121,13 @@ impl DocumentCache {
     /// Store parsed symbols for a document with version tracking.
     pub async fn set_symbols(&self, uri: Url, doc_symbols: DocumentSymbols, version: i32) {
         let mut symbols = self.symbols.write().await;
-        symbols.insert(uri, CachedSymbols { symbols: doc_symbols, version });
+        symbols.insert(
+            uri,
+            CachedSymbols {
+                symbols: doc_symbols,
+                version,
+            },
+        );
     }
 }
 
@@ -277,8 +283,14 @@ where
                     if let Some(source) = self.sources.get_by_uri(&to_miden_uri(&uri)) {
                         // Use full document range for diagnostics
                         let full_range = Range {
-                            start: Position { line: 0, character: 0 },
-                            end: Position { line: u32::MAX, character: 0 },
+                            start: Position {
+                                line: 0,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: u32::MAX,
+                                character: 0,
+                            },
                         };
                         let decompilation_result = crate::decompiler::collect_decompilation_hints(
                             &doc.module,
@@ -315,18 +327,25 @@ where
                     if decompilation_enabled {
                         if let Some(source) = self.sources.get_by_uri(&to_miden_uri(&uri)) {
                             let full_range = Range {
-                                start: Position { line: 0, character: 0 },
-                                end: Position { line: u32::MAX, character: 0 },
+                                start: Position {
+                                    line: 0,
+                                    character: 0,
+                                },
+                                end: Position {
+                                    line: u32::MAX,
+                                    character: 0,
+                                },
                             };
-                            let decompilation_result = crate::decompiler::collect_decompilation_hints(
-                                &doc.module,
-                                self.sources.as_ref(),
-                                &uri,
-                                &full_range,
-                                0,
-                                source.as_str(),
-                                Some(workspace.contracts()),
-                            );
+                            let decompilation_result =
+                                crate::decompiler::collect_decompilation_hints(
+                                    &doc.module,
+                                    self.sources.as_ref(),
+                                    &uri,
+                                    &full_range,
+                                    0,
+                                    source.as_str(),
+                                    Some(workspace.contracts()),
+                                );
                             diags.extend(decompilation_result.diagnostics);
                         }
                     }
@@ -401,7 +420,10 @@ where
                         Err(exec_err) => {
                             // If Executable also failed, check if Library was a better error
                             // Return the error from the kind that seemed more appropriate
-                            if library_err.downcast_ref::<SemanticAnalysisError>().is_some() {
+                            if library_err
+                                .downcast_ref::<SemanticAnalysisError>()
+                                .is_some()
+                            {
                                 return Err(exec_err);
                             }
                             return Err(library_err);
@@ -675,15 +697,16 @@ where
 
                     // Look up the module definition by exact fully-qualified path
                     // NOTE: We avoid suffix matching to prevent ambiguity
-                    if let Some(loc) = workspace
-                        .definition(&format!("::{}", normalized))
-                        .or_else(|| {
-                            // Fall back to matching by the last component (module name)
-                            normalized
-                                .rsplit("::")
-                                .next()
-                                .and_then(|name| workspace.definition_by_name(name))
-                        })
+                    if let Some(loc) =
+                        workspace
+                            .definition(&format!("::{}", normalized))
+                            .or_else(|| {
+                                // Fall back to matching by the last component (module name)
+                                normalized
+                                    .rsplit("::")
+                                    .next()
+                                    .and_then(|name| workspace.definition_by_name(name))
+                            })
                     {
                         return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
                     }
@@ -728,8 +751,12 @@ where
 
         // Extract tokens at position for hover checks
         let source = self.sources.get_by_uri(&to_miden_uri(&uri));
-        let token = source.as_ref().and_then(|s| extract_token_at_position(s, pos));
-        let word = source.as_ref().and_then(|s| extract_word_at_position(s, pos));
+        let token = source
+            .as_ref()
+            .and_then(|s| extract_token_at_position(s, pos));
+        let word = source
+            .as_ref()
+            .and_then(|s| extract_word_at_position(s, pos));
 
         // Check if cursor is directly on an invocation instruction keyword (exec, call, syscall, procref)
         // Only show instruction hover when cursor is on the keyword itself, not the target name
@@ -787,7 +814,8 @@ where
                             .unwrap_or_else(|| symbol.name.clone());
 
                         // Format contract signature with procedure name
-                        let contract_sig = contract.and_then(|c| c.format_signature_for_display(&proc_name));
+                        let contract_sig =
+                            contract.and_then(|c| c.format_signature_for_display(&proc_name));
 
                         // Build hover content: contract signature replaces the raw signature
                         let hover_text = match (&contract_sig, comment) {

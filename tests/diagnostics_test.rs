@@ -45,9 +45,7 @@ end
     tokio::task::yield_now().await;
 
     harness.assert_has_diagnostics(&uri).await;
-    harness
-        .assert_diagnostic_contains(&uri, "Unresolved")
-        .await;
+    harness.assert_diagnostic_contains(&uri, "Unresolved").await;
 }
 
 #[tokio::test]
@@ -125,7 +123,9 @@ proc foo
 end
 "#;
     // Re-open with fixed content
-    harness.open_doc(uri.clone(), fixed_content.to_string()).await;
+    harness
+        .open_doc(uri.clone(), fixed_content.to_string())
+        .await;
 
     tokio::task::yield_now().await;
 
@@ -193,6 +193,9 @@ end
     assert!(
         unresolved_diags.is_empty(),
         "expected no unresolved diagnostics for cross-module call, got: {:?}",
-        unresolved_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        unresolved_diags
+            .iter()
+            .map(|d| &d.message)
+            .collect::<Vec<_>>()
     );
 }

@@ -44,10 +44,11 @@ pub fn resolve_symbol_at_position(
     let source = source_manager.get_by_uri(&to_miden_uri(uri));
     let source_file = source.ok_or_else(|| ResolutionError::SourceNotFound(uri.clone()))?;
 
-    let offset = position_to_offset(&source_file, position).ok_or(ResolutionError::InvalidPosition {
-        line: position.line,
-        column: position.character,
-    })?;
+    let offset =
+        position_to_offset(&source_file, position).ok_or(ResolutionError::InvalidPosition {
+            line: position.line,
+            column: position.character,
+        })?;
 
     // Try to find an invocation target at this position (exec.foo, call.bar, etc.)
     if let Some(target) = find_invocation_at_offset(module, offset) {
@@ -169,7 +170,10 @@ impl Visit for ProcDefinitionFinder {
 }
 
 /// Resolve a procedure definition to a symbol path.
-fn resolve_procedure_definition(module: &Module, name: &str) -> Result<ResolvedSymbol, ResolutionError> {
+fn resolve_procedure_definition(
+    module: &Module,
+    name: &str,
+) -> Result<ResolvedSymbol, ResolutionError> {
     // Use the unified symbol resolution service
     let resolver = crate::symbol_resolution::create_resolver(module);
     let path = resolver.resolve_symbol(name);
@@ -230,7 +234,10 @@ mod tests {
         let err = ResolutionError::SourceNotFound(Url::parse("file:///test.masm").unwrap());
         assert!(err.to_string().contains("source file not found"));
 
-        let err = ResolutionError::NoTokenAtPosition { line: 5, column: 10 };
+        let err = ResolutionError::NoTokenAtPosition {
+            line: 5,
+            column: 10,
+        };
         assert!(err.to_string().contains("5:10"));
 
         let err = ResolutionError::InvalidPosition { line: 0, column: 0 };

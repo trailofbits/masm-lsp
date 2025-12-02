@@ -113,12 +113,10 @@ impl Bounds {
             // Range + Range = widened Range
             (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 }) => {
                 match (l1.checked_add(*l2), h1.checked_add(*h2)) {
-                    (Some(new_lo), Some(new_hi)) if new_hi < FIELD_MODULUS => {
-                        Bounds::Range {
-                            lo: new_lo,
-                            hi: new_hi,
-                        }
-                    }
+                    (Some(new_lo), Some(new_hi)) if new_hi < FIELD_MODULUS => Bounds::Range {
+                        lo: new_lo,
+                        hi: new_hi,
+                    },
                     _ => Bounds::Field, // Overflow
                 }
             }
@@ -127,10 +125,7 @@ impl Bounds {
             (Bounds::Bool, Bounds::Bool) => Bounds::Range { lo: 0, hi: 2 },
             (Bounds::Bool, Bounds::Const(c)) | (Bounds::Const(c), Bounds::Bool) => {
                 match c.checked_add(1) {
-                    Some(new_hi) if new_hi < FIELD_MODULUS => Bounds::Range {
-                        lo: *c,
-                        hi: new_hi,
-                    },
+                    Some(new_hi) if new_hi < FIELD_MODULUS => Bounds::Range { lo: *c, hi: new_hi },
                     _ => Bounds::Field,
                 }
             }
@@ -262,12 +257,10 @@ impl Bounds {
             // Range * Range: check for overflow
             (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 }) => {
                 match (l1.checked_mul(*l2), h1.checked_mul(*h2)) {
-                    (Some(new_lo), Some(new_hi)) if new_hi < FIELD_MODULUS => {
-                        Bounds::Range {
-                            lo: new_lo,
-                            hi: new_hi,
-                        }
-                    }
+                    (Some(new_lo), Some(new_hi)) if new_hi < FIELD_MODULUS => Bounds::Range {
+                        lo: new_lo,
+                        hi: new_hi,
+                    },
                     _ => Bounds::Field, // Overflow
                 }
             }
@@ -451,20 +444,16 @@ impl Bounds {
 
             // Const and Range: extend range to include const
             (Bounds::Const(c), Bounds::Range { lo, hi })
-            | (Bounds::Range { lo, hi }, Bounds::Const(c)) => {
-                Bounds::Range {
-                    lo: (*lo).min(*c),
-                    hi: (*hi).max(*c),
-                }
-            }
+            | (Bounds::Range { lo, hi }, Bounds::Const(c)) => Bounds::Range {
+                lo: (*lo).min(*c),
+                hi: (*hi).max(*c),
+            },
 
             // Range join: union of ranges
-            (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 }) => {
-                Bounds::Range {
-                    lo: (*l1).min(*l2),
-                    hi: (*h1).max(*h2),
-                }
-            }
+            (Bounds::Range { lo: l1, hi: h1 }, Bounds::Range { lo: l2, hi: h2 }) => Bounds::Range {
+                lo: (*l1).min(*l2),
+                hi: (*h1).max(*h2),
+            },
 
             // Bool joins
             (Bounds::Bool, Bounds::Bool) => Bounds::Bool,
@@ -474,7 +463,8 @@ impl Bounds {
             (Bounds::Bool, Bounds::Const(c)) | (Bounds::Const(c), Bounds::Bool) => {
                 Bounds::Range { lo: 0, hi: *c }
             }
-            (Bounds::Bool, Bounds::Range { lo: _, hi }) | (Bounds::Range { lo: _, hi }, Bounds::Bool) => {
+            (Bounds::Bool, Bounds::Range { lo: _, hi })
+            | (Bounds::Range { lo: _, hi }, Bounds::Bool) => {
                 // Bool is [0, 1], so join with Range: lower bound is 0, upper bound is max(hi, 1)
                 Bounds::Range {
                     lo: 0,

@@ -149,22 +149,86 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // If the position doesn't exist in our tracking, push an untracked value
         // to maintain consistency with actual stack state.
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::Dup0 => { if !state.stack.dup(0) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup1 => { if !state.stack.dup(1) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup2 => { if !state.stack.dup(2) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup3 => { if !state.stack.dup(3) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup4 => { if !state.stack.dup(4) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup5 => { if !state.stack.dup(5) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup6 => { if !state.stack.dup(6) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup7 => { if !state.stack.dup(7) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup8 => { if !state.stack.dup(8) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup9 => { if !state.stack.dup(9) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup10 => { if !state.stack.dup(10) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup11 => { if !state.stack.dup(11) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup12 => { if !state.stack.dup(12) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup13 => { if !state.stack.dup(13) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup14 => { if !state.stack.dup(14) { state.stack.push(TrackedValue::default()); } }
-        Instruction::Dup15 => { if !state.stack.dup(15) { state.stack.push(TrackedValue::default()); } }
+        Instruction::Dup0 => {
+            if !state.stack.dup(0) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup1 => {
+            if !state.stack.dup(1) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup2 => {
+            if !state.stack.dup(2) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup3 => {
+            if !state.stack.dup(3) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup4 => {
+            if !state.stack.dup(4) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup5 => {
+            if !state.stack.dup(5) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup6 => {
+            if !state.stack.dup(6) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup7 => {
+            if !state.stack.dup(7) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup8 => {
+            if !state.stack.dup(8) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup9 => {
+            if !state.stack.dup(9) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup10 => {
+            if !state.stack.dup(10) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup11 => {
+            if !state.stack.dup(11) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup12 => {
+            if !state.stack.dup(12) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup13 => {
+            if !state.stack.dup(13) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup14 => {
+            if !state.stack.dup(14) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
+        Instruction::Dup15 => {
+            if !state.stack.dup(15) {
+                state.stack.push(TrackedValue::default());
+            }
+        }
 
         Instruction::DupW0 => {
             // Duplicate word at positions 0-3 onto top
@@ -196,54 +260,140 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         // Stack manipulation - Swap
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::Swap1 => { state.stack.swap(0, 1); }
-        Instruction::Swap2 => { state.stack.swap(0, 2); }
-        Instruction::Swap3 => { state.stack.swap(0, 3); }
-        Instruction::Swap4 => { state.stack.swap(0, 4); }
-        Instruction::Swap5 => { state.stack.swap(0, 5); }
-        Instruction::Swap6 => { state.stack.swap(0, 6); }
-        Instruction::Swap7 => { state.stack.swap(0, 7); }
-        Instruction::Swap8 => { state.stack.swap(0, 8); }
-        Instruction::Swap9 => { state.stack.swap(0, 9); }
-        Instruction::Swap10 => { state.stack.swap(0, 10); }
-        Instruction::Swap11 => { state.stack.swap(0, 11); }
-        Instruction::Swap12 => { state.stack.swap(0, 12); }
-        Instruction::Swap13 => { state.stack.swap(0, 13); }
-        Instruction::Swap14 => { state.stack.swap(0, 14); }
-        Instruction::Swap15 => { state.stack.swap(0, 15); }
+        Instruction::Swap1 => {
+            state.stack.swap(0, 1);
+        }
+        Instruction::Swap2 => {
+            state.stack.swap(0, 2);
+        }
+        Instruction::Swap3 => {
+            state.stack.swap(0, 3);
+        }
+        Instruction::Swap4 => {
+            state.stack.swap(0, 4);
+        }
+        Instruction::Swap5 => {
+            state.stack.swap(0, 5);
+        }
+        Instruction::Swap6 => {
+            state.stack.swap(0, 6);
+        }
+        Instruction::Swap7 => {
+            state.stack.swap(0, 7);
+        }
+        Instruction::Swap8 => {
+            state.stack.swap(0, 8);
+        }
+        Instruction::Swap9 => {
+            state.stack.swap(0, 9);
+        }
+        Instruction::Swap10 => {
+            state.stack.swap(0, 10);
+        }
+        Instruction::Swap11 => {
+            state.stack.swap(0, 11);
+        }
+        Instruction::Swap12 => {
+            state.stack.swap(0, 12);
+        }
+        Instruction::Swap13 => {
+            state.stack.swap(0, 13);
+        }
+        Instruction::Swap14 => {
+            state.stack.swap(0, 14);
+        }
+        Instruction::Swap15 => {
+            state.stack.swap(0, 15);
+        }
 
         // ─────────────────────────────────────────────────────────────────────
         // Stack manipulation - Move
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::MovUp2 => { state.stack.movup(2); }
-        Instruction::MovUp3 => { state.stack.movup(3); }
-        Instruction::MovUp4 => { state.stack.movup(4); }
-        Instruction::MovUp5 => { state.stack.movup(5); }
-        Instruction::MovUp6 => { state.stack.movup(6); }
-        Instruction::MovUp7 => { state.stack.movup(7); }
-        Instruction::MovUp8 => { state.stack.movup(8); }
-        Instruction::MovUp9 => { state.stack.movup(9); }
-        Instruction::MovUp10 => { state.stack.movup(10); }
-        Instruction::MovUp11 => { state.stack.movup(11); }
-        Instruction::MovUp12 => { state.stack.movup(12); }
-        Instruction::MovUp13 => { state.stack.movup(13); }
-        Instruction::MovUp14 => { state.stack.movup(14); }
-        Instruction::MovUp15 => { state.stack.movup(15); }
+        Instruction::MovUp2 => {
+            state.stack.movup(2);
+        }
+        Instruction::MovUp3 => {
+            state.stack.movup(3);
+        }
+        Instruction::MovUp4 => {
+            state.stack.movup(4);
+        }
+        Instruction::MovUp5 => {
+            state.stack.movup(5);
+        }
+        Instruction::MovUp6 => {
+            state.stack.movup(6);
+        }
+        Instruction::MovUp7 => {
+            state.stack.movup(7);
+        }
+        Instruction::MovUp8 => {
+            state.stack.movup(8);
+        }
+        Instruction::MovUp9 => {
+            state.stack.movup(9);
+        }
+        Instruction::MovUp10 => {
+            state.stack.movup(10);
+        }
+        Instruction::MovUp11 => {
+            state.stack.movup(11);
+        }
+        Instruction::MovUp12 => {
+            state.stack.movup(12);
+        }
+        Instruction::MovUp13 => {
+            state.stack.movup(13);
+        }
+        Instruction::MovUp14 => {
+            state.stack.movup(14);
+        }
+        Instruction::MovUp15 => {
+            state.stack.movup(15);
+        }
 
-        Instruction::MovDn2 => { state.stack.movdn(2); }
-        Instruction::MovDn3 => { state.stack.movdn(3); }
-        Instruction::MovDn4 => { state.stack.movdn(4); }
-        Instruction::MovDn5 => { state.stack.movdn(5); }
-        Instruction::MovDn6 => { state.stack.movdn(6); }
-        Instruction::MovDn7 => { state.stack.movdn(7); }
-        Instruction::MovDn8 => { state.stack.movdn(8); }
-        Instruction::MovDn9 => { state.stack.movdn(9); }
-        Instruction::MovDn10 => { state.stack.movdn(10); }
-        Instruction::MovDn11 => { state.stack.movdn(11); }
-        Instruction::MovDn12 => { state.stack.movdn(12); }
-        Instruction::MovDn13 => { state.stack.movdn(13); }
-        Instruction::MovDn14 => { state.stack.movdn(14); }
-        Instruction::MovDn15 => { state.stack.movdn(15); }
+        Instruction::MovDn2 => {
+            state.stack.movdn(2);
+        }
+        Instruction::MovDn3 => {
+            state.stack.movdn(3);
+        }
+        Instruction::MovDn4 => {
+            state.stack.movdn(4);
+        }
+        Instruction::MovDn5 => {
+            state.stack.movdn(5);
+        }
+        Instruction::MovDn6 => {
+            state.stack.movdn(6);
+        }
+        Instruction::MovDn7 => {
+            state.stack.movdn(7);
+        }
+        Instruction::MovDn8 => {
+            state.stack.movdn(8);
+        }
+        Instruction::MovDn9 => {
+            state.stack.movdn(9);
+        }
+        Instruction::MovDn10 => {
+            state.stack.movdn(10);
+        }
+        Instruction::MovDn11 => {
+            state.stack.movdn(11);
+        }
+        Instruction::MovDn12 => {
+            state.stack.movdn(12);
+        }
+        Instruction::MovDn13 => {
+            state.stack.movdn(13);
+        }
+        Instruction::MovDn14 => {
+            state.stack.movdn(14);
+        }
+        Instruction::MovDn15 => {
+            state.stack.movdn(15);
+        }
 
         // ─────────────────────────────────────────────────────────────────────
         // Stack manipulation - Pad
@@ -952,7 +1102,10 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         // ext2 operations - extension field arithmetic (2 field elements)
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::Ext2Add | Instruction::Ext2Sub | Instruction::Ext2Mul | Instruction::Ext2Div => {
+        Instruction::Ext2Add
+        | Instruction::Ext2Sub
+        | Instruction::Ext2Mul
+        | Instruction::Ext2Div => {
             // Binary ops: pop 4 (two ext2 elements), push 2 (one ext2 element)
             for _ in 0..4 {
                 state.stack.pop();
@@ -1013,7 +1166,7 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             // Pop condition, conditionally swap top two elements
             // Stack: [c, b, a, ...] -> [b, a, ...] or [a, b, ...] based on c
             state.stack.pop(); // condition
-            // Since we don't know if swap happens, keep elements but mark as unknown bounds
+                               // Since we don't know if swap happens, keep elements but mark as unknown bounds
             if let Some(t) = state.stack.peek_mut(0) {
                 t.bounds = Bounds::Field;
             }
@@ -1024,7 +1177,7 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         Instruction::CSwapW => {
             // Pop condition, conditionally swap top two words
             state.stack.pop(); // condition
-            // Mark affected positions as unknown
+                               // Mark affected positions as unknown
             for i in 0..8 {
                 if let Some(t) = state.stack.peek_mut(i) {
                     t.bounds = Bounds::Field;
@@ -1036,7 +1189,7 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             // Stack: [c, b, a, ...] -> [a] if c=1, [b] if c=0
             state.stack.pop(); // condition
             state.stack.pop(); // one of the values
-            // Remaining value has unknown bounds
+                               // Remaining value has unknown bounds
             if let Some(t) = state.stack.peek_mut(0) {
                 t.bounds = Bounds::Field;
             }
@@ -1177,7 +1330,10 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             // Complex STARK operation - clear tracking to be safe
             state.stack.clear();
         }
-        Instruction::HornerBase | Instruction::HornerExt | Instruction::EvalCircuit | Instruction::LogPrecompile => {
+        Instruction::HornerBase
+        | Instruction::HornerExt
+        | Instruction::EvalCircuit
+        | Instruction::LogPrecompile => {
             // Complex operations with variable stack effects
             state.stack.clear();
         }
@@ -1189,7 +1345,6 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             // System events may have complex stack effects
             state.stack.clear();
         }
-
     }
 }
 

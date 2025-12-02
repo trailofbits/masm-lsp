@@ -270,7 +270,10 @@ mod tests {
     use super::*;
 
     fn make_graph(edges: &[(&str, &[&str])]) -> CallGraph {
-        let procedures: Vec<SymbolPath> = edges.iter().map(|(name, _)| SymbolPath::new(*name)).collect();
+        let procedures: Vec<SymbolPath> = edges
+            .iter()
+            .map(|(name, _)| SymbolPath::new(*name))
+            .collect();
 
         let calls: HashMap<SymbolPath, Vec<SymbolPath>> = edges
             .iter()
@@ -288,11 +291,7 @@ mod tests {
     #[test]
     fn test_linear_chain() {
         // a -> b -> c (c is leaf)
-        let graph = make_graph(&[
-            ("a", &["b"]),
-            ("b", &["c"]),
-            ("c", &[]),
-        ]);
+        let graph = make_graph(&[("a", &["b"]), ("b", &["c"]), ("c", &[])]);
 
         let order = graph.topological_order();
 
@@ -310,12 +309,7 @@ mod tests {
         // b   c
         //  \ /
         //   d
-        let graph = make_graph(&[
-            ("a", &["b", "c"]),
-            ("b", &["d"]),
-            ("c", &["d"]),
-            ("d", &[]),
-        ]);
+        let graph = make_graph(&[("a", &["b", "c"]), ("b", &["d"]), ("c", &["d"]), ("d", &[])]);
 
         let order = graph.topological_order();
 
@@ -345,10 +339,7 @@ mod tests {
     #[test]
     fn test_simple_cycle() {
         // a -> b -> a (mutual recursion)
-        let graph = make_graph(&[
-            ("a", &["b"]),
-            ("b", &["a"]),
-        ]);
+        let graph = make_graph(&[("a", &["b"]), ("b", &["a"])]);
 
         let order = graph.topological_order();
 
@@ -360,9 +351,7 @@ mod tests {
     #[test]
     fn test_self_recursion() {
         // a calls itself
-        let graph = make_graph(&[
-            ("a", &["a"]),
-        ]);
+        let graph = make_graph(&[("a", &["a"])]);
 
         let order = graph.topological_order();
 
@@ -374,11 +363,7 @@ mod tests {
     #[test]
     fn test_cycle_with_entry() {
         // entry -> a -> b -> a (entry calls into a cycle)
-        let graph = make_graph(&[
-            ("entry", &["a"]),
-            ("a", &["b"]),
-            ("b", &["a"]),
-        ]);
+        let graph = make_graph(&[("entry", &["a"]), ("a", &["b"]), ("b", &["a"])]);
 
         let order = graph.topological_order();
 
@@ -391,11 +376,7 @@ mod tests {
     #[test]
     fn test_independent_procedures() {
         // No calls between procedures
-        let graph = make_graph(&[
-            ("a", &[]),
-            ("b", &[]),
-            ("c", &[]),
-        ]);
+        let graph = make_graph(&[("a", &[]), ("b", &[]), ("c", &[])]);
 
         let order = graph.topological_order();
 

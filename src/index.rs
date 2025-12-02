@@ -114,7 +114,11 @@ impl WorkspaceIndex {
                 .push(Location::new(uri.clone(), r.range));
             // Index by short name for fast lookups
             let name = r.path.name().to_string();
-            if !self.refs_by_name.get(&name).is_some_and(|v| v.contains(&r.path)) {
+            if !self
+                .refs_by_name
+                .get(&name)
+                .is_some_and(|v| v.contains(&r.path))
+            {
                 self.refs_by_name
                     .entry(name)
                     .or_default()
@@ -203,9 +207,7 @@ impl WorkspaceIndex {
     pub fn workspace_symbols(&self, query: &str) -> Vec<(String, Location)> {
         self.definitions
             .iter()
-            .filter(|(path, _)| {
-                path.as_str().contains(query) || path.name().contains(query)
-            })
+            .filter(|(path, _)| path.as_str().contains(query) || path.name().contains(query))
             .map(|(path, loc)| (path.to_string(), loc.clone()))
             .collect()
     }
@@ -461,9 +463,10 @@ mod tests {
         // References should be stored with fully-qualified paths after module alias expansion.
         // For example, `exec.base_field::square` with `use std::math::ecgfp5::base_field`
         // should be stored as `::std::math::ecgfp5::base_field::square`.
-        let refs = vec![
-            make_reference("::std::math::ecgfp5::base_field::square", 10),
-        ];
+        let refs = vec![make_reference(
+            "::std::math::ecgfp5::base_field::square",
+            10,
+        )];
         index.update_document(uri.clone(), &[], &refs);
 
         // Looking up by full path should find the reference
@@ -554,6 +557,10 @@ mod tests {
 
         let found = index.definitions_by_suffix("hash");
         // Should find both hash-related definitions (paths ending with "hash")
-        assert!(found.len() >= 2, "expected at least 2 definitions ending with 'hash', got {}", found.len());
+        assert!(
+            found.len() >= 2,
+            "expected at least 2 definitions ending with 'hash', got {}",
+            found.len()
+        );
     }
 }

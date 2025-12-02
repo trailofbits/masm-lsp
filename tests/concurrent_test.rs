@@ -99,10 +99,7 @@ async fn concurrent_rapid_changes_no_panic() {
         let uri = uri.clone();
         set.spawn(async move {
             let params = DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri,
-                    version: v,
-                },
+                text_document: VersionedTextDocumentIdentifier { uri, version: v },
                 content_changes: vec![TextDocumentContentChangeEvent {
                     range: None,
                     range_length: None,

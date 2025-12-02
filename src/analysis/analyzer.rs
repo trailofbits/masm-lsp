@@ -185,9 +185,7 @@ impl<'a> Analyzer<'a> {
                 self.handle_instruction(inst.inner(), inst.span());
             }
             Op::If {
-                then_blk,
-                else_blk,
-                ..
+                then_blk, else_blk, ..
             } => {
                 // Check nested if/else for branch balance
                 self.check_branch_balance(then_blk, else_blk, op.span());
@@ -212,12 +210,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Check if/else branches for stack balance and emit diagnostic if mismatched.
-    fn check_branch_balance(
-        &mut self,
-        then_blk: &Block,
-        else_blk: &Block,
-        span: SourceSpan,
-    ) {
+    fn check_branch_balance(&mut self, then_blk: &Block, else_blk: &Block, span: SourceSpan) {
         let Some(entry_state) = self.current_state.clone() else {
             return;
         };
@@ -231,7 +224,10 @@ impl<'a> Analyzer<'a> {
             state.stack.pop(); // consume condition
         }
         let then_effect = self.analyze_block_effect(then_blk);
-        let then_depth = self.current_state.as_ref().map(|s| s.stack.depth() as isize);
+        let then_depth = self
+            .current_state
+            .as_ref()
+            .map(|s| s.stack.depth() as isize);
 
         // Analyze else branch
         self.current_state = Some(entry_state);
@@ -239,7 +235,10 @@ impl<'a> Analyzer<'a> {
             state.stack.pop(); // consume condition
         }
         let else_effect = self.analyze_block_effect(else_blk);
-        let else_depth = self.current_state.as_ref().map(|s| s.stack.depth() as isize);
+        let else_depth = self
+            .current_state
+            .as_ref()
+            .map(|s| s.stack.depth() as isize);
 
         // Compare effects
         match (then_effect, else_effect, then_depth, else_depth) {
@@ -349,9 +348,7 @@ impl<'a> Visit for Analyzer<'a> {
     fn visit_op(&mut self, op: &Op) -> ControlFlow<()> {
         match op {
             Op::If {
-                then_blk,
-                else_blk,
-                ..
+                then_blk, else_blk, ..
             } => {
                 // Check for branch stack balance mismatch
                 self.check_branch_balance(then_blk, else_blk, op.span());
@@ -453,7 +450,9 @@ end
 "#;
         let diags = analyze_source(source);
         assert!(
-            diags.iter().any(|d| d.message.contains("Branch stack mismatch")),
+            diags
+                .iter()
+                .any(|d| d.message.contains("Branch stack mismatch")),
             "Expected branch mismatch diagnostic, got: {:?}",
             diags
         );
@@ -476,7 +475,10 @@ end
             .iter()
             .find(|d| d.message.contains("Branch stack mismatch"));
         assert!(mismatch.is_some(), "Expected branch mismatch diagnostic");
-        assert_eq!(mismatch.unwrap().severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(
+            mismatch.unwrap().severity,
+            Some(DiagnosticSeverity::WARNING)
+        );
     }
 
     #[test]
@@ -493,7 +495,9 @@ end
 "#;
         let diags = analyze_source(source);
         assert!(
-            !diags.iter().any(|d| d.message.contains("Branch stack mismatch")),
+            !diags
+                .iter()
+                .any(|d| d.message.contains("Branch stack mismatch")),
             "Should not report mismatch for balanced branches, got: {:?}",
             diags
         );
@@ -513,7 +517,9 @@ end
 "#;
         let diags = analyze_source(source);
         assert!(
-            !diags.iter().any(|d| d.message.contains("Branch stack mismatch")),
+            !diags
+                .iter()
+                .any(|d| d.message.contains("Branch stack mismatch")),
             "Empty branches should be balanced, got: {:?}",
             diags
         );
@@ -538,7 +544,9 @@ end
 "#;
         let diags = analyze_source(source);
         assert!(
-            diags.iter().any(|d| d.message.contains("Branch stack mismatch")),
+            diags
+                .iter()
+                .any(|d| d.message.contains("Branch stack mismatch")),
             "Expected branch mismatch for nested if, got: {:?}",
             diags
         );

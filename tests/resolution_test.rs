@@ -104,7 +104,9 @@ async fn resolve_cross_file_reference() {
     let harness = TestHarness::new().await;
 
     // Open definition file
-    let def_uri = harness.open_inline("defs.masm", inline::CROSS_MODULE_DEF).await;
+    let def_uri = harness
+        .open_inline("defs.masm", inline::CROSS_MODULE_DEF)
+        .await;
 
     // Open caller file
     let caller_content = inline::CROSS_MODULE_CALL;
@@ -176,11 +178,17 @@ async fn find_references_cross_file() {
     let harness = TestHarness::new().await;
 
     // Open definition file
-    let def_uri = harness.open_inline("defs.masm", inline::CROSS_MODULE_DEF).await;
+    let def_uri = harness
+        .open_inline("defs.masm", inline::CROSS_MODULE_DEF)
+        .await;
 
     // Open two caller files
-    let caller1 = harness.open_inline("caller1.masm", inline::CROSS_MODULE_CALL).await;
-    let caller2 = harness.open_inline("caller2.masm", inline::CROSS_MODULE_CALL).await;
+    let caller1 = harness
+        .open_inline("caller1.masm", inline::CROSS_MODULE_CALL)
+        .await;
+    let caller2 = harness
+        .open_inline("caller2.masm", inline::CROSS_MODULE_CALL)
+        .await;
 
     // Find references from definition
     let pos = find_position(inline::CROSS_MODULE_DEF, "foo");

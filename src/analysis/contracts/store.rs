@@ -52,10 +52,7 @@ impl ContractStore {
                 .entry(name.clone())
                 .or_default()
                 .retain(|p| p != &path);
-            self.by_name
-                .entry(name)
-                .or_default()
-                .push(path.clone());
+            self.by_name.entry(name).or_default().push(path.clone());
 
             self.contracts.insert(path, contract);
         }

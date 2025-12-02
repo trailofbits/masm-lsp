@@ -51,12 +51,8 @@ use crate::symbol_path::SymbolPath;
 pub fn resolve_target(module: &Module, target: &InvocationTarget) -> Option<SymbolPath> {
     match target {
         InvocationTarget::MastRoot(_) => None,
-        InvocationTarget::Symbol(ident) => {
-            Some(resolve_symbol(module, ident.as_str()))
-        }
-        InvocationTarget::Path(path) => {
-            Some(resolve_path(module, path.inner().as_str()))
-        }
+        InvocationTarget::Symbol(ident) => Some(resolve_symbol(module, ident.as_str())),
+        InvocationTarget::Path(path) => Some(resolve_path(module, path.inner().as_str())),
     }
 }
 
@@ -153,12 +149,8 @@ impl<'a> SymbolResolver<'a> {
     pub fn resolve_target(&self, target: &InvocationTarget) -> Option<SymbolPath> {
         match target {
             InvocationTarget::MastRoot(_) => None,
-            InvocationTarget::Symbol(ident) => {
-                Some(self.resolve_symbol(ident.as_str()))
-            }
-            InvocationTarget::Path(path) => {
-                Some(self.resolve_path(path.inner().as_str()))
-            }
+            InvocationTarget::Symbol(ident) => Some(self.resolve_symbol(ident.as_str())),
+            InvocationTarget::Path(path) => Some(self.resolve_path(path.inner().as_str())),
         }
     }
 
@@ -220,17 +212,14 @@ fn resolution_to_path(module: &Module, resolution: SymbolResolution) -> Option<S
     match resolution {
         SymbolResolution::Local(idx) => {
             let item = module.get(idx.into_inner())?;
-            Some(SymbolPath::from_module_and_name(module, item.name().as_str()))
+            Some(SymbolPath::from_module_and_name(
+                module,
+                item.name().as_str(),
+            ))
         }
-        SymbolResolution::External(path) => {
-            Some(SymbolPath::new(path.into_inner().as_str()))
-        }
-        SymbolResolution::Module { path, .. } => {
-            Some(SymbolPath::new(path.as_str()))
-        }
-        SymbolResolution::Exact { path, .. } => {
-            Some(SymbolPath::new(path.into_inner().as_str()))
-        }
+        SymbolResolution::External(path) => Some(SymbolPath::new(path.into_inner().as_str())),
+        SymbolResolution::Module { path, .. } => Some(SymbolPath::new(path.as_str())),
+        SymbolResolution::Exact { path, .. } => Some(SymbolPath::new(path.into_inner().as_str())),
         SymbolResolution::MastRoot(_) => None,
     }
 }

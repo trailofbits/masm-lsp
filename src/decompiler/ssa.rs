@@ -15,167 +15,51 @@
 //! - Loop entry points (for loop-variant variables)
 //! - If-else merge points (for conditionally modified variables)
 //!
-//! # Generic Pseudocode Generation
+//! # Pseudocode Generation Helpers
 //!
-//! The `DecompilerOps` trait provides a generic interface for pseudocode generation
-//! that works with both string-based and SSA-based decompiler states.
+//! Helper functions build SSA-aware pseudocode templates directly from
+//! `DecompilerState`.
 
 use std::collections::HashMap;
+use std::fmt;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Generic Decompiler Traits
-// ═══════════════════════════════════════════════════════════════════════════
+use crate::analysis::contracts::types::ProcSignature;
 
-/// Trait for decompiler state operations.
-///
-/// This trait abstracts over the concrete state type, allowing pseudocode
-/// generation to work with both `DecompilerState` (string-based) and
-/// `SsaDecompilerState` (SSA-based).
-pub trait DecompilerOps {
-    /// The type of value reference (String for legacy, SsaId for SSA).
-    type ValueRef: Clone;
-
-    /// Pop a value from the stack and return its reference.
-    fn pop_value(&mut self) -> Self::ValueRef;
-
-    /// Push a value onto the stack.
-    fn push_value(&mut self, val: Self::ValueRef);
-
-    /// Create a new local variable and return its reference.
-    fn create_local(&mut self) -> Self::ValueRef;
-
-    /// Peek at position n (0 = top) without modifying stack.
-    fn peek_value(&self, n: usize) -> Self::ValueRef;
-
-    /// Duplicate value at position n to the top and return its reference.
-    fn dup_value(&mut self, n: usize) -> Self::ValueRef;
-
-    /// Get current stack depth.
-    fn stack_depth(&self) -> usize;
-
-    /// Swap positions a and b.
-    fn swap_positions(&mut self, a: usize, b: usize);
-
-    /// Move position n to top.
-    fn move_up(&mut self, n: usize);
-
-    /// Move top to position n.
-    fn move_down(&mut self, n: usize);
-
-    /// Check if tracking has failed.
-    fn is_failed(&self) -> bool;
+/// Extract the whitespace prefix for a given line (0-based) from source text.
+pub fn extract_declaration_prefix(source_text: &str, line: u32) -> String {
+    source_text
+        .lines()
+        .nth(line as usize)
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).collect())
+        .unwrap_or_default()
 }
 
-/// Trait for building pseudocode output.
-///
-/// This trait abstracts over the output type, allowing the same pseudocode
-/// generation logic to produce either strings or SSA templates.
-pub trait PseudocodeOutput: Default {
-    /// The type of value reference this output works with.
-    type ValueRef;
-
-    /// Add literal text to the output.
-    fn text(&mut self, s: &str);
-
-    /// Add a variable reference to the output.
-    fn var(&mut self, v: &Self::ValueRef);
-
-    /// Finish building and return the result.
-    fn finish(self) -> Self;
-
-    /// Check if the output is empty.
-    fn is_empty(&self) -> bool;
-}
-
-/// String-based pseudocode output (for backward compatibility).
-#[derive(Debug, Clone, Default)]
-pub struct StringOutput {
-    buffer: String,
-}
-
-impl PseudocodeOutput for StringOutput {
-    type ValueRef = String;
-
-    fn text(&mut self, s: &str) {
-        self.buffer.push_str(s);
+/// Format a procedure signature string for inlay hints.
+pub fn format_procedure_signature(
+    decl_prefix: &str,
+    proc_name: &str,
+    input_count: usize,
+    output_count: Option<usize>,
+    contract_signature: Option<&ProcSignature>,
+) -> String {
+    if let Some(sig) = contract_signature {
+        return sig.format_for_display(&format!("{decl_prefix}proc {proc_name}"));
     }
 
-    fn var(&mut self, v: &String) {
-        self.buffer.push_str(v);
-    }
+    let inputs = (0..input_count)
+        .map(|i| format!("a_{i}: felt"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let outputs = output_count
+        .map(|o| {
+            (0..o)
+                .map(|i| format!("r_{i}: felt"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_else(|| "?".to_string());
 
-    fn finish(self) -> Self {
-        self
-    }
-
-    fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
-    }
-}
-
-impl StringOutput {
-    /// Get the built string.
-    pub fn into_string(self) -> String {
-        self.buffer
-    }
-
-    /// Get the string as a reference.
-    pub fn as_str(&self) -> &str {
-        &self.buffer
-    }
-}
-
-impl From<StringOutput> for Option<String> {
-    fn from(output: StringOutput) -> Self {
-        if output.is_empty() {
-            None
-        } else {
-            Some(output.buffer)
-        }
-    }
-}
-
-/// SSA template-based pseudocode output.
-#[derive(Debug, Clone, Default)]
-pub struct TemplateOutput {
-    template: PseudocodeTemplate,
-}
-
-impl PseudocodeOutput for TemplateOutput {
-    type ValueRef = SsaId;
-
-    fn text(&mut self, s: &str) {
-        self.template.segments.push(PseudocodeSegment::Literal(s.to_string()));
-    }
-
-    fn var(&mut self, v: &SsaId) {
-        self.template.segments.push(PseudocodeSegment::SsaRef(*v));
-    }
-
-    fn finish(self) -> Self {
-        self
-    }
-
-    fn is_empty(&self) -> bool {
-        self.template.is_empty()
-    }
-}
-
-impl TemplateOutput {
-    /// Get the built template.
-    pub fn into_template(self) -> PseudocodeTemplate {
-        self.template
-    }
-}
-
-impl From<TemplateOutput> for Option<PseudocodeTemplate> {
-    fn from(output: TemplateOutput) -> Self {
-        if output.is_empty() {
-            None
-        } else {
-            Some(output.template)
-        }
-    }
+    format!("{decl_prefix}proc {proc_name}({inputs}) -> ({outputs})")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -193,10 +77,16 @@ impl SsaId {
     }
 }
 
+impl From<&SsaId> for SsaId {
+    fn from(id: &SsaId) -> Self {
+        *id
+    }
+}
+
 /// The kind of variable an SSA value represents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VarKind {
-    /// Procedure argument (a_0, a_1, ...)
+    /// Procedure argument at fixed position (a_0, a_1, ...)
     Argument(usize),
     /// Local/intermediate variable (v_0, v_1, ...)
     Local(usize),
@@ -292,11 +182,11 @@ impl PhiNode {
 #[derive(Debug)]
 pub struct SsaContext {
     /// All SSA values created during analysis.
-    values: HashMap<SsaId, SsaValue>,
+    pub values: HashMap<SsaId, SsaValue>,
     /// All phi nodes created at merge points.
-    phi_nodes: Vec<PhiNode>,
+    pub phi_nodes: Vec<PhiNode>,
     /// Counter for generating unique SSA IDs.
-    next_id: usize,
+    pub next_id: usize,
     /// Counter for generating local variable indices.
     next_local_index: usize,
     /// Maps SSA IDs to their canonical display name (computed during resolution).
@@ -409,7 +299,9 @@ impl SsaContext {
         // the first definition)
         for &id in self.values.keys() {
             let root = find(&mut parent, id);
-            let canonical_name = self.values.get(&root)
+            let canonical_name = self
+                .values
+                .get(&root)
                 .map(|v| v.display_name.clone())
                 .unwrap_or_else(|| format!("?_{}", id.0));
             self.resolved_names.insert(id, canonical_name);
@@ -430,6 +322,69 @@ impl SsaContext {
     /// Get the number of values created (for estimating next argument index).
     pub fn value_count(&self) -> usize {
         self.values.len()
+    }
+
+    /// Count how many arguments have been discovered.
+    pub fn argument_count(&self) -> usize {
+        self.values
+            .values()
+            .filter(|v| matches!(v.kind, VarKind::Argument(_)))
+            .count()
+    }
+
+    /// Find the smallest argument index in the phi-equivalence class of `id`.
+    pub fn argument_index_via_phi(&self, id: SsaId) -> Option<usize> {
+        let mut parent: HashMap<SsaId, SsaId> = HashMap::new();
+        for &val in self.values.keys() {
+            parent.insert(val, val);
+        }
+
+        fn find(parent: &mut HashMap<SsaId, SsaId>, id: SsaId) -> SsaId {
+            let p = *parent.get(&id).unwrap_or(&id);
+            if p != id {
+                let root = find(parent, p);
+                parent.insert(id, root);
+                root
+            } else {
+                id
+            }
+        }
+
+        fn union(parent: &mut HashMap<SsaId, SsaId>, a: SsaId, b: SsaId) {
+            let root_a = find(parent, a);
+            let root_b = find(parent, b);
+            if root_a != root_b {
+                if root_a.0 < root_b.0 {
+                    parent.insert(root_b, root_a);
+                } else {
+                    parent.insert(root_a, root_b);
+                }
+            }
+        }
+
+        for phi in &self.phi_nodes {
+            for &op in &phi.operands {
+                union(&mut parent, phi.result, op);
+            }
+        }
+
+        let mut root_arg: HashMap<SsaId, usize> = HashMap::new();
+        let mut parent_copy = parent.clone();
+        for (&sid, val) in self.values.iter() {
+            if let VarKind::Argument(idx) = val.kind {
+                let root = find(&mut parent_copy, sid);
+                root_arg
+                    .entry(root)
+                    .and_modify(|e| *e = (*e).min(idx))
+                    .or_insert(idx);
+            }
+        }
+
+        let root = {
+            let mut tmp = parent.clone();
+            find(&mut tmp, id)
+        };
+        root_arg.get(&root).copied()
     }
 
     /// Check if two SSA values should have the same display name.
@@ -479,6 +434,10 @@ impl SsaStack {
         self.stack.push(id);
     }
 
+    /// Insert an SSA ID at the bottom of the stack.
+    pub fn insert_bottom(&mut self, id: SsaId) {
+        self.stack.insert(0, id);
+    }
     /// Pop an SSA ID from the stack.
     pub fn pop(&mut self) -> Option<SsaId> {
         self.stack.pop()
@@ -504,6 +463,7 @@ impl SsaStack {
             self.stack.push(id);
         }
     }
+
 
     /// Swap positions a and b.
     pub fn swap(&mut self, a: usize, b: usize) {
@@ -579,12 +539,15 @@ pub struct PseudocodeTemplate {
 impl PseudocodeTemplate {
     /// Create a new empty template.
     pub fn new() -> Self {
-        Self { segments: Vec::new() }
+        Self {
+            segments: Vec::new(),
+        }
     }
 
     /// Add a literal string segment.
     pub fn literal(mut self, s: &str) -> Self {
-        self.segments.push(PseudocodeSegment::Literal(s.to_string()));
+        self.segments
+            .push(PseudocodeSegment::Literal(s.to_string()));
         self
     }
 
@@ -605,9 +568,38 @@ impl PseudocodeTemplate {
             .collect()
     }
 
+    /// Resolve the template with an override function for specific SSA IDs.
+    ///
+    /// The override function is called for each SSA reference. If it returns
+    /// `Some(name)`, that name is used instead of the default display name.
+    /// This is used for parametric variable naming at resolution time.
+    pub fn resolve_with_overrides<F>(&self, ctx: &SsaContext, override_fn: F) -> String
+    where
+        F: Fn(SsaId) -> Option<String>,
+    {
+        self.segments
+            .iter()
+            .map(|seg| match seg {
+                PseudocodeSegment::Literal(s) => s.clone(),
+                PseudocodeSegment::SsaRef(id) => {
+                    // First check for override, then fall back to context
+                    override_fn(*id).unwrap_or_else(|| ctx.get_display_name(*id).to_string())
+                }
+            })
+            .collect()
+    }
+
     /// Check if the template is empty.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
+    }
+
+    /// Get all SSA IDs referenced in this template.
+    pub fn ssa_ids(&self) -> impl Iterator<Item = SsaId> + '_ {
+        self.segments.iter().filter_map(|seg| match seg {
+            PseudocodeSegment::SsaRef(id) => Some(*id),
+            PseudocodeSegment::Literal(_) => None,
+        })
     }
 }
 
@@ -641,14 +633,18 @@ impl PseudocodeBuilder {
     }
 
     /// Add literal text.
-    pub fn text(mut self, s: &str) -> Self {
-        self.template = self.template.literal(s);
+    pub fn text(&mut self, s: &str) -> &mut Self {
+        self.template
+            .segments
+            .push(PseudocodeSegment::Literal(s.to_string()));
         self
     }
 
     /// Add an SSA variable reference.
-    pub fn var(mut self, id: SsaId) -> Self {
-        self.template = self.template.ssa_ref(id);
+    pub fn var<V: Into<SsaId>>(&mut self, id: V) -> &mut Self {
+        self.template
+            .segments
+            .push(PseudocodeSegment::SsaRef(id.into()));
         self
     }
 
@@ -667,21 +663,48 @@ impl PseudocodeBuilder {
 /// This is used during Pass 1 to build SSA relationships. After the AST walk,
 /// call `resolve_names()` on the SSA context to compute final display names.
 #[derive(Debug)]
-pub struct SsaDecompilerState {
+pub struct DecompilerState {
     /// SSA context for tracking values and phi relationships.
     pub ctx: SsaContext,
     /// Stack of SSA IDs.
     stack: SsaStack,
     /// Whether tracking has failed.
     pub tracking_failed: bool,
-    /// Counter for generating loop counter names.
-    next_counter_id: usize,
 }
 
 /// Loop counter names in order of nesting depth.
-const LOOP_COUNTER_NAMES: &[&str] = &["i", "j", "k", "l", "m", "n", "o", "p", "q"];
+pub const LOOP_COUNTER_NAMES: &[&str] = &["i", "j", "k", "l", "m", "n", "o", "p", "q"];
 
-impl SsaDecompilerState {
+/// Error when attempting to create loop phi nodes.
+#[derive(Debug)]
+pub enum LoopPhiError {
+    DepthMismatch { entry: usize, exit: usize },
+    PermutedStack,
+}
+
+impl fmt::Display for LoopPhiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoopPhiError::DepthMismatch { entry, exit } => {
+                write!(f, "loop entry/exit stack depths differ (entry={entry}, exit={exit})")
+            }
+            LoopPhiError::PermutedStack => {
+                write!(f, "loop permutes stack values; variable mapping is ambiguous")
+            }
+        }
+    }
+}
+
+impl DecompilerState {
+    /// Next argument index based on currently known arguments.
+    fn next_argument_index(&self) -> usize {
+        self.ctx
+            .values
+            .values()
+            .filter(|v| matches!(v.kind, VarKind::Argument(_)))
+            .count()
+    }
+
     /// Create a new state with procedure arguments.
     pub fn new(input_count: usize) -> Self {
         let mut ctx = SsaContext::new();
@@ -694,19 +717,7 @@ impl SsaDecompilerState {
             ctx,
             stack,
             tracking_failed: false,
-            next_counter_id: 0,
         }
-    }
-
-    /// Generate a new loop counter name (i, j, k, ...).
-    pub fn new_counter(&mut self) -> String {
-        let name = if self.next_counter_id < LOOP_COUNTER_NAMES.len() {
-            LOOP_COUNTER_NAMES[self.next_counter_id].to_string()
-        } else {
-            format!("i{}", self.next_counter_id - LOOP_COUNTER_NAMES.len())
-        };
-        self.next_counter_id += 1;
-        name
     }
 
     /// Create a new local variable and return its SSA ID.
@@ -724,13 +735,16 @@ impl SsaDecompilerState {
     pub fn pop(&mut self) -> SsaId {
         self.stack.pop().unwrap_or_else(|| {
             // Discover a new argument
-            let arg_idx = self.ctx.value_count(); // Approximate next arg index
-            self.ctx.new_argument(arg_idx)
+            let next_arg = self.next_argument_index();
+            self.ctx.new_argument(next_arg)
         })
     }
 
-    /// Peek at the SSA ID at position n (0 = top).
-    pub fn peek(&self, n: usize) -> Option<SsaId> {
+    /// Peek at the SSA ID at position n (0 = top), discovering inputs if needed.
+    pub fn peek(&mut self, n: usize) -> Option<SsaId> {
+        if self.depth() <= n {
+            self.ensure_depth(n + 1);
+        }
         self.stack.peek(n)
     }
 
@@ -741,22 +755,53 @@ impl SsaDecompilerState {
 
     /// Duplicate the value at position n to the top.
     pub fn dup(&mut self, n: usize) {
+        self.ensure_depth(n + 1);
         self.stack.dup(n);
     }
 
     /// Swap positions a and b.
     pub fn swap(&mut self, a: usize, b: usize) {
+        let max_pos = a.max(b);
+        self.ensure_depth(max_pos + 1);
         self.stack.swap(a, b);
     }
 
     /// Move position n to the top.
     pub fn movup(&mut self, n: usize) {
+        self.ensure_depth(n + 1);
         self.stack.movup(n);
     }
 
     /// Move top to position n.
     pub fn movdn(&mut self, n: usize) {
+        self.ensure_depth(n + 1);
         self.stack.movdn(n);
+    }
+
+    /// Apply a net stack effect to the current stack.
+    ///
+    /// Positive values push new locals, negative values pop existing values.
+    /// Returns Err if a negative effect would underflow the current stack.
+    pub fn apply_net_effect(&mut self, net_effect: i32) -> Result<(), ()> {
+        if net_effect > 0 {
+            for _ in 0..net_effect {
+                let v = self.new_local();
+                self.push(v);
+            }
+            Ok(())
+        } else if net_effect < 0 {
+            let needed = (-net_effect) as usize;
+            if self.depth() < needed {
+                return Err(());
+            }
+            for _ in 0..needed {
+                // For net-effect adjustment we should not discover new args; guard above
+                self.stack.pop();
+            }
+            Ok(())
+        } else {
+            Ok(())
+        }
     }
 
     /// Save current stack state.
@@ -769,23 +814,58 @@ impl SsaDecompilerState {
         self.stack.restore(snapshot);
     }
 
+    /// Ensure the stack has at least `needed` elements by creating new arguments at the bottom.
+    fn ensure_depth(&mut self, needed: usize) {
+        let current = self.depth();
+        if current >= needed {
+            return;
+        }
+        let missing = needed - current;
+        for _ in 0..missing {
+            let idx = self.next_argument_index();
+            let arg = self.ctx.new_argument(idx);
+            self.stack.insert_bottom(arg);
+        }
+    }
+
     /// Create phi nodes for a loop.
     ///
     /// This should be called at loop exit when the loop has zero net effect.
     /// It creates phi nodes that merge the entry and exit values at each position.
-    pub fn create_loop_phis(&mut self, entry_stack: &[SsaId]) {
+    pub fn create_loop_phis(&mut self, entry_stack: &[SsaId]) -> Result<(), LoopPhiError> {
         let exit_stack = self.stack.snapshot();
-        let min_len = entry_stack.len().min(exit_stack.len());
 
-        for i in 0..min_len {
+        if entry_stack.len() != exit_stack.len() {
+            return Err(LoopPhiError::DepthMismatch {
+                entry: entry_stack.len(),
+                exit: exit_stack.len(),
+            });
+        }
+
+        // If the loop only permuted values (no new defs), accept without creating phis.
+        // This avoids false failures for stack-neutral permutations.
+        let mut entry_sorted = entry_stack.to_vec();
+        let mut exit_sorted = exit_stack.to_vec();
+        entry_sorted.sort_by_key(|id| id.0);
+        exit_sorted.sort_by_key(|id| id.0);
+        if entry_sorted == exit_sorted {
+            self.stack.restore(&exit_stack);
+            return Ok(());
+        }
+
+        for i in 0..entry_stack.len() {
             let entry_id = entry_stack[i];
             let exit_id = exit_stack[i];
-            if entry_id != exit_id {
-                // Create a phi that merges entry and exit values
-                // The entry value is the "canonical" one
-                self.ctx.add_phi(exit_id, vec![entry_id]);
+
+            if entry_id == exit_id {
+                continue;
             }
+
+            // Create a phi that merges entry and exit values
+            self.ctx.add_phi(exit_id, vec![entry_id, exit_id]);
         }
+
+        Ok(())
     }
 
     /// Create phi nodes for an if-else merge.
@@ -800,8 +880,7 @@ impl SsaDecompilerState {
             let else_id = else_stack[i];
             if then_id != else_id {
                 // Create a phi that merges both branches
-                // The then-branch value is treated as canonical
-                self.ctx.add_phi(else_id, vec![then_id]);
+                self.ctx.add_phi(else_id, vec![then_id, else_id]);
             }
         }
     }
@@ -820,322 +899,200 @@ impl SsaDecompilerState {
     }
 }
 
-impl DecompilerOps for SsaDecompilerState {
-    type ValueRef = SsaId;
-
-    fn pop_value(&mut self) -> SsaId {
-        self.pop()
-    }
-
-    fn push_value(&mut self, val: SsaId) {
-        self.push(val);
-    }
-
-    fn create_local(&mut self) -> SsaId {
-        self.new_local()
-    }
-
-    fn peek_value(&self, n: usize) -> SsaId {
-        self.peek(n).unwrap_or_else(|| {
-            // Return a placeholder for out-of-bounds peek
-            // This shouldn't happen in well-formed code
-            SsaId::new(usize::MAX)
-        })
-    }
-
-    fn dup_value(&mut self, n: usize) -> SsaId {
-        self.dup(n);
-        self.peek(0).unwrap_or_else(|| SsaId::new(usize::MAX))
-    }
-
-    fn stack_depth(&self) -> usize {
-        self.depth()
-    }
-
-    fn swap_positions(&mut self, a: usize, b: usize) {
-        self.swap(a, b);
-    }
-
-    fn move_up(&mut self, n: usize) {
-        self.movup(n);
-    }
-
-    fn move_down(&mut self, n: usize) {
-        self.movdn(n);
-    }
-
-    fn is_failed(&self) -> bool {
-        self.tracking_failed
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Generic Pseudocode Generation Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Generate pseudocode for a binary operation (e.g., add, sub, mul).
-///
-/// Pops two operands, creates a new result variable, and pushes it.
-/// Returns output like: `v_0 = a_0 + a_1`
-pub fn binary_op<S, O>(state: &mut S, op: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let b = state.pop_value();
-    let a = state.pop_value();
-    let result = state.create_local();
-    state.push_value(result.clone());
+pub fn binary_op(state: &mut DecompilerState, op: &str) -> PseudocodeTemplate {
+    let b = state.pop();
+    let a = state.pop();
+    let result = state.new_local();
+    state.push(result);
 
-    let mut output = O::default();
-    output.var(&result);
-    output.text(" = ");
-    output.var(&a);
-    output.text(" ");
-    output.text(op);
-    output.text(" ");
-    output.var(&b);
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output.var(result).text(" = ").var(a).text(" ").text(op).text(" ").var(b);
+    output.build()
 }
 
 /// Generate pseudocode for a binary operation with an immediate operand.
-///
-/// Pops one operand, creates a new result variable, and pushes it.
-/// Returns output like: `v_0 = a_0 + 5`
-pub fn binary_imm_op<S, O>(state: &mut S, op: &str, imm: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let a = state.pop_value();
-    let result = state.create_local();
-    state.push_value(result.clone());
+pub fn binary_imm_op(
+    state: &mut DecompilerState,
+    op: &str,
+    imm: &str,
+) -> PseudocodeTemplate {
+    let a = state.pop();
+    let result = state.new_local();
+    state.push(result);
 
-    let mut output = O::default();
-    output.var(&result);
-    output.text(" = ");
-    output.var(&a);
-    output.text(" ");
-    output.text(op);
-    output.text(" ");
-    output.text(imm);
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output.var(result).text(" = ").var(a).text(" ").text(op).text(" ").text(imm);
+    output.build()
 }
 
 /// Generate pseudocode for a comparison operation.
-///
-/// Pops two operands, creates a new result variable, and pushes it.
-/// Returns output like: `v_0 = (a_0 == a_1)`
-pub fn comparison<S, O>(state: &mut S, op: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let b = state.pop_value();
-    let a = state.pop_value();
-    let result = state.create_local();
-    state.push_value(result.clone());
+pub fn comparison(state: &mut DecompilerState, op: &str) -> PseudocodeTemplate {
+    let b = state.pop();
+    let a = state.pop();
+    let result = state.new_local();
+    state.push(result);
 
-    let mut output = O::default();
-    output.var(&result);
-    output.text(" = (");
-    output.var(&a);
-    output.text(" ");
-    output.text(op);
-    output.text(" ");
-    output.var(&b);
-    output.text(")");
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output
+        .var(result)
+        .text(" = (")
+        .var(a)
+        .text(" ")
+        .text(op)
+        .text(" ")
+        .var(b)
+        .text(")");
+    output.build()
 }
 
 /// Generate pseudocode for a comparison operation with an immediate operand.
-///
-/// Pops one operand, creates a new result variable, and pushes it.
-/// Returns output like: `v_0 = (a_0 == 5)`
-pub fn comparison_imm<S, O>(state: &mut S, op: &str, imm: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let a = state.pop_value();
-    let result = state.create_local();
-    state.push_value(result.clone());
+pub fn comparison_imm(
+    state: &mut DecompilerState,
+    op: &str,
+    imm: &str,
+) -> PseudocodeTemplate {
+    let a = state.pop();
+    let result = state.new_local();
+    state.push(result);
 
-    let mut output = O::default();
-    output.var(&result);
-    output.text(" = (");
-    output.var(&a);
-    output.text(" ");
-    output.text(op);
-    output.text(" ");
-    output.text(imm);
-    output.text(")");
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output
+        .var(result)
+        .text(" = (")
+        .var(a)
+        .text(" ")
+        .text(op)
+        .text(" ")
+        .text(imm)
+        .text(")");
+    output.build()
 }
 
 /// Generate pseudocode for a unary prefix operation (e.g., negation, not).
-///
-/// Pops one operand, creates a new result variable, and pushes it.
-/// Returns output like: `v_0 = -a_0`
-pub fn unary_op<S, O>(state: &mut S, op: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let a = state.pop_value();
-    let result = state.create_local();
-    state.push_value(result.clone());
+pub fn unary_op(state: &mut DecompilerState, op: &str) -> PseudocodeTemplate {
+    let a = state.pop();
+    let result = state.new_local();
+    state.push(result);
 
-    let mut output = O::default();
-    output.var(&result);
-    output.text(" = ");
-    output.text(op);
-    output.var(&a);
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output.var(result).text(" = ").text(op).var(a);
+    output.build()
 }
 
 /// Generate pseudocode for a unary function call (e.g., `clz`, `popcnt`).
-///
-/// Pops one operand, creates a new result variable, and pushes it.
-/// Returns output like: `v_0 = clz(a_0)`
-pub fn unary_fn<S, O>(state: &mut S, fn_name: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let a = state.pop_value();
-    let result = state.create_local();
-    state.push_value(result.clone());
+pub fn unary_fn(state: &mut DecompilerState, fn_name: &str) -> PseudocodeTemplate {
+    let a = state.pop();
+    let result = state.new_local();
+    state.push(result);
 
-    let mut output = O::default();
-    output.var(&result);
-    output.text(" = ");
-    output.text(fn_name);
-    output.text("(");
-    output.var(&a);
-    output.text(")");
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output
+        .var(result)
+        .text(" = ")
+        .text(fn_name)
+        .text("(")
+        .var(a)
+        .text(")");
+    output.build()
 }
 
 /// Generate pseudocode for a dup operation.
-///
-/// Duplicates the value at position n to the top, creates a new variable for the copy.
-/// Returns output like: `v_0 = a_1`
-pub fn dup<S, O>(state: &mut S, n: usize) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let src = state.dup_value(n);
-    let result = state.create_local();
-    // Replace the dup'd value with the new variable
-    state.pop_value();
-    state.push_value(result.clone());
+pub fn dup(state: &mut DecompilerState, n: usize) -> PseudocodeTemplate {
+    let src = state.peek(n).unwrap();
+    state.dup(n);
+    let result = state.new_local();
+    state.pop();
+    state.push(result);
 
-    let mut output = O::default();
-    output.var(&result);
-    output.text(" = ");
-    output.var(&src);
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output.var(result).text(" = ").var(src);
+    output.build()
 }
 
 /// Generate pseudocode for an ext2 (quadratic extension) binary operation.
-///
-/// Pops 4 elements (2 ext2 values), creates 2 result variables, and pushes them.
-/// Returns output like: `(v_0, v_1) = (a_0, a_1) + (a_2, a_3)`
-pub fn ext2_binary_op<S, O>(state: &mut S, op: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let b1 = state.pop_value();
-    let b0 = state.pop_value();
-    let a1 = state.pop_value();
-    let a0 = state.pop_value();
-    let r0 = state.create_local();
-    let r1 = state.create_local();
-    state.push_value(r0.clone());
-    state.push_value(r1.clone());
+pub fn ext2_binary_op(state: &mut DecompilerState, op: &str) -> PseudocodeTemplate {
+    let b1 = state.pop();
+    let b0 = state.pop();
+    let a1 = state.pop();
+    let a0 = state.pop();
+    let r0 = state.new_local();
+    let r1 = state.new_local();
+    state.push(r0);
+    state.push(r1);
 
-    let mut output = O::default();
-    output.text("(");
-    output.var(&r0);
-    output.text(", ");
-    output.var(&r1);
-    output.text(") = (");
-    output.var(&a0);
-    output.text(", ");
-    output.var(&a1);
-    output.text(") ");
-    output.text(op);
-    output.text(" (");
-    output.var(&b0);
-    output.text(", ");
-    output.var(&b1);
-    output.text(")");
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output
+        .text("(")
+        .var(r0)
+        .text(", ")
+        .var(r1)
+        .text(") = (")
+        .var(a0)
+        .text(", ")
+        .var(a1)
+        .text(") ")
+        .text(op)
+        .text(" (")
+        .var(b0)
+        .text(", ")
+        .var(b1)
+        .text(")");
+    output.build()
 }
 
 /// Generate pseudocode for an ext2 unary prefix operation.
-///
-/// Pops 2 elements, creates 2 result variables, and pushes them.
-/// Returns output like: `(v_0, v_1) = -(a_0, a_1)`
-pub fn ext2_unary_op<S, O>(state: &mut S, op: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let a1 = state.pop_value();
-    let a0 = state.pop_value();
-    let r0 = state.create_local();
-    let r1 = state.create_local();
-    state.push_value(r0.clone());
-    state.push_value(r1.clone());
+pub fn ext2_unary_op(state: &mut DecompilerState, op: &str) -> PseudocodeTemplate {
+    let a1 = state.pop();
+    let a0 = state.pop();
+    let r0 = state.new_local();
+    let r1 = state.new_local();
+    state.push(r0);
+    state.push(r1);
 
-    let mut output = O::default();
-    output.text("(");
-    output.var(&r0);
-    output.text(", ");
-    output.var(&r1);
-    output.text(") = ");
-    output.text(op);
-    output.text("(");
-    output.var(&a0);
-    output.text(", ");
-    output.var(&a1);
-    output.text(")");
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output
+        .text("(")
+        .var(r0)
+        .text(", ")
+        .var(r1)
+        .text(") = ")
+        .text(op)
+        .text("(")
+        .var(a0)
+        .text(", ")
+        .var(a1)
+        .text(")");
+    output.build()
 }
 
 /// Generate pseudocode for an ext2 unary function call.
-///
-/// Pops 2 elements, creates 2 result variables, and pushes them.
-/// Returns output like: `(v_0, v_1) = inv((a_0, a_1))`
-pub fn ext2_unary_fn<S, O>(state: &mut S, fn_name: &str) -> O
-where
-    S: DecompilerOps,
-    O: PseudocodeOutput<ValueRef = S::ValueRef>,
-{
-    let a1 = state.pop_value();
-    let a0 = state.pop_value();
-    let r0 = state.create_local();
-    let r1 = state.create_local();
-    state.push_value(r0.clone());
-    state.push_value(r1.clone());
+pub fn ext2_unary_fn(state: &mut DecompilerState, fn_name: &str) -> PseudocodeTemplate {
+    let a1 = state.pop();
+    let a0 = state.pop();
+    let r0 = state.new_local();
+    let r1 = state.new_local();
+    state.push(r0);
+    state.push(r1);
 
-    let mut output = O::default();
-    output.text("(");
-    output.var(&r0);
-    output.text(", ");
-    output.var(&r1);
-    output.text(") = ");
-    output.text(fn_name);
-    output.text("((");
-    output.var(&a0);
-    output.text(", ");
-    output.var(&a1);
-    output.text("))");
-    output.finish()
+    let mut output = PseudocodeBuilder::new();
+    output
+        .text("(")
+        .var(r0)
+        .text(", ")
+        .var(r1)
+        .text(") = ")
+        .text(fn_name)
+        .text("((")
+        .var(a0)
+        .text(", ")
+        .var(a1)
+        .text("))");
+    output.build()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1296,13 +1253,13 @@ mod tests {
         let v0 = ctx.new_local();
 
         // Create template: "v_0 = a_0 + a_1"
-        let template = PseudocodeBuilder::new()
-            .var(v0)
-            .text(" = ")
-            .var(a0)
-            .text(" + ")
-            .var(a1)
-            .build();
+        let mut builder = PseudocodeBuilder::new();
+        builder.var(v0);
+        builder.text(" = ");
+        builder.var(a0);
+        builder.text(" + ");
+        builder.var(a1);
+        let template = builder.build();
 
         let result = template.resolve(&ctx);
         assert_eq!(result, "v_0 = a_0 + a_1");
@@ -1319,12 +1276,12 @@ mod tests {
         ctx.resolve_names();
 
         // Create template: "v_0 = a_0 + 1" (but v_0 should resolve to a_0)
-        let template = PseudocodeBuilder::new()
-            .var(v0)
-            .text(" = ")
-            .var(a0)
-            .text(" + 1")
-            .build();
+        let mut builder = PseudocodeBuilder::new();
+        builder.var(v0);
+        builder.text(" = ");
+        builder.var(a0);
+        builder.text(" + 1");
+        let template = builder.build();
 
         let result = template.resolve(&ctx);
         // After phi resolution, v0 displays as a_0
@@ -1332,8 +1289,26 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_net_effect() {
+        let mut state = DecompilerState::new(0);
+        assert_eq!(state.depth(), 0);
+
+        // Positive effect pushes new locals
+        state.apply_net_effect(3).unwrap();
+        assert_eq!(state.depth(), 3);
+
+        // Negative effect pops existing values
+        state.apply_net_effect(-2).unwrap();
+        assert_eq!(state.depth(), 1);
+
+        // Underflow should error and leave depth unchanged
+        assert!(state.apply_net_effect(-5).is_err());
+        assert_eq!(state.depth(), 1);
+    }
+
+    #[test]
     fn test_ssa_decompiler_state_basic() {
-        let state = SsaDecompilerState::new(3);
+        let mut state = DecompilerState::new(3);
 
         // Stack should have a_0, a_1, a_2 with a_0 on top
         assert_eq!(state.depth(), 3);
@@ -1347,7 +1322,7 @@ mod tests {
 
     #[test]
     fn test_ssa_decompiler_state_loop_phis() {
-        let mut state = SsaDecompilerState::new(2);
+        let mut state = DecompilerState::new(2);
 
         // Simulate a loop: entry stack is [a_0, a_1]
         let entry_stack = state.save_stack();
@@ -1358,7 +1333,7 @@ mod tests {
         state.push(v0);
 
         // Create phi nodes at loop exit
-        state.create_loop_phis(&entry_stack);
+        state.create_loop_phis(&entry_stack).unwrap();
 
         // Resolve names
         state.ctx.resolve_names();
@@ -1370,7 +1345,7 @@ mod tests {
 
     #[test]
     fn test_ssa_decompiler_state_if_else_phis() {
-        let mut state = SsaDecompilerState::new(1);
+        let mut state = DecompilerState::new(1);
 
         // Pop condition (simulating if.true consuming it)
         let _cond = state.pop();
@@ -1404,7 +1379,7 @@ mod tests {
     #[test]
     fn test_memcopy_elements_simulation() {
         // Simulate the memcopy_elements procedure to verify SSA handling
-        let mut state = SsaDecompilerState::new(3); // a_0=n, a_1=read_ptr, a_2=write_ptr
+        let mut state = DecompilerState::new(3); // a_0=n, a_1=read_ptr, a_2=write_ptr
 
         // neg: v_0 = -a_0
         let _a0 = state.pop();
@@ -1447,21 +1422,30 @@ mod tests {
         state.push(new_cond);
 
         // Create phi nodes for loop (comparing with loop_entry_stack which has condition)
-        state.create_loop_phis(&loop_entry_stack);
+        state.create_loop_phis(&loop_entry_stack).unwrap();
 
         // Resolve names
         state.ctx.resolve_names();
 
         // The new condition (v_5) should resolve to same name as original condition (v_1)
         // because they're at the same stack position
-        assert_eq!(state.ctx.get_display_name(new_cond), state.ctx.get_display_name(v1));
+        assert_eq!(
+            state.ctx.get_display_name(new_cond),
+            state.ctx.get_display_name(v1)
+        );
 
         // The new counter (v_4) should resolve to same name as original counter (v_0)
-        assert_eq!(state.ctx.get_display_name(new_counter), state.ctx.get_display_name(v0));
+        assert_eq!(
+            state.ctx.get_display_name(new_counter),
+            state.ctx.get_display_name(v0)
+        );
 
         // The new read_ptr (v_3) should resolve to a_1
         let a1_id = SsaId::new(1); // a_1 has ID 1
-        assert_eq!(state.ctx.get_display_name(new_read_ptr), state.ctx.get_display_name(a1_id));
+        assert_eq!(
+            state.ctx.get_display_name(new_read_ptr),
+            state.ctx.get_display_name(a1_id)
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -1469,98 +1453,27 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_generic_binary_op_string() {
-        use crate::decompiler::state::DecompilerState;
-
-        let mut state = DecompilerState::new(2);
-        let output: StringOutput = binary_op(&mut state, "+");
-
-        // Stack has a_0 on top, a_1 below
-        // Pop order: b=a_0, a=a_1
-        // Format: v = a op b
-        assert_eq!(output.as_str(), "v_0 = a_1 + a_0");
-    }
-
-    #[test]
     fn test_generic_binary_op_ssa() {
-        let mut state = SsaDecompilerState::new(2);
-        let output: TemplateOutput = binary_op(&mut state, "+");
+        let mut state = DecompilerState::new(2);
+        let output: PseudocodeTemplate = binary_op(&mut state, "+");
 
-        let result = output.into_template().resolve(&state.ctx);
+        let result = output.resolve(&state.ctx);
         // Same operand order as string version
         assert_eq!(result, "v_0 = a_1 + a_0");
     }
 
     #[test]
-    fn test_generic_binary_imm_op_string() {
-        use crate::decompiler::state::DecompilerState;
-
+    fn test_generic_binary_imm_op_ssa() {
         let mut state = DecompilerState::new(1);
-        let output: StringOutput = binary_imm_op(&mut state, "+", "42");
+        let output: PseudocodeTemplate = binary_imm_op(&mut state, "+", "42");
 
-        assert_eq!(output.as_str(), "v_0 = a_0 + 42");
-    }
-
-    #[test]
-    fn test_generic_comparison_string() {
-        use crate::decompiler::state::DecompilerState;
-
-        let mut state = DecompilerState::new(2);
-        let output: StringOutput = comparison(&mut state, "==");
-
-        // Stack has a_0 on top, a_1 below
-        // Pop order: b=a_0, a=a_1
-        assert_eq!(output.as_str(), "v_0 = (a_1 == a_0)");
-    }
-
-    #[test]
-    fn test_generic_unary_op_string() {
-        use crate::decompiler::state::DecompilerState;
-
-        let mut state = DecompilerState::new(1);
-        let output: StringOutput = unary_op(&mut state, "-");
-
-        assert_eq!(output.as_str(), "v_0 = -a_0");
-    }
-
-    #[test]
-    fn test_generic_unary_fn_string() {
-        use crate::decompiler::state::DecompilerState;
-
-        let mut state = DecompilerState::new(1);
-        let output: StringOutput = unary_fn(&mut state, "clz");
-
-        assert_eq!(output.as_str(), "v_0 = clz(a_0)");
-    }
-
-    #[test]
-    fn test_generic_dup_string() {
-        use crate::decompiler::state::DecompilerState;
-
-        let mut state = DecompilerState::new(2);
-        let output: StringOutput = dup(&mut state, 1);
-
-        // Dup position 1 (a_1), create v_0 = a_1
-        assert_eq!(output.as_str(), "v_0 = a_1");
-        // Stack should be [a_1, a_0, v_0] with v_0 on top
-        assert_eq!(state.stack_depth(), 3);
-    }
-
-    #[test]
-    fn test_generic_ext2_binary_op_string() {
-        use crate::decompiler::state::DecompilerState;
-
-        let mut state = DecompilerState::new(4);
-        let output: StringOutput = ext2_binary_op(&mut state, "+");
-
-        // Stack has a_0 on top, then a_1, a_2, a_3
-        // Pop order: b1=a_0, b0=a_1, a1=a_2, a0=a_3
-        assert_eq!(output.as_str(), "(v_0, v_1) = (a_3, a_2) + (a_1, a_0)");
+        let resolved = output.resolve(&state.ctx);
+        assert_eq!(resolved, "v_0 = a_0 + 42");
     }
 
     #[test]
     fn test_generic_binary_op_ssa_with_phi() {
-        let mut state = SsaDecompilerState::new(2);
+        let mut state = DecompilerState::new(2);
 
         // Simulate a loop where a_0 is updated
         let entry_stack = state.save_stack();
@@ -1572,7 +1485,7 @@ mod tests {
         state.push(v0);
 
         // Create phi for loop
-        state.create_loop_phis(&entry_stack);
+        state.create_loop_phis(&entry_stack).unwrap();
         state.ctx.resolve_names();
 
         // v_0 should display as a_0 after phi resolution
@@ -1581,8 +1494,8 @@ mod tests {
         // Now use the binary_op helper - it will create v_1
         // Stack: [v_0 (displays as a_0), a_1]
         // Pop order: b=v_0 (a_0), a=a_1
-        let output: TemplateOutput = binary_op(&mut state, "+");
-        let result = output.into_template().resolve(&state.ctx);
+        let output: PseudocodeTemplate = binary_op(&mut state, "+");
+        let result = output.resolve(&state.ctx);
 
         // After phi resolution, v_0 displays as a_0
         // Format: v_1 = a op b = a_1 + a_0

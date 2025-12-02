@@ -6,8 +6,8 @@
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
+use crate::cursor_resolution::{ResolutionError, ResolvedSymbol};
 use crate::index::DocumentSymbols;
-use crate::cursor_resolution::{ResolvedSymbol, ResolutionError};
 use crate::symbol_path::SymbolPath;
 
 /// Service for document-level operations.
@@ -437,11 +437,10 @@ mod tests {
 
     #[test]
     fn test_mock_workspace_finds_by_suffix() {
-        let workspace_service =
-            MockWorkspaceService::new().with_definition(
-                SymbolPath::new("::std::crypto::sha256::hash"),
-                test_location(1),
-            );
+        let workspace_service = MockWorkspaceService::new().with_definition(
+            SymbolPath::new("::std::crypto::sha256::hash"),
+            test_location(1),
+        );
 
         // Should find by suffix
         let result = workspace_service.find_definition(&SymbolPath::new("sha256::hash"));
