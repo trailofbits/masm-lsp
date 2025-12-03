@@ -247,7 +247,8 @@ impl StaticEffect {
             EqImm(_) | NeqImm(_) => StaticEffect::new(1, 1),
 
             // Word equality: pop 8 (two words), push 1
-            Eqw => StaticEffect::new(8, 1),
+            // Eqw compares two words: requires 8 elements, pushes flag (net +1)
+            Eqw => StaticEffect::new(8, 9),
 
             // ─────────────────────────────────────────────────────────────────────
             // u32 operations
@@ -417,7 +418,8 @@ impl StaticEffect {
             // ─────────────────────────────────────────────────────────────────────
             Sdepth => StaticEffect::new(0, 1),
             Clk => StaticEffect::new(0, 1),
-            Caller => StaticEffect::new(0, 4),
+            // Caller overwrites top word with caller hash (net 0)
+            Caller => StaticEffect::new(4, 4),
             ProcRef(_) => StaticEffect::new(0, 4), // Push procedure hash
 
             // Reverse operations (reorder only)

@@ -141,6 +141,7 @@ fn format_static(inst: &Instruction) -> Option<String> {
         "ilog2" => Some(unary_op("log2(a)", net_effect)),
         "is_odd" => Some(unary_op("is_odd(a)", net_effect)),
         "eqw" => Some(word_equality(Some(net_effect))),
+        "caller" => Some(format_change("[A, b, ...]", "[H, b, ...]", Some(net_effect))),
         "reversew" => Some(reverse_word(Some(net_effect))),
         "padw" => Some(format_change("[...]", "[0, 0, 0, 0]", Some(net_effect))),
         _ => Some(format_stack_change_from_counts(

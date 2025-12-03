@@ -6,7 +6,7 @@
 use miden_assembly_syntax::ast::{Immediate, Instruction};
 use miden_debug_types::SourceSpan;
 
-use super::static_effect::{apply_stack_manipulation, StackLikeResult, StaticEffect};
+use super::static_effect::{apply_stack_manipulation, StackLike, StackLikeResult, StaticEffect};
 use super::types::{AnalysisState, Bounds, TrackedValue};
 use super::utils::{felt_imm_to_u64, push_imm_to_u64};
 
@@ -1219,11 +1219,10 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             }
         }
         Instruction::Eqw => {
-            // Compare two words, pop 8, push 1 bool
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Bool));
-            }
+            // Compare two words, push equality flag without consuming operands
+            state.stack.ensure_depth(8);
+            let result = state.make_derived(Bounds::Bool);
+            state.stack.push(result);
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1236,8 +1235,9 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             }
         }
         Instruction::Caller => {
-            // Push caller hash (4 elements, trusted from VM)
+            // Overwrite top word with caller hash (trusted)
             if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
                 push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
             }
         }

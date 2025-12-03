@@ -627,6 +627,14 @@ fn test_sdepth_pushes_u32() {
 }
 
 #[test]
+fn test_caller_overwrites_word_net_zero() {
+    let state = analyze_proc("push.1 push.2 push.3 push.4 caller");
+
+    // caller replaces the top word (4 elements), so depth stays 4
+    assert_eq!(state.stack.depth(), 4);
+}
+
+#[test]
 fn test_assert_pops_condition() {
     let state = analyze_proc("push.1 assert");
 
@@ -641,11 +649,14 @@ fn test_assertz_pops_value() {
 }
 
 #[test]
-fn test_eqw_pop8_push_bool() {
+fn test_eqw_pushes_bool_and_keeps_operands() {
     let state = analyze_proc("push.1 push.2 push.3 push.4 push.1 push.2 push.3 push.4 eqw");
 
-    assert_eq!(state.stack.depth(), 1);
+    // 8 inputs remain plus equality flag on top
+    assert_eq!(state.stack.depth(), 9);
     assert_eq!(state.stack.peek(0).unwrap().bounds, Bounds::Bool);
+    // Ensure original top operand is still present
+    assert_eq!(state.stack.peek(1).unwrap().bounds, Bounds::Const(4));
 }
 
 #[test]
