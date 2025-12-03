@@ -34,7 +34,7 @@ use std::fmt;
 use miden_assembly_syntax::ast::{Block, Instruction, InvocationTarget, Op};
 
 use super::contracts::{ContractStore, StackEffect};
-use super::stack_ops::StackLike;
+use super::static_effect::StackLike;
 use crate::symbol_resolution::SymbolResolver;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -563,14 +563,46 @@ impl SymbolicExpr {
                     return format!("a_{}", counter);
                 }
 
-                let mut parts = Vec::new();
-                if *base != 0 {
-                    parts.push(format!("{}", base));
-                }
-
+                // Emit positive loop terms first for readability, then the base constant,
+                // followed by negative loop terms. This yields forms like `a_(i+5)` instead
+                // of `a_(5+i)` while still producing `a_(5-4*i-j)` for negative strides.
+                let mut positive_terms = Vec::new();
+                let mut negative_terms = Vec::new();
                 for term in loop_terms {
                     let counter = counter_names.get(term.loop_depth).copied().unwrap_or("?");
-                    parts.push(format_stride_term(term.stride, counter));
+                    let abs_stride = term.stride.abs();
+                    let formatted = if abs_stride == 1 {
+                        counter.to_string()
+                    } else {
+                        format!("{}*{}", abs_stride, counter)
+                    };
+                    if term.stride >= 0 {
+                        positive_terms.push(formatted);
+                    } else {
+                        negative_terms.push(formatted);
+                    }
+                }
+
+                let mut parts = Vec::new();
+                if let Some(first) = positive_terms.first() {
+                    parts.push(first.clone());
+                    for term in positive_terms.iter().skip(1) {
+                        parts.push(format!("+{}", term));
+                    }
+                }
+
+                if *base != 0 {
+                    let base_abs = base.abs();
+                    if *base > 0 {
+                        let prefix = if parts.is_empty() { "" } else { "+" };
+                        parts.push(format!("{prefix}{base_abs}"));
+                    } else {
+                        parts.push(format!("-{}", base_abs));
+                    }
+                }
+
+                for term in negative_terms {
+                    parts.push(format!("-{}", term));
                 }
 
                 let expr = parts.join("");
@@ -581,26 +613,6 @@ impl SymbolicExpr {
             // For other types, delegate to single-counter version
             _ => self.to_pseudocode(counter_names.first().copied().unwrap_or("i")),
         }
-    }
-}
-
-/// Format a stride term for display.
-///
-/// Simplifications applied:
-/// - stride=1 → "+i" (no coefficient)
-/// - stride=-1 → "-i" (no coefficient)
-///
-/// Examples:
-/// - stride=1, counter="i" → "+i"
-/// - stride=-1, counter="j" → "-j"
-/// - stride=4, counter="k" → "+4*k"
-/// - stride=-4, counter="i" → "-4*i"
-fn format_stride_term(stride: i32, counter: &str) -> String {
-    match stride {
-        1 => format!("+{}", counter),
-        -1 => format!("-{}", counter),
-        s if s > 0 => format!("+{}*{}", s, counter),
-        s => format!("{}*{}", s, counter),
     }
 }
 
@@ -847,7 +859,7 @@ impl AbstractState {
 }
 
 // Implement StackLike trait for AbstractState
-impl super::stack_ops::StackLike for AbstractState {
+impl super::static_effect::StackLike for AbstractState {
     type Element = SymbolicExpr;
 
     fn depth(&self) -> usize {
@@ -1306,7 +1318,10 @@ pub fn apply_transfer_event(
         Instruction::MemStore => {
             let addr = state.pop();
             let value = state.pop();
-            TransferEvent::MemStore { address: addr, value }
+            TransferEvent::MemStore {
+                address: addr,
+                value,
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1349,8 +1364,10 @@ pub fn apply_transfer_event(
         // Default - use static stack effect if available
         // ─────────────────────────────────────────────────────────────────────
         _ => {
+            use super::static_effect::StaticEffect;
+
             // Try to get static stack effect for the instruction
-            if let Some(effect) = super::stack_ops::static_effect(inst) {
+            if let Some(effect) = StaticEffect::of(inst) {
                 // Pop the correct number of inputs
                 for _ in 0..effect.pops {
                     state.pop();
@@ -1538,10 +1555,7 @@ impl TransferEvent {
                 })
             }
             TransferEvent::Push { value } => Some(TransferResult::Push { value: *value }),
-            TransferEvent::Dup {
-                source_pos,
-                value,
-            } => Some(TransferResult::Dup {
+            TransferEvent::Dup { source_pos, value } => Some(TransferResult::Dup {
                 source_pos: *source_pos,
                 value: value.to_pseudocode("i"),
             }),
@@ -2463,7 +2477,7 @@ mod tests {
 
         // For non-zero base with positive stride=1, we get a_(3+i)
         let expr_with_base = SymbolicExpr::parametric(3, 1, 0);
-        assert_eq!(expr_with_base.to_pseudocode_multi(&["i"]), "a_(3+i)");
+        assert_eq!(expr_with_base.to_pseudocode_multi(&["i"]), "a_(i+3)");
 
         // For stride > 1, coefficient comes first: a_(3*i)
         let expr_stride_3 = SymbolicExpr::parametric(0, 3, 0);
@@ -2471,7 +2485,7 @@ mod tests {
 
         // For base and stride > 1: a_(5+3*i)
         let expr_both = SymbolicExpr::parametric(5, 3, 0);
-        assert_eq!(expr_both.to_pseudocode_multi(&["i"]), "a_(5+3*i)");
+        assert_eq!(expr_both.to_pseudocode_multi(&["i"]), "a_(3*i+5)");
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -2551,10 +2565,7 @@ mod tests {
             discovered_inputs: 1,
         };
         let else_snapshot = AbstractStateSnapshot {
-            stack: vec![
-                SymbolicExpr::Input(0),
-                SymbolicExpr::Input(1),
-            ],
+            stack: vec![SymbolicExpr::Input(0), SymbolicExpr::Input(1)],
             discovered_inputs: 2,
         };
 

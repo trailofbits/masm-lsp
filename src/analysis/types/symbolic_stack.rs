@@ -3,7 +3,7 @@
 //! This module provides a symbolic stack implementation that tracks
 //! value metadata through stack operations.
 
-use crate::analysis::stack_ops::StackLike;
+use crate::analysis::static_effect::StackLike;
 
 use super::taint::TrackedValue;
 
@@ -182,6 +182,16 @@ impl StackLike for SymbolicStack {
         let len = self.elements.len();
         let idx = len + 1 - n;
         self.elements.insert(idx, elem);
+    }
+
+    fn dupw(&mut self, word_idx: usize) {
+        // Duplicate word while preserving element order by always copying the last element
+        // of the source word; indices shift as elements are pushed.
+        let pos = word_idx * 4 + 3;
+        self.ensure_depth(pos + 1);
+        for _ in 0..4 {
+            self.dup(pos);
+        }
     }
 }
 

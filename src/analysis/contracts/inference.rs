@@ -25,12 +25,12 @@ use crate::symbol_resolution::SymbolResolver;
 
 use super::super::abstract_interpretation::{AbstractState, SymbolicExpr};
 use super::super::call_graph::{CallGraph, TopologicalNode};
-use super::super::stack_ops::StackLike;
+use super::super::static_effect::StackLike;
 use super::store::ContractStore;
 use super::types::{
     InputKind, OutputKind, ProcContract, ProcSignature, StackEffect, ValidationBehavior,
 };
-use crate::analysis::stack_ops::static_effect;
+use crate::analysis::static_effect::StaticEffect;
 use crate::analysis::types::Bounds;
 use crate::analysis::utils::push_imm_to_u64;
 use crate::analysis::while_loops::infer_while_bound;
@@ -1162,7 +1162,7 @@ impl<'a> SignatureAnalyzer<'a> {
         }
 
         // Use static_effect() for all remaining instructions
-        if let Some(effect) = static_effect(inst) {
+        if let Some(effect) = StaticEffect::of(inst) {
             self.apply_pop_push(effect.pops as usize, effect.pushes as usize);
         }
     }

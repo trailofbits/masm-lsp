@@ -6,14 +6,37 @@
 use miden_assembly_syntax::ast::{Immediate, Instruction};
 use miden_debug_types::SourceSpan;
 
+use super::static_effect::{apply_stack_manipulation, StackLikeResult, StaticEffect};
 use super::types::{AnalysisState, Bounds, TrackedValue};
 use super::utils::{felt_imm_to_u64, push_imm_to_u64};
+
+fn pop_n(state: &mut AnalysisState, n: usize) {
+    for _ in 0..n {
+        state.stack.pop();
+    }
+}
+
+fn push_n_with<F>(state: &mut AnalysisState, n: usize, mut f: F)
+where
+    F: FnMut(&mut AnalysisState) -> TrackedValue,
+{
+    for _ in 0..n {
+        let value = f(state);
+        state.stack.push(value);
+    }
+}
 
 /// Apply an instruction's effect on the analysis state.
 ///
 /// This updates the symbolic stack to reflect what values would be
 /// present after the instruction executes.
 pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceSpan) {
+    if apply_stack_manipulation(&mut state.stack, inst) == StackLikeResult::Applied {
+        return;
+    }
+
+    let static_effect = StaticEffect::of(inst);
+
     match inst {
         // ─────────────────────────────────────────────────────────────────────
         // Advice operations (UNTRUSTED input)
@@ -56,45 +79,23 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // Merkle operations
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MTreeGet => {
-            // Pops: depth, index, root word (6 total: 1+1+4)
-            // Pushes: value word (4 elements)
-            state.stack.pop(); // depth
-            state.stack.pop(); // index
-            for _ in 0..4 {
-                state.stack.pop(); // root word
-            }
-            for _ in 0..4 {
-                let value = state.make_merkle(span);
-                state.stack.push(value);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_merkle(span));
             }
         }
 
         Instruction::MTreeSet => {
-            // Pops: depth, index, old_root word, value word (10 total: 1+1+4+4)
-            // Pushes: new_root word (4 elements)
-            state.stack.pop(); // depth
-            state.stack.pop(); // index
-            for _ in 0..4 {
-                state.stack.pop(); // old_root word
-            }
-            for _ in 0..4 {
-                state.stack.pop(); // value word
-            }
-            for _ in 0..4 {
-                let value = state.make_derived(Bounds::Field);
-                state.stack.push(value);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
             }
         }
 
         Instruction::MTreeMerge => {
-            // Pops: two root words (8 total: 4+4)
-            // Pushes: merged root word (4 elements)
-            for _ in 0..8 {
-                state.stack.pop();
-            }
-            for _ in 0..4 {
-                let value = state.make_derived(Bounds::Field);
-                state.stack.push(value);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
             }
         }
 
@@ -399,9 +400,8 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // Stack manipulation - Pad
         // ─────────────────────────────────────────────────────────────────────
         Instruction::PadW => {
-            for _ in 0..4 {
-                let taint = state.make_literal(0, None);
-                state.stack.push(taint);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_literal(0, None));
             }
         }
 
@@ -643,57 +643,51 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // Memory operations - single element
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MemLoad => {
-            // pop 1 (addr), push 1 (value)
-            state.stack.pop();
-            let value = state.make_memory(span);
-            state.stack.push(value);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_memory(span));
+            }
         }
         Instruction::MemLoadImm(_) => {
-            // push 1 (value) - address from immediate
-            let value = state.make_memory(span);
-            state.stack.push(value);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_memory(span));
+            }
         }
 
         Instruction::MemStore => {
-            // pop 2 (addr, value)
-            state.stack.pop();
-            state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+            }
         }
         Instruction::MemStoreImm(_) => {
-            // pop 1 (value) - address from immediate
-            state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Memory operations - word level (4 elements)
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
-            // pop 1 address, push 4 values from memory
-            state.stack.pop(); // address
-            for _ in 0..4 {
-                let value = state.make_memory(span);
-                state.stack.push(value);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_memory(span));
             }
         }
         Instruction::MemLoadWBeImm(_) | Instruction::MemLoadWLeImm(_) => {
-            // push 4 values from memory (address from immediate)
-            for _ in 0..4 {
-                let value = state.make_memory(span);
-                state.stack.push(value);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_memory(span));
             }
         }
 
         Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
-            // pop 1 address + 4 values
-            state.stack.pop(); // address
-            for _ in 0..4 {
-                state.stack.pop(); // value
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
             }
         }
         Instruction::MemStoreWBeImm(_) | Instruction::MemStoreWLeImm(_) => {
-            // pop 4 values (address from immediate)
-            for _ in 0..4 {
-                state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
             }
         }
 
@@ -701,26 +695,24 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // Local memory operations
         // ─────────────────────────────────────────────────────────────────────
         Instruction::LocLoad(_) => {
-            // push 1 value from local memory
-            let value = state.make_memory(span);
-            state.stack.push(value);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_memory(span));
+            }
         }
         Instruction::LocLoadWBe(_) | Instruction::LocLoadWLe(_) => {
-            // push 4 values from local memory
-            for _ in 0..4 {
-                let value = state.make_memory(span);
-                state.stack.push(value);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_memory(span));
             }
         }
 
         Instruction::LocStore(_) => {
-            // pop 1 value to store
-            state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+            }
         }
         Instruction::LocStoreWBe(_) | Instruction::LocStoreWLe(_) => {
-            // pop 4 values to store
-            for _ in 0..4 {
-                state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
             }
         }
 
@@ -728,13 +720,9 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // Memory streaming
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MemStream => {
-            // pops 13 elements (addr + 12 state), pushes 13 elements (addr + 12 state)
-            for _ in 0..13 {
-                state.stack.pop();
-            }
-            for _ in 0..13 {
-                let value = state.make_memory(span);
-                state.stack.push(value);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_memory(span));
             }
         }
 
@@ -858,17 +846,21 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // u32 split/cast - special arity
         Instruction::U32Split => {
             // pop 1 field element, push 2 u32 values (hi, lo)
-            state.stack.pop();
-            let hi = state.make_derived(Bounds::u32());
-            let lo = state.make_derived(Bounds::u32());
-            state.stack.push(lo);
-            state.stack.push(hi);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                let hi = state.make_derived(Bounds::u32());
+                let lo = state.make_derived(Bounds::u32());
+                // Static effect pushes 2
+                state.stack.push(lo);
+                state.stack.push(hi);
+            }
         }
         Instruction::U32Cast => {
             // pop 1, push 1 u32 (truncate to u32)
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
+            }
         }
 
         // u32 binary wrapping arithmetic - pop 2, push 1
@@ -999,46 +991,51 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
 
         // u32 division - pop 2, push 1
         Instruction::U32Div => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
+            }
         }
         Instruction::U32DivImm(imm) => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let _ = imm;
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
+                let _ = imm;
+            }
         }
         Instruction::U32Mod => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
+            }
         }
         Instruction::U32ModImm(imm) => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let _ = imm;
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
+                let _ = imm;
+            }
         }
         Instruction::U32DivMod => {
             // pop 2, push 2 (quotient, remainder)
-            state.stack.pop();
-            state.stack.pop();
-            let remainder = state.make_derived(Bounds::u32());
-            let quotient = state.make_derived(Bounds::u32());
-            state.stack.push(remainder);
-            state.stack.push(quotient);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                let remainder = state.make_derived(Bounds::u32());
+                let quotient = state.make_derived(Bounds::u32());
+                state.stack.push(remainder);
+                state.stack.push(quotient);
+            }
         }
         Instruction::U32DivModImm(imm) => {
             // pop 1, push 2 (quotient, remainder)
-            state.stack.pop();
-            let remainder = state.make_derived(Bounds::u32());
-            let quotient = state.make_derived(Bounds::u32());
-            state.stack.push(remainder);
-            state.stack.push(quotient);
-            let _ = imm;
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                let remainder = state.make_derived(Bounds::u32());
+                let quotient = state.make_derived(Bounds::u32());
+                state.stack.push(remainder);
+                state.stack.push(quotient);
+                let _ = imm;
+            }
         }
 
         // u32 bitwise - pop 2, push 1
@@ -1107,22 +1104,17 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         | Instruction::Ext2Mul
         | Instruction::Ext2Div => {
             // Binary ops: pop 4 (two ext2 elements), push 2 (one ext2 element)
-            for _ in 0..4 {
-                state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
             }
-            let result1 = state.make_derived(Bounds::Field);
-            let result2 = state.make_derived(Bounds::Field);
-            state.stack.push(result1);
-            state.stack.push(result2);
         }
         Instruction::Ext2Neg | Instruction::Ext2Inv => {
             // Unary ops: pop 2, push 2
-            state.stack.pop();
-            state.stack.pop();
-            let result1 = state.make_derived(Bounds::Field);
-            let result2 = state.make_derived(Bounds::Field);
-            state.stack.push(result1);
-            state.stack.push(result2);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1130,32 +1122,23 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Hash => {
             // Hash: pop 4 (word), push 4 (hash result)
-            for _ in 0..4 {
-                state.stack.pop();
-            }
-            for _ in 0..4 {
-                let result = state.make_derived(Bounds::Field);
-                state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
             }
         }
         Instruction::HMerge => {
             // HMerge: pop 8 (two words), push 4 (merged hash)
-            for _ in 0..8 {
-                state.stack.pop();
-            }
-            for _ in 0..4 {
-                let result = state.make_derived(Bounds::Field);
-                state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
             }
         }
         Instruction::HPerm => {
             // HPerm: pop 12, push 12 (permutation - same count)
-            for _ in 0..12 {
-                state.stack.pop();
-            }
-            for _ in 0..12 {
-                let result = state.make_derived(Bounds::Field);
-                state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
             }
         }
 
@@ -1213,30 +1196,34 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Assert | Instruction::AssertWithError(_) => {
             // Pop condition, no push
-            state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+            }
         }
         Instruction::AssertEq | Instruction::AssertEqWithError(_) => {
             // Pop two values to compare
-            state.stack.pop();
-            state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+            }
         }
         Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
             // Pop two words to compare
-            for _ in 0..8 {
-                state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
             }
         }
         Instruction::Assertz | Instruction::AssertzWithError(_) => {
             // Pop one value to check if zero
-            state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+            }
         }
         Instruction::Eqw => {
             // Compare two words, pop 8, push 1 bool
-            for _ in 0..8 {
-                state.stack.pop();
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Bool));
             }
-            let result = state.make_derived(Bounds::Bool);
-            state.stack.push(result);
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1244,25 +1231,27 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Sdepth => {
             // Push current stack depth (trusted, from VM)
-            let value = state.make_derived(Bounds::u32());
-            state.stack.push(value);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
+            }
         }
         Instruction::Caller => {
             // Push caller hash (4 elements, trusted from VM)
-            for _ in 0..4 {
-                let value = state.make_derived(Bounds::Field);
-                state.stack.push(value);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
             }
         }
         Instruction::Clk => {
             // Push current clock cycle (trusted, from VM)
-            let value = state.make_derived(Bounds::Field);
-            state.stack.push(value);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
+            }
         }
         Instruction::Locaddr(_) => {
             // Push local memory address (trusted literal)
-            let value = state.make_derived(Bounds::u32());
-            state.stack.push(value);
+            if let Some(effect) = static_effect {
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1270,28 +1259,31 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         Instruction::ILog2 => {
             // Pop 1, push 1 (integer log base 2)
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32()); // Result is in [0, 63]
-            state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
+            }
         }
         Instruction::Pow2 => {
             // Pop 1 (exponent), push 1 (2^exp)
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Field);
-            state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
+            }
         }
         Instruction::Exp => {
             // Pop 2 (base, exp), push 1 (base^exp)
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Field);
-            state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
+            }
         }
         Instruction::ExpImm(_) | Instruction::ExpBitLength(_) => {
             // Pop 1, push 1
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Field);
-            state.stack.push(result);
+            if let Some(effect) = static_effect {
+                pop_n(state, effect.pops);
+                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────

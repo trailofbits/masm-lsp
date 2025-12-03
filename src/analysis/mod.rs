@@ -10,7 +10,6 @@
 //! - `types`: Core types (Bounds, ValueOrigin, TrackedValue, AnalysisState)
 //! - `checker`: Pluggable checker trait and common utilities
 //! - `checkers`: Individual security checkers (u32, merkle, procedure calls)
-//! - `instruction_effects`: Shared instruction effects registry (stack effects, manipulation types)
 //! - `stack_effects`: How instructions affect the symbolic stack
 //! - `stack_ops`: Shared stack operations and fast-path analysis
 //! - `analyzer`: Main analyzer composing checkers with stack simulation
@@ -26,10 +25,9 @@ pub mod call_graph;
 pub mod checker;
 pub mod checkers;
 pub mod contracts;
-pub mod instruction_effects;
 pub mod locals;
 pub mod stack_effects;
-pub mod stack_ops;
+pub mod static_effect;
 pub mod types;
 pub mod utils;
 pub mod while_loops;
@@ -53,13 +51,7 @@ pub use abstract_interpretation::{
 };
 
 // Re-export stack operations for shared use
-pub use stack_ops::{
-    analyze_procedure_simple, analyze_procedure_tiered, static_effect, SimpleStackAnalysis,
-    StackEffectResult, StackLike, StaticEffect,
-};
+pub use static_effect::{StackLike, StackOp, StaticEffect};
 
 // Re-export locals analysis for uninitialized variable detection
 pub use locals::{analyze_locals, analyze_locals_with_contracts};
-
-// Re-export instruction effects for shared use
-pub use instruction_effects::{InstructionEffect, MemoryOp, StackOp};

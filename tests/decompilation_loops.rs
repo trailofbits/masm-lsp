@@ -240,3 +240,104 @@ end
         diags
     );
 }
+
+/// Test that element-wise subtraction loop produces correct parametric indices.
+///
+/// This test asserts the EXACT expected output format.
+///
+#[test]
+fn elementwise_sub_loop_produces_correct_decompilation() {
+    let source = r#"
+pub proc sub
+    repeat.5
+        movup.5
+        sub
+        movdn.4
+    end
+end
+"#;
+
+    let (labels, diags) = collect_labels_and_diags(source);
+
+    // Should decompile without errors
+    assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+
+    // Expected output - verbatim
+    let expected = vec![
+        "pub proc sub(a_0: felt, a_1: felt, a_2: felt, a_3: felt, a_4: felt, a_5: felt, a_6: felt, a_7: felt, a_8: felt, a_9: felt) -> (r_0: felt, r_1: felt, r_2: felt, r_3: felt, r_4: felt):",
+        "    for i = 0; i < 5; i = i + 1:",
+        "        r_i = a_i - a_(i+5)",
+        "    end",
+        "end",
+    ];
+
+    assert_eq!(
+        labels.len(),
+        expected.len(),
+        "expected {} lines, got {}.\nActual output:\n{}",
+        expected.len(),
+        labels.len(),
+        labels.join("\n")
+    );
+
+    for (i, (actual, expected_line)) in labels.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            actual,
+            *expected_line,
+            "line {} mismatch.\nExpected: {}\nActual:   {}",
+            i + 1,
+            expected_line,
+            actual
+        );
+    }
+}
+
+/// test that testz procedure with dup.3 eq.0 loop decompiles correctly.
+///
+/// this test asserts the exact expected output format.
+#[test]
+fn testz_loop_produces_correct_decompilation() {
+    let source = r#"
+pub proc testz(input: word) -> (i1, word)
+    repeat.4
+        dup.3 eq.0
+    end
+    and and and
+end
+"#;
+
+    let (labels, diags) = collect_labels_and_diags(source);
+
+    // should decompile without errors
+    assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+
+    // expected output - verbatim
+    let expected = vec![
+        "pub proc testz(a_0: felt, a_1: felt, a_2: felt, a_3: felt) -> (r_0: felt, a_0: felt, a_1: felt, a_2: felt, a_3: felt):",
+        "    for i = 0; i < 4; i = i + 1:",
+        "        v_0 = a_(3-i); v_(i+1) = (v_0 == 0)",
+        "    end",
+        "    v_5 = v_3 && v_4; v_6 = v_2 && v_5; r_0 = v_1 && v_6",
+        "end",
+    ];
+
+    assert_eq!(
+        labels.len(),
+        expected.len(),
+        "expected {} lines, got {}.\nactual output:\n{}",
+        expected.len(),
+        labels.len(),
+        labels.join("\n")
+    );
+
+    for (i, (actual, expected_line)) in labels.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            actual,
+            *expected_line,
+            "line {} mismatch.\nexpected: {}\nactual:   {}",
+            i + 1,
+            expected_line,
+            actual
+        );
+    }
+}

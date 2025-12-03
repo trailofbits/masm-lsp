@@ -6,7 +6,7 @@
 use miden_debug_types::SourceSpan;
 
 use super::bounds::Bounds;
-use super::stack::SymbolicStack;
+use super::symbolic_stack::SymbolicStack;
 use super::taint::{TrackedValue, ValidationState, ValueOrigin};
 
 // ═══════════════════════════════════════════════════════════════════════════

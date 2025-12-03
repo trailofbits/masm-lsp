@@ -38,28 +38,43 @@ pub fn extract_declaration_prefix(source_text: &str, line: u32) -> String {
 pub fn format_procedure_signature(
     decl_prefix: &str,
     proc_name: &str,
+    visibility: miden_assembly_syntax::ast::Visibility,
     input_count: usize,
     output_count: Option<usize>,
     contract_signature: Option<&ProcSignature>,
+    output_names: Option<&[String]>,
 ) -> String {
+    let visibility_prefix = if visibility.is_public() { "pub " } else { "" };
+
     if let Some(sig) = contract_signature {
-        return sig.format_for_display(&format!("{decl_prefix}proc {proc_name}"));
+        return sig.format_for_display(&format!(
+            "{decl_prefix}{visibility_prefix}proc {proc_name}:"
+        ));
     }
 
     let inputs = (0..input_count)
         .map(|i| format!("a_{i}: felt"))
         .collect::<Vec<_>>()
         .join(", ");
-    let outputs = output_count
-        .map(|o| {
-            (0..o)
-                .map(|i| format!("r_{i}: felt"))
+    let outputs = output_names
+        .map(|names| {
+            names
+                .iter()
+                .map(|n| format!("{n}: felt"))
                 .collect::<Vec<_>>()
                 .join(", ")
         })
+        .or_else(|| {
+            output_count.map(|o| {
+                (0..o)
+                    .map(|i| format!("r_{i}: felt"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+        })
         .unwrap_or_else(|| "?".to_string());
 
-    format!("{decl_prefix}proc {proc_name}({inputs}) -> ({outputs})")
+    format!("{decl_prefix}{visibility_prefix}proc {proc_name}({inputs}) -> ({outputs}):")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -242,6 +257,18 @@ impl SsaContext {
         self.phi_nodes.push(PhiNode::new(result, operands));
     }
 
+    /// Reclassify an SSA value as a return and update its display name.
+    pub fn set_return(&mut self, id: SsaId, index: usize) {
+        if let Some(val) = self.values.get_mut(&id) {
+            let was_argument = matches!(val.kind, VarKind::Argument(_));
+            val.kind = VarKind::Return(index);
+            // Preserve argument names for returned arguments; otherwise use r_i.
+            if !was_argument {
+                val.display_name = VarKind::Return(index).display_name();
+            }
+        }
+    }
+
     /// Get the SSA value for an ID.
     pub fn get_value(&self, id: SsaId) -> Option<&SsaValue> {
         self.values.get(&id)
@@ -330,6 +357,28 @@ impl SsaContext {
             .values()
             .filter(|v| matches!(v.kind, VarKind::Argument(_)))
             .count()
+    }
+
+    /// Current next local index (useful for detecting locals created inside loops).
+    pub fn next_local_index(&self) -> usize {
+        self.next_local_index
+    }
+
+    /// Collect display names for return values ordered by return index.
+    ///
+    /// `resolve_names` should be called before invoking this to ensure
+    /// phi-related names are stable.
+    pub fn return_names(&self) -> Vec<String> {
+        let mut pairs: Vec<(usize, String)> = self
+            .values
+            .iter()
+            .filter_map(|(_, v)| match v.kind {
+                VarKind::Return(idx) => Some((idx, self.get_display_name(v.id).to_string())),
+                _ => None,
+            })
+            .collect();
+        pairs.sort_by_key(|(idx, _)| *idx);
+        pairs.into_iter().map(|(_, name)| name).collect()
     }
 
     /// Find the smallest argument index in the phi-equivalence class of `id`.
@@ -463,7 +512,6 @@ impl SsaStack {
             self.stack.push(id);
         }
     }
-
 
     /// Swap positions a and b.
     pub fn swap(&mut self, a: usize, b: usize) {
@@ -686,10 +734,16 @@ impl fmt::Display for LoopPhiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoopPhiError::DepthMismatch { entry, exit } => {
-                write!(f, "loop entry/exit stack depths differ (entry={entry}, exit={exit})")
+                write!(
+                    f,
+                    "loop entry/exit stack depths differ (entry={entry}, exit={exit})"
+                )
             }
             LoopPhiError::PermutedStack => {
-                write!(f, "loop permutes stack values; variable mapping is ambiguous")
+                write!(
+                    f,
+                    "loop permutes stack values; variable mapping is ambiguous"
+                )
             }
         }
     }
@@ -828,6 +882,17 @@ impl DecompilerState {
         }
     }
 
+    /// Mark the top `count` values on the stack as returns (r_0 is the topmost).
+    pub fn mark_returns(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let snapshot = self.save_stack();
+        for (idx, id) in snapshot.iter().rev().take(count).enumerate() {
+            self.ctx.set_return(*id, idx);
+        }
+    }
+
     /// Create phi nodes for a loop.
     ///
     /// This should be called at loop exit when the loop has zero net effect.
@@ -911,22 +976,32 @@ pub fn binary_op(state: &mut DecompilerState, op: &str) -> PseudocodeTemplate {
     state.push(result);
 
     let mut output = PseudocodeBuilder::new();
-    output.var(result).text(" = ").var(a).text(" ").text(op).text(" ").var(b);
+    output
+        .var(result)
+        .text(" = ")
+        .var(a)
+        .text(" ")
+        .text(op)
+        .text(" ")
+        .var(b);
     output.build()
 }
 
 /// Generate pseudocode for a binary operation with an immediate operand.
-pub fn binary_imm_op(
-    state: &mut DecompilerState,
-    op: &str,
-    imm: &str,
-) -> PseudocodeTemplate {
+pub fn binary_imm_op(state: &mut DecompilerState, op: &str, imm: &str) -> PseudocodeTemplate {
     let a = state.pop();
     let result = state.new_local();
     state.push(result);
 
     let mut output = PseudocodeBuilder::new();
-    output.var(result).text(" = ").var(a).text(" ").text(op).text(" ").text(imm);
+    output
+        .var(result)
+        .text(" = ")
+        .var(a)
+        .text(" ")
+        .text(op)
+        .text(" ")
+        .text(imm);
     output.build()
 }
 
@@ -951,11 +1026,7 @@ pub fn comparison(state: &mut DecompilerState, op: &str) -> PseudocodeTemplate {
 }
 
 /// Generate pseudocode for a comparison operation with an immediate operand.
-pub fn comparison_imm(
-    state: &mut DecompilerState,
-    op: &str,
-    imm: &str,
-) -> PseudocodeTemplate {
+pub fn comparison_imm(state: &mut DecompilerState, op: &str, imm: &str) -> PseudocodeTemplate {
     let a = state.pop();
     let result = state.new_local();
     state.push(result);

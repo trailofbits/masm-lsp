@@ -14,7 +14,7 @@ use miden_assembly_syntax::ast::{
     Block, Instruction, Op,
 };
 
-use super::stack_ops::StackLike;
+use super::static_effect::StackLike;
 use super::types::Bounds;
 use super::utils::{felt_imm_to_u64, push_imm_to_u64, u32_imm_to_u64, u8_imm_to_u64};
 

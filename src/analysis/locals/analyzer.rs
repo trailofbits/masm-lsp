@@ -25,7 +25,7 @@ use miden_debug_types::{DefaultSourceManager, SourceSpan, Span};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
 use crate::analysis::contracts::ContractStore;
-use crate::analysis::stack_ops::{apply_stack_manipulation, StackLike, StackManipResult};
+use crate::analysis::static_effect::{apply_stack_manipulation, StackLike, StackLikeResult};
 use crate::analysis::utils::u16_imm_to_u16;
 use crate::diagnostics::{span_to_range, SOURCE_ANALYSIS};
 
@@ -329,7 +329,7 @@ impl<'a> LocalsAnalyzer<'a> {
         let span = inst.span();
 
         // First, try to handle as a pure stack manipulation
-        if apply_stack_manipulation(addr_stack, inst.inner()) == StackManipResult::Applied {
+        if apply_stack_manipulation(addr_stack, inst.inner()) == StackLikeResult::Applied {
             return;
         }
 
@@ -438,8 +438,10 @@ impl<'a> LocalsAnalyzer<'a> {
             // Other instructions - use static effect for stack tracking
             // ─────────────────────────────────────────────────────────────────
             _ => {
+                use crate::analysis::static_effect::StaticEffect;
+
                 // Use static_effect to track stack changes for other instructions
-                if let Some(effect) = crate::analysis::stack_ops::static_effect(inst.inner()) {
+                if let Some(effect) = StaticEffect::of(inst.inner()) {
                     addr_stack.pop_n(effect.pops as usize);
                     addr_stack.push_defaults(effect.pushes as usize);
                 }

@@ -20,12 +20,23 @@ use crate::analysis::{
 use crate::diagnostics::{span_to_range, SOURCE_DECOMPILATION};
 use crate::symbol_resolution::SymbolResolver;
 
-use crate::decompiler::ssa::{PseudocodeBuilder, extract_declaration_prefix, format_procedure_signature};
 use super::ssa::{
-    PseudocodeTemplate, SsaContext, DecompilerState,
+    binary_imm_op,
     // Helper functions for pseudocode generation
-    binary_op, binary_imm_op, comparison, comparison_imm,
-    unary_op, unary_fn, ext2_binary_op, ext2_unary_op, ext2_unary_fn,
+    binary_op,
+    comparison,
+    comparison_imm,
+    ext2_binary_op,
+    ext2_unary_fn,
+    ext2_unary_op,
+    unary_fn,
+    unary_op,
+    DecompilerState,
+    PseudocodeTemplate,
+    SsaContext,
+};
+use crate::decompiler::ssa::{
+    extract_declaration_prefix, format_procedure_signature, PseudocodeBuilder,
 };
 // ═══════════════════════════════════════════════════════════════════════════
 // Hint Collection Types
@@ -100,6 +111,24 @@ impl ParametricExpr {
             prefix: 'a',
             base,
             terms,
+        }
+    }
+
+    /// Create a parametric expression for a loop-produced output (r-indexed).
+    fn output(base: i32, counter_idx: usize) -> Self {
+        Self {
+            prefix: 'r',
+            base,
+            terms: vec![ParametricTerm::new(1, counter_idx)],
+        }
+    }
+
+    /// Create a parametric expression for a loop-produced local (v-indexed).
+    fn local(base: i32, counter_idx: usize) -> Self {
+        Self {
+            prefix: 'v',
+            base,
+            terms: vec![ParametricTerm::new(1, counter_idx)],
         }
     }
 }
@@ -1123,7 +1152,9 @@ impl<'a> PseudocodeCollector<'a> {
         let state = self.state.as_mut()?;
 
         match inst {
-            Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
+            Instruction::Exec(target)
+            | Instruction::Call(target)
+            | Instruction::SysCall(target) => {
                 let resolved_path = self.resolver.resolve_target(target);
                 let stack_effect = resolved_path
                     .as_ref()
@@ -1310,9 +1341,15 @@ impl<'a> PseudocodeCollector<'a> {
             Instruction::U32WrappingMul => Some(binary_op(state, "*")),
             Instruction::U32Div => Some(binary_op(state, "/")),
             Instruction::U32Mod => Some(binary_op(state, "%")),
-            Instruction::U32WrappingAddImm(imm) => Some(binary_imm_op(state, "+", &Self::format_imm(imm))),
-            Instruction::U32WrappingSubImm(imm) => Some(binary_imm_op(state, "-", &Self::format_imm(imm))),
-            Instruction::U32WrappingMulImm(imm) => Some(binary_imm_op(state, "*", &Self::format_imm(imm))),
+            Instruction::U32WrappingAddImm(imm) => {
+                Some(binary_imm_op(state, "+", &Self::format_imm(imm)))
+            }
+            Instruction::U32WrappingSubImm(imm) => {
+                Some(binary_imm_op(state, "-", &Self::format_imm(imm)))
+            }
+            Instruction::U32WrappingMulImm(imm) => {
+                Some(binary_imm_op(state, "*", &Self::format_imm(imm)))
+            }
             Instruction::U32DivImm(imm) => Some(binary_imm_op(state, "/", &Self::format_imm(imm))),
             Instruction::U32ModImm(imm) => Some(binary_imm_op(state, "%", &Self::format_imm(imm))),
             Instruction::U32Shl => Some(binary_op(state, "<<")),
@@ -1321,8 +1358,12 @@ impl<'a> PseudocodeCollector<'a> {
             Instruction::U32ShrImm(imm) => Some(binary_imm_op(state, ">>", &Self::format_imm(imm))),
             Instruction::U32Rotl => Some(binary_op(state, "rotl")),
             Instruction::U32Rotr => Some(binary_op(state, "rotr")),
-            Instruction::U32RotlImm(imm) => Some(binary_imm_op(state, "rotl", &Self::format_imm(imm))),
-            Instruction::U32RotrImm(imm) => Some(binary_imm_op(state, "rotr", &Self::format_imm(imm))),
+            Instruction::U32RotlImm(imm) => {
+                Some(binary_imm_op(state, "rotl", &Self::format_imm(imm)))
+            }
+            Instruction::U32RotrImm(imm) => {
+                Some(binary_imm_op(state, "rotr", &Self::format_imm(imm)))
+            }
             Instruction::U32Lt => Some(comparison(state, "<")),
             Instruction::U32Lte => Some(comparison(state, "<=")),
             Instruction::U32Gt => Some(comparison(state, ">")),
@@ -1627,7 +1668,6 @@ impl ParametricExpr {
             _ => None,
         }
     }
-
 }
 
 /// Information about an active loop during decompilation.
@@ -1639,13 +1679,24 @@ struct ActiveLoop {
     counter_name: String,
     /// Symbolic stack snapshot after one iteration (with loop term offsets applied)
     analyzed_stack: Vec<SymbolicExpr>,
+    /// Net stack effect per iteration for this loop
+    net_effect: i32,
+    /// Next local index when the loop was entered (to identify loop-created locals)
+    local_base: usize,
 }
 
 impl ActiveLoop {
-    fn new(counter_name: String, analyzed_stack: Vec<SymbolicExpr>) -> Self {
+    fn new(
+        counter_name: String,
+        analyzed_stack: Vec<SymbolicExpr>,
+        net_effect: i32,
+        local_base: usize,
+    ) -> Self {
         Self {
             counter_name,
             analyzed_stack,
+            net_effect,
+            local_base,
         }
     }
 
@@ -1661,9 +1712,7 @@ impl ActiveLoop {
 fn find_param_expr(expr: &SymbolicExpr, arg_idx: usize) -> Option<SymbolicExpr> {
     match expr {
         SymbolicExpr::Input(i) if *i == arg_idx => Some(SymbolicExpr::Input(*i)),
-        SymbolicExpr::ParametricInput { base, .. } if *base == arg_idx as i32 => {
-            Some(expr.clone())
-        }
+        SymbolicExpr::ParametricInput { base, .. } if *base == arg_idx as i32 => Some(expr.clone()),
         SymbolicExpr::BinaryOp { left, right, .. } => {
             find_param_expr(left, arg_idx).or_else(|| find_param_expr(right, arg_idx))
         }
@@ -1859,10 +1908,19 @@ impl<'a> PseudocodeCollector<'a> {
     ///
     /// # Returns
     /// The counter name for this loop (e.g., "i", "j", "k")
-    fn enter_loop_context(&mut self, analyzed_stack: Vec<SymbolicExpr>) -> String {
+    fn enter_loop_context(
+        &mut self,
+        analyzed_stack: Vec<SymbolicExpr>,
+        net_effect: i32,
+        local_base: usize,
+    ) -> String {
         let counter = self.new_counter();
-        self.loop_stack
-            .push(ActiveLoop::new(counter.clone(), analyzed_stack));
+        self.loop_stack.push(ActiveLoop::new(
+            counter.clone(),
+            analyzed_stack,
+            net_effect,
+            local_base,
+        ));
         counter
     }
 
@@ -1924,12 +1982,16 @@ impl<'a> PseudocodeCollector<'a> {
 
         // Prefer direct argument; otherwise see if phi-equivalent to an argument
         let base_idx = match &value.kind {
-            VarKind::Argument(idx) => *idx,
-            _ => match state.ctx.argument_index_via_phi(id) {
-                Some(idx) => idx,
-                None => return None,
-            },
+            VarKind::Argument(idx) => Some(*idx),
+            _ => state.ctx.argument_index_via_phi(id),
         };
+
+        if base_idx.is_none() {
+            // Not argument-backed: attempt to map loop-produced values to parametric outputs.
+            return self.compute_output_parametric_expr(state, id, counter_len);
+        }
+
+        let base_idx = base_idx.unwrap();
 
         let mut merged: Option<ParametricExpr> = None;
 
@@ -1965,6 +2027,47 @@ impl<'a> PseudocodeCollector<'a> {
         }
 
         merged
+    }
+
+    /// Build a parametric expression for loop-produced outputs (e.g., r_i).
+    fn compute_output_parametric_expr(
+        &self,
+        state: &DecompilerState,
+        id: SsaId,
+        counter_len: usize,
+    ) -> Option<ParametricExpr> {
+        if counter_len == 0 || self.loop_stack.is_empty() {
+            return None;
+        }
+
+        let value = state.ctx.get_value(id)?;
+        let base_idx = match value.kind {
+            super::ssa::VarKind::Argument(i) => i as i32,
+            super::ssa::VarKind::Local(i) => i as i32,
+            super::ssa::VarKind::Return(i) => i as i32,
+        };
+
+        // Prefer innermost loops when assigning output indices
+        for (counter_idx, loop_ctx) in self.loop_stack.iter().enumerate().rev() {
+            if counter_idx >= counter_len {
+                continue;
+            }
+            if loop_ctx.net_effect < 0 {
+                return Some(ParametricExpr::output(base_idx, counter_idx));
+            } else {
+                let produced = loop_ctx.net_effect.max(0) as usize;
+                if produced > 0 {
+                    if let super::ssa::VarKind::Local(idx) = value.kind {
+                        if idx < loop_ctx.local_base + produced {
+                            continue;
+                        }
+                    }
+                }
+                return Some(ParametricExpr::local(base_idx, counter_idx));
+            }
+        }
+
+        None
     }
 
     /// Record a fatal decompilation failure for the current procedure.
@@ -2098,9 +2201,7 @@ impl<'a> PseudocodeCollector<'a> {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[inline]
-    fn format_imm<T: std::fmt::Display>(
-        imm: &miden_assembly_syntax::ast::Immediate<T>,
-    ) -> String {
+    fn format_imm<T: std::fmt::Display>(imm: &miden_assembly_syntax::ast::Immediate<T>) -> String {
         format!("{}", imm)
     }
 
@@ -2633,7 +2734,16 @@ impl<'a> PseudocodeCollector<'a> {
                 let condition_id = self.state.as_mut().and_then(|s| s.peek(0));
 
                 // Enter loop context (use consuming stride if known)
-                self.enter_loop_context(analyzed_stack);
+                let local_base = self
+                    .state
+                    .as_ref()
+                    .map(|s| s.ctx.next_local_index())
+                    .unwrap_or(0);
+                self.enter_loop_context(
+                    analyzed_stack,
+                    analysis.net_effect_per_iteration,
+                    local_base,
+                );
 
                 // Save loop entry state (with condition on top)
                 let loop_entry_stack = self.state.as_ref().map(|s| s.save_stack());
@@ -2685,6 +2795,7 @@ impl<'a> PseudocodeCollector<'a> {
                 // Analyze loop to get per-iteration net effect via abstract interpretation
                 let loop_analysis = analyze_repeat_loop(body, *count as usize);
                 let net_effect = loop_analysis.net_effect_per_iteration;
+                let iterations_remaining = count.saturating_sub(1);
 
                 // Fail decompilation if analysis failed or is inconsistent
                 if loop_analysis.failure_reason.is_some() || !loop_analysis.is_consistent {
@@ -2702,14 +2813,22 @@ impl<'a> PseudocodeCollector<'a> {
                     shift_loop_stack(&loop_analysis.post_iteration_stack, depth_offset);
 
                 // Enter loop context (collector now manages loop stack)
-                let counter = self.enter_loop_context(analyzed_stack);
+                let local_base = self
+                    .state
+                    .as_ref()
+                    .map(|s| s.ctx.next_local_index())
+                    .unwrap_or(0);
+                let counter = self.enter_loop_context(analyzed_stack, net_effect, local_base);
 
                 // Save loop entry state
                 let loop_entry_stack = self.state.as_ref().map(|s| s.save_stack());
 
                 // Generate "for" hint
                 if let Some(range) = span_to_range(self.sources, op.span()) {
-                    let hint = format!("for {} = 0; {} < {}:", counter, counter, count);
+                    let hint = format!(
+                        "for {} = 0; {} < {}; {} = {} + 1:",
+                        counter, counter, count, counter, counter
+                    );
                     self.add_literal_hint(range.start.line, &hint);
                 }
 
@@ -2717,6 +2836,56 @@ impl<'a> PseudocodeCollector<'a> {
                 self.indent_level += 1;
                 self.visit_block_ssa(body);
                 self.indent_level -= 1;
+
+                // For consuming loops, synthesize placeholders for outputs that would be
+                // produced by the skipped iterations so return names don't reuse inputs.
+                let mut adjusted_remaining_iters = false;
+                if net_effect < 0 && iterations_remaining > 0 {
+                    if let (Some(ref mut state), Some(ref entry_stack)) =
+                        (&mut self.state, &loop_entry_stack)
+                    {
+                        let entry_depth = entry_stack.len();
+                        let final_depth =
+                            (entry_depth as i32 + net_effect * (*count as i32)).max(0) as usize;
+                        let loop_inputs = loop_analysis
+                            .total_inputs_for_loop
+                            .unwrap_or(loop_analysis.min_inputs_required);
+                        let unaffected = entry_depth.saturating_sub(loop_inputs);
+                        let outputs_count = final_depth.saturating_sub(unaffected);
+                        let local_base = self
+                            .loop_stack
+                            .last()
+                            .map(|l| l.local_base)
+                            .unwrap_or_else(|| state.ctx.next_local_index());
+
+                        let current_stack = state.save_stack();
+                        let mut outputs: Vec<SsaId> = current_stack
+                            .iter()
+                            .skip(unaffected)
+                            .filter(|id| {
+                                state
+                                    .ctx
+                                    .get_value(**id)
+                                    .map_or(false, |v| match v.kind {
+                                        super::ssa::VarKind::Local(idx) => idx >= local_base,
+                                        _ => false,
+                                    })
+                            })
+                            .cloned()
+                            .collect();
+
+                        outputs.truncate(outputs_count);
+                        while outputs.len() < outputs_count {
+                            outputs.push(state.new_local());
+                        }
+
+                        let mut new_stack: Vec<SsaId> =
+                            current_stack.into_iter().take(unaffected).collect();
+                        new_stack.extend(outputs.into_iter());
+                        state.restore_stack(&new_stack);
+                        adjusted_remaining_iters = true;
+                    }
+                }
 
                 // Create phi nodes only for stack-neutral loops
                 if net_effect == 0 {
@@ -2745,8 +2914,8 @@ impl<'a> PseudocodeCollector<'a> {
 
                 // Apply remaining iterations' net effect to the SSA stack.
                 if let Some(ref mut state) = self.state {
-                    let iterations_remaining = count.saturating_sub(1) as i32;
-                    if iterations_remaining > 0 && net_effect != 0 {
+                    let iterations_remaining = iterations_remaining as i32;
+                    if iterations_remaining > 0 && net_effect != 0 && !adjusted_remaining_iters {
                         let total_effect = net_effect * iterations_remaining;
                         if total_effect < 0 && state.depth() < (-total_effect) as usize {
                             self.fail_decompilation(
@@ -2843,9 +3012,11 @@ impl<'a> Visit for PseudocodeCollector<'a> {
             let signature = format_procedure_signature(
                 &decl_prefix,
                 &proc_name,
+                proc.visibility(),
                 initial_input_count,
                 output_count,
                 contract_signature.as_ref(),
+                None,
             );
             self.add_literal_hint(line, &signature);
         }
@@ -2870,27 +3041,52 @@ impl<'a> Visit for PseudocodeCollector<'a> {
             }
         }
 
+        // Capture inputs discovered during SSA tracking before any reclassification.
+        let final_input_count = self
+            .state
+            .as_ref()
+            .map(|s| s.ctx.argument_count())
+            .unwrap_or(initial_input_count);
+
+        // Infer outputs (when not provided by a contract) from the final stack depth and
+        // mark them as returns so they render as outputs.
+        let mut final_output_count = output_count;
+        let mut output_names: Option<Vec<String>> = None;
+        if let Some(ref mut state) = self.state {
+            let inferred = final_output_count.unwrap_or_else(|| state.depth());
+            if inferred > 0 {
+                state.mark_returns(inferred);
+                final_output_count = Some(inferred);
+                // Resolve names to capture return display names (preserving arguments).
+                state.ctx.resolve_names();
+                output_names = Some(state.ctx.return_names());
+            }
+        }
+        self.proc_outputs = final_output_count;
+
         // If additional inputs were discovered, refresh the signature hint (unless contract overrides).
         if contract_signature.is_none() {
-            if let Some(ref state) = self.state {
-                let final_input_count = state.ctx.argument_count();
-                if final_input_count != initial_input_count {
-                    if let Some(line) = decl_line {
-                        let decl_prefix = extract_declaration_prefix(self.source_text, line);
-                        let signature = format_procedure_signature(
-                            &decl_prefix,
-                            &proc_name,
-                            final_input_count,
-                            output_count,
-                            None,
+            let should_refresh = final_input_count != initial_input_count
+                || final_output_count.is_some()
+                || output_names.is_some();
+            if should_refresh {
+                if let Some(line) = decl_line {
+                    let decl_prefix = extract_declaration_prefix(self.source_text, line);
+                    let signature = format_procedure_signature(
+                        &decl_prefix,
+                        &proc_name,
+                        proc.visibility(),
+                        final_input_count,
+                        final_output_count,
+                        None,
+                        output_names.as_deref(),
+                    );
+                    if let Some(sig_hint) = self.hints.get_mut(self.proc_hint_start) {
+                        *sig_hint = SsaHint::new(
+                            sig_hint.line,
+                            PseudocodeTemplate::new().literal(&signature),
+                            sig_hint.indent_level,
                         );
-                        if let Some(sig_hint) = self.hints.get_mut(self.proc_hint_start) {
-                            *sig_hint = SsaHint::new(
-                                sig_hint.line,
-                                PseudocodeTemplate::new().literal(&signature),
-                                sig_hint.indent_level,
-                            );
-                        }
                     }
                 }
             }
@@ -2901,7 +3097,7 @@ impl<'a> Visit for PseudocodeCollector<'a> {
 
         // Add "end" hint for the procedure
         if let Some(body_range) = span_to_range(self.sources, proc.body().span()) {
-            let search_start = body_range.end.line as usize;
+            let search_start = body_range.end.line.saturating_add(1) as usize;
             let end_line = self
                 .source_text
                 .lines()
@@ -2980,7 +3176,13 @@ pub fn collect_decompilation_hints(
         .into_iter()
         .map(|(line_num, pseudocodes)| {
             let line_end = line_lengths.get(line_num as usize).copied().unwrap_or(0);
-            let label = pseudocodes.join("; ");
+
+            // Avoid duplicating indentation when multiple hints share a line.
+            let mut normalized = pseudocodes.clone();
+            for code in normalized.iter_mut().skip(1) {
+                *code = code.trim_start().to_string();
+            }
+            let label = normalized.join("; ");
 
             InlayHint {
                 position: Position {
@@ -3167,8 +3369,7 @@ mod tests {
         state.dup(0);
 
         // neq.0: v_1 = (dup_v_0 != 0) - this is the INITIAL loop condition
-        let initial_cond_template: PseudocodeTemplate =
-            comparison_imm(&mut state, "!=", "0");
+        let initial_cond_template: PseudocodeTemplate = comparison_imm(&mut state, "!=", "0");
         let initial_condition = state.peek(0).unwrap();
 
         // Save loop entry state (with condition on top)
@@ -3194,8 +3395,7 @@ mod tests {
                                        // Stack: [v_0, a_1, a_2]
 
         // add.1: v_3 = v_0 + 1 (update counter)
-        let _counter_update: PseudocodeTemplate =
-            binary_imm_op(&mut state, "+", "1");
+        let _counter_update: PseudocodeTemplate = binary_imm_op(&mut state, "+", "1");
         // Stack: [v_3, a_1, a_2]
 
         // movup.2: bring a_2 to top
@@ -3203,8 +3403,7 @@ mod tests {
         // Stack: [a_2, v_3, a_1]
 
         // add.1: v_4 = a_2 + 1 (update write_ptr)
-        let _write_ptr_update: PseudocodeTemplate =
-            binary_imm_op(&mut state, "+", "1");
+        let _write_ptr_update: PseudocodeTemplate = binary_imm_op(&mut state, "+", "1");
         // Stack: [v_4, v_3, a_1]
 
         // movup.2: bring a_1 to top
@@ -3212,8 +3411,7 @@ mod tests {
         // Stack: [a_1, v_4, v_3]
 
         // add.1: v_5 = a_1 + 1 (update read_ptr)
-        let _read_ptr_update: PseudocodeTemplate =
-            binary_imm_op(&mut state, "+", "1");
+        let _read_ptr_update: PseudocodeTemplate = binary_imm_op(&mut state, "+", "1");
         // Stack: [v_5, v_4, v_3]
 
         // movup.2: bring v_3 (counter) to top
@@ -3224,8 +3422,7 @@ mod tests {
         state.dup(0);
 
         // neq.0: v_6 = (v_3 != 0) - this is the END-OF-LOOP condition
-        let end_cond_template: PseudocodeTemplate =
-            comparison_imm(&mut state, "!=", "0");
+        let end_cond_template: PseudocodeTemplate = comparison_imm(&mut state, "!=", "0");
         let end_condition = state.peek(0).unwrap();
         // Stack: [v_6 (new condition), v_3 (counter), v_5 (read_ptr), v_4 (write_ptr)]
 

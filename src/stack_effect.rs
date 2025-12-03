@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
-use miden_assembly_syntax::ast::Instruction;
+use miden_assembly_syntax::ast::{Immediate, Instruction};
 
-use crate::analysis::instruction_effects::{InstructionEffect, StackOp};
-use crate::analysis::stack_ops::{static_effect, StaticEffect};
-use crate::descriptions::format_push_immediate;
+use crate::analysis::static_effect::{StackOp, StaticEffect};
+use crate::descriptions::{format_push_immediate, format_u32_immediate, format_u8_immediate};
 use crate::instruction_docs::get_instruction_info;
 
 /// Trait for rendering stack-effect strings for instructions.
@@ -21,18 +20,14 @@ impl ToStackEffect for Instruction {
 }
 
 fn format_stack_effect(inst: &Instruction) -> Option<String> {
-    let rendered = inst.to_string();
-    let info = get_instruction_info(&rendered);
-    let static_eff = static_effect(inst);
-    let net_effect = static_eff.map(|e| e.net());
-
-    // Try rich, instruction-specific rendering first
-    let effect = InstructionEffect::of(inst);
-    if let Some(label) = format_by_effect(inst, effect, static_eff, net_effect) {
+    let net_effect = StaticEffect::of(inst).map(|e| e.net());
+    if let Some(label) = format_by_effect(inst, net_effect) {
         return Some(label);
     }
 
     // Fall back to instruction metadata (stack_input/stack_output)
+    let rendered = inst.to_string();
+    let info = get_instruction_info(&rendered);
     if let Some(info) = info {
         let (input, output) = canonicalize_shapes(info.stack_input, info.stack_output);
         return Some(format_change(&input, &output, net_effect));
@@ -44,32 +39,97 @@ fn format_stack_effect(inst: &Instruction) -> Option<String> {
 /// Format instructions with known effects into before/after stack strings.
 fn format_by_effect(
     inst: &Instruction,
-    effect: InstructionEffect,
-    static_eff: Option<StaticEffect>,
     net_effect: Option<i32>,
 ) -> Option<String> {
-    match effect {
-        InstructionEffect::Manipulation(op) => format_stack_op(op, net_effect?),
-        InstructionEffect::Push { count } => format_push(inst, count, net_effect?),
-        InstructionEffect::Drop { count } => format_drop(inst, count, net_effect?),
-        InstructionEffect::Memory { .. } => None, // fall back to metadata for memory ops
-        InstructionEffect::Static(_) => format_static(inst, static_eff, net_effect),
-        InstructionEffect::Unknown => None,
+    if let Some(op) = StackOp::of(inst) {
+        return format_stack_op(op, net_effect?);
+    }
+
+    if let Some(count) = push_count(inst) {
+        return format_push(inst, count, net_effect?);
+    }
+
+    if let Some(count) = drop_count(inst) {
+        return format_drop(inst, count, net_effect?);
+    }
+
+    if is_memory(inst) {
+        return None; // fall back to metadata for memory ops
+    }
+
+    match StaticEffect::of(inst) {
+        Some(_) => format_static(inst),
+        None => None,
     }
 }
 
+fn push_count(inst: &Instruction) -> Option<usize> {
+    use Instruction::*;
+    match inst {
+        Push(_) => Some(1),
+        PushFeltList(values) => Some(values.len()),
+        AdvPush(n) => {
+            let count = match n {
+                Immediate::Value(v) => v.into_inner() as usize,
+                _ => 1, // Unknown count, conservatively render a single push
+            };
+            Some(count)
+        }
+        PadW => Some(4),
+        PushSlice(_, range) => Some(range.len()),
+        _ => None,
+    }
+}
+
+fn drop_count(inst: &Instruction) -> Option<usize> {
+    use Instruction::*;
+    match inst {
+        Drop => Some(1),
+        DropW => Some(4),
+        _ => None,
+    }
+}
+
+fn is_memory(inst: &Instruction) -> bool {
+    use Instruction::*;
+    matches!(
+        inst,
+        MemLoad
+            | MemLoadImm(_)
+            | MemStore
+            | MemStoreImm(_)
+            | MemLoadWBe
+            | MemLoadWLe
+            | MemLoadWBeImm(_)
+            | MemLoadWLeImm(_)
+            | MemStoreWBe
+            | MemStoreWLe
+            | MemStoreWBeImm(_)
+            | MemStoreWLeImm(_)
+            | MemStream
+            | LocLoad(_)
+            | LocStore(_)
+            | LocLoadWBe(_)
+            | LocLoadWLe(_)
+            | LocStoreWBe(_)
+            | LocStoreWLe(_)
+            | Locaddr(_)
+    )
+}
+
 /// Try to format common static operations (arithmetic, comparisons, etc.).
-fn format_static(
-    inst: &Instruction,
-    static_eff: Option<StaticEffect>,
-    net_effect: Option<i32>,
-) -> Option<String> {
-    let counts = static_eff?;
-    let net_effect = net_effect.unwrap_or_else(|| counts.net());
-    if let Some(label) = format_immediate_instruction(inst, counts) {
+fn format_static(inst: &Instruction) -> Option<String> {
+    if let Some(label) = format_immediate_instruction(inst) {
+        return Some(label);
+    }
+
+    let static_effect = StaticEffect::of(inst)?;
+    let net_effect = static_effect.net();
+    if let Some(label) = format_u32_instruction(inst, static_effect) {
         return Some(label);
     }
     let rendered = inst.to_string();
+
     let base = rendered
         .split('.')
         .next()
@@ -77,7 +137,7 @@ fn format_static(
     match base {
         "add" | "sub" | "mul" | "div" | "and" | "or" | "xor" | "eq" | "neq" | "lt" | "lte"
         | "gt" | "gte"
-            if counts.pops >= 2 && counts.pushes >= 1 =>
+            if static_effect.pops >= 2 && static_effect.pushes >= 1 =>
         {
             Some(binary_op(op_symbol(base), net_effect))
         }
@@ -90,7 +150,10 @@ fn format_static(
         "eqw" => Some(word_equality(Some(net_effect))),
         "reversew" => Some(reverse_word(Some(net_effect))),
         "padw" => Some(format_change("[...]", "[0, 0, 0, 0]", Some(net_effect))),
-        _ => Some(format_stack_change_from_counts(counts.pops, counts.pushes)),
+        _ => Some(format_stack_change_from_counts(
+            static_effect.pops,
+            static_effect.pushes,
+        )),
     }
 }
 
@@ -114,39 +177,137 @@ fn op_symbol(base: &str) -> &'static str {
 }
 
 /// Render immediate arithmetic/comparison instructions with the constant inline.
-fn format_immediate_instruction(inst: &Instruction, counts: StaticEffect) -> Option<String> {
-    let net = counts.net();
+fn format_immediate_instruction(inst: &Instruction) -> Option<String> {
+    let net_effect = StaticEffect::of(inst).map(|e| e.net());
+
     match inst {
         Instruction::AddImm(imm) => Some(format_change(
             "[a, ...]",
             &format!("[a + {}, ...]", imm),
-            Some(net),
+            net_effect,
         )),
         Instruction::SubImm(imm) => Some(format_change(
             "[a, ...]",
             &format!("[a - {}, ...]", imm),
-            Some(net),
+            net_effect,
         )),
         Instruction::MulImm(imm) => Some(format_change(
             "[a, ...]",
             &format!("[{} * a, ...]", imm),
-            Some(net),
+            net_effect,
         )),
         Instruction::DivImm(imm) => Some(format_change(
             "[a, ...]",
             &format!("[a / {}, ...]", imm),
-            Some(net),
+            net_effect,
         )),
         Instruction::EqImm(imm) => Some(format_change(
             "[a, ...]",
             &format!("[a == {}, ...]", imm),
-            Some(net),
+            net_effect,
         )),
         Instruction::NeqImm(imm) => Some(format_change(
             "[a, ...]",
             &format!("[a != {}, ...]", imm),
-            Some(net),
+            net_effect,
         )),
+        Instruction::U32WrappingAddImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[a + {}, ...]", format_u32_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32WrappingSubImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[a - {}, ...]", format_u32_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32WrappingMulImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[a * {}, ...]", format_u32_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32DivImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[a / {}, ...]", format_u32_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32ModImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[a % {}, ...]", format_u32_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32ShlImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[a << {}, ...]", format_u8_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32ShrImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[a >> {}, ...]", format_u8_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32RotlImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[rotl(a, {}), ...]", format_u8_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32RotrImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!("[rotr(a, {}), ...]", format_u8_immediate(imm)),
+            net_effect,
+        )),
+        Instruction::U32DivModImm(imm) => Some(format_change(
+            "[a, ...]",
+            &format!(
+                "[a / {}, a % {}, ...]",
+                format_u32_immediate(imm),
+                format_u32_immediate(imm)
+            ),
+            net_effect,
+        )),
+        _ => None,
+    }
+}
+
+/// Render u32 operations with their explicit expressions when possible.
+fn format_u32_instruction(inst: &Instruction, static_effect: StaticEffect) -> Option<String> {
+    use Instruction::*;
+
+    let net_effect = static_effect.net();
+    match inst {
+        U32WrappingAdd => Some(binary_op("+", net_effect)),
+        U32WrappingSub => Some(binary_op("-", net_effect)),
+        U32WrappingMul => Some(binary_op("*", net_effect)),
+        U32And => Some(binary_op("&", net_effect)),
+        U32Or => Some(binary_op("|", net_effect)),
+        U32Xor => Some(binary_op("^", net_effect)),
+        U32Div => Some(binary_op("/", net_effect)),
+        U32Mod => Some(binary_op("%", net_effect)),
+        U32Shl => Some(binary_op("<<", net_effect)),
+        U32Shr => Some(binary_op(">>", net_effect)),
+        U32Rotl => Some(format_change("[a, b, ...]", "[rotl(a, b), ...]", Some(net_effect))),
+        U32Rotr => Some(format_change("[a, b, ...]", "[rotr(a, b), ...]", Some(net_effect))),
+        U32Min => Some(binary_op("min", net_effect)),
+        U32Max => Some(binary_op("max", net_effect)),
+        U32Lt => Some(binary_op("<", net_effect)),
+        U32Lte => Some(binary_op("<=", net_effect)),
+        U32Gt => Some(binary_op(">", net_effect)),
+        U32Gte => Some(binary_op(">=", net_effect)),
+        U32Not => Some(unary_op("~a", net_effect)),
+        U32Popcnt => Some(unary_op("popcnt(a)", net_effect)),
+        U32Clz => Some(unary_op("clz(a)", net_effect)),
+        U32Ctz => Some(unary_op("ctz(a)", net_effect)),
+        U32Clo => Some(unary_op("clo(a)", net_effect)),
+        U32Cto => Some(unary_op("cto(a)", net_effect)),
+        U32Cast => Some(unary_op("u32(a)", net_effect)),
+        U32WrappingAdd3 => Some(ternary_op("a + b + c", net_effect)),
+        U32WrappingMadd => Some(ternary_op("a * b + c", net_effect)),
+        U32DivMod => Some(format_change(
+            "[a, b, ...]",
+            "[a / b, a % b, ...]",
+            Some(net_effect),
+        )),
+        U32Split => Some(format_change("[a, ...]", "[hi(a), lo(a), ...]", Some(net_effect))),
         _ => None,
     }
 }
@@ -163,7 +324,6 @@ fn format_stack_op(op: StackOp, net_effect: i32) -> Option<String> {
         StackOp::MovUpW(n) => Some(format_mov_up(n, ValueKind::Word, net_effect)),
         StackOp::MovDnW(n) => Some(format_mov_down(n, ValueKind::Word, net_effect)),
         StackOp::SwapDW => Some(format_swap_double_word(net_effect)),
-        StackOp::CSwap | StackOp::CSwapW => None,
     }
 }
 
@@ -215,6 +375,13 @@ fn format_drop(inst: &Instruction, count: usize, net_effect: i32) -> Option<Stri
 fn binary_op(symbol: &str, net_effect: i32) -> String {
     let before = "[a, b, ...]".to_string();
     let after = format!("[a {} b, ...]", symbol);
+    format_change(&before, &after, Some(net_effect))
+}
+
+/// Render generic ternary operations.
+fn ternary_op(expr: &str, net_effect: i32) -> String {
+    let before = "[a, b, c, ...]".to_string();
+    let after = format!("[{}, ...]", expr);
     format_change(&before, &after, Some(net_effect))
 }
 

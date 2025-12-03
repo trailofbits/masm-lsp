@@ -206,4 +206,37 @@ mod tests {
         let label = lenses[0].command.as_ref().unwrap().title.clone();
         assert_eq!(label, "[a, ...] → [5 * a, ...] (net effect: 0)");
     }
+
+    #[test]
+    fn u32_binary_op_shows_expression() {
+        let source = "begin\n  push.1 push.2 u32xor\nend\n";
+        let uri = Url::parse("file:///tmp/code-lens-u32.masm").unwrap();
+        let miden_uri = to_miden_uri(&uri);
+
+        let sources = DefaultSourceManager::default();
+        sources.load(SourceLanguage::Masm, miden_uri.clone(), source.to_string());
+        let file = sources.get_by_uri(&miden_uri).expect("source file");
+        let module = file
+            .clone()
+            .parse_with_options(&sources, ParseOptions::default())
+            .expect("parsed module");
+
+        let lenses = collect_code_lenses(&module, &sources, None);
+        let mut collector = InstructionCollector::default();
+        let _ = visit::visit_module(&mut collector, &module);
+        let xor_inst = collector
+            .instructions
+            .iter()
+            .find(|span| matches!(span.inner(), Instruction::U32Xor))
+            .expect("u32xor present");
+        let xor_range = span_to_range(&sources, xor_inst.span()).expect("u32xor range");
+        let xor_label = lenses
+            .iter()
+            .find(|lens| lens.range == xor_range)
+            .and_then(|lens| lens.command.as_ref())
+            .map(|cmd| cmd.title.clone())
+            .expect("label for u32xor");
+
+        assert_eq!(xor_label, "[a, b, ...] → [a ^ b, ...] (net effect: -1)");
+    }
 }

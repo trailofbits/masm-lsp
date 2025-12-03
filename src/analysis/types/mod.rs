@@ -11,12 +11,12 @@
 //! - `state`: Per-procedure analysis state (`AnalysisState`)
 
 pub mod bounds;
-pub mod stack;
 pub mod state;
 pub mod taint;
+pub mod symbolic_stack;
 
 // Re-export main types for convenient access
 pub use bounds::{Bounds, FIELD_MODULUS, U32_MAX};
-pub use stack::SymbolicStack;
 pub use state::AnalysisState;
+pub use symbolic_stack::SymbolicStack;
 pub use taint::{TrackedValue, ValidationState, ValueOrigin};

@@ -27,15 +27,15 @@ pub use ssa::{
     ext2_unary_op,
     unary_fn,
     unary_op,
+    DecompilerState,
+    PseudocodeBuilder,
+    PseudocodeSegment,
+    PseudocodeTemplate,
     // SSA types
     SsaContext,
-    DecompilerState,
     SsaId,
     SsaStack,
     SsaValue,
     // Output types
     VarKind,
-    PseudocodeBuilder,
-    PseudocodeSegment,
-    PseudocodeTemplate,
 };
