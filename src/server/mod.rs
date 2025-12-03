@@ -17,11 +17,12 @@ use tower_lsp::{
     lsp_types::{
         self,
         request::{GotoImplementationParams, GotoImplementationResponse},
-        Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-        HoverParams, InitializeParams, InitializeResult, InitializedParams, InlayHint,
-        InlayHintParams, Location, MarkupContent, MarkupKind, Position, Range, ReferenceParams,
-        ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
-        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
+        CodeLens, CodeLensOptions, CodeLensParams, Diagnostic, GotoDefinitionParams,
+        GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams,
+        InitializeResult, InitializedParams, InlayHint, InlayHintParams, Location, MarkupContent,
+        MarkupKind, Position, Range, ReferenceParams, ServerCapabilities, SymbolInformation,
+        SymbolKind, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkspaceSymbolParams,
     },
     LanguageServer,
 };
@@ -29,10 +30,12 @@ use tracing::{debug, error, info};
 
 use crate::{
     client::PublishDiagnostics,
+    code_lens::collect_code_lenses,
     cursor_resolution::{resolve_symbol_at_position, ResolutionError, ResolvedSymbol},
     diagnostics::{diagnostics_from_report, unresolved_to_diagnostics},
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
-    inlay_hints::{collect_inlay_hints, get_instruction_hover},
+    inlay_hints::collect_inlay_hints,
+    instruction_docs::get_instruction_hover,
     module_path::ModulePathResolver,
     service::{DocumentService, WorkspaceService},
     symbol_path::SymbolPath,
@@ -43,7 +46,10 @@ use crate::{
 };
 
 // Re-export submodule items used externally
-pub use config::{extract_inlay_hint_type, extract_library_paths, extract_tab_count};
+pub use config::{
+    extract_code_lens_stack_effects, extract_inlay_hint_type, extract_library_paths,
+    extract_tab_count,
+};
 pub use helpers::{
     determine_module_kind_from_ast, extract_doc_comment, extract_procedure_signature,
     is_on_use_statement,
@@ -624,6 +630,9 @@ where
             references_provider: Some(lsp_types::OneOf::Left(true)),
             workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
             inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+            code_lens_provider: Some(CodeLensOptions {
+                resolve_provider: Some(false),
+            }),
             ..Default::default()
         };
 
@@ -647,6 +656,10 @@ where
         if let Some(paths) = extract_library_paths(&params.settings) {
             cfg.library_paths = paths;
             info!("updated library search paths");
+        }
+        if let Some(enabled) = extract_code_lens_stack_effects(&params.settings) {
+            cfg.code_lens_stack_effects = enabled;
+            info!("updated stack-effect code lens toggle: {}", enabled);
         }
         if let Some(mode) = extract_inlay_hint_type(&params.settings) {
             cfg.inlay_hint_type = mode;
@@ -943,6 +956,27 @@ where
             })
             .collect();
         Ok(Some(syms))
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let config = self.snapshot_config().await;
+        if !config.code_lens_stack_effects {
+            return Ok(Some(vec![]));
+        }
+        let uri = params.text_document.uri;
+        let Some(doc) = self.get_or_parse_document(&uri).await else {
+            return Ok(None);
+        };
+
+        let workspace = self.workspace.read().await;
+        let contracts = workspace.contracts();
+        let lenses = collect_code_lenses(&doc.module, self.sources.as_ref(), Some(contracts));
+        Ok(Some(lenses))
+    }
+
+    async fn code_lens_resolve(&self, params: CodeLens) -> Result<CodeLens> {
+        // All lenses are fully populated up front.
+        Ok(params)
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {

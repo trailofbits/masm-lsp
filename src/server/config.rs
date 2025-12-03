@@ -5,6 +5,21 @@
 
 use crate::{InlayHintType, LibraryPath};
 
+/// Extract the code lens stack effect toggle from LSP settings.
+///
+/// Expects settings in the format:
+/// ```json
+/// { "masm-lsp": { "codeLens": { "stackEffects": true } } }
+/// ```
+pub fn extract_code_lens_stack_effects(settings: &serde_json::Value) -> Option<bool> {
+    settings
+        .get("masm-lsp")
+        .or_else(|| settings.get("masm"))
+        .and_then(|v| v.get("codeLens"))
+        .and_then(|v| v.get("stackEffects"))
+        .and_then(|v| v.as_bool())
+}
+
 /// Extract the inlay hint tab padding count from LSP settings.
 ///
 /// Expects settings in the format:
@@ -98,6 +113,30 @@ mod tests {
     use super::*;
     use crate::InlayHintType;
     use serde_json::json;
+
+    #[test]
+    fn extract_code_lens_stack_effects_true() {
+        let settings = json!({
+            "masm-lsp": {
+                "codeLens": {
+                    "stackEffects": true
+                }
+            }
+        });
+        assert_eq!(extract_code_lens_stack_effects(&settings), Some(true));
+    }
+
+    #[test]
+    fn extract_code_lens_stack_effects_false() {
+        let settings = json!({
+            "masm-lsp": {
+                "codeLens": {
+                    "stackEffects": false
+                }
+            }
+        });
+        assert_eq!(extract_code_lens_stack_effects(&settings), Some(false));
+    }
 
     #[test]
     fn extract_tab_count_valid() {

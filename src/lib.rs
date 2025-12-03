@@ -1,14 +1,17 @@
 pub mod analysis;
 pub mod client;
+pub mod code_lens;
 pub mod cursor_resolution;
 pub mod decompiler;
 pub mod descriptions;
 pub mod diagnostics;
 pub mod index;
 pub mod inlay_hints;
+pub mod instruction_docs;
 pub mod module_path;
 pub mod server;
 pub mod service;
+pub mod stack_effect;
 pub mod symbol_path;
 pub mod symbol_resolution;
 pub mod util;
@@ -35,6 +38,8 @@ pub struct ServerConfig {
     pub inlay_hint_tabs: usize,
     /// Library roots to preload and use for module path derivation.
     pub library_paths: Vec<LibraryPath>,
+    /// Whether to show stack-effect code lenses.
+    pub code_lens_stack_effects: bool,
     /// Whether to show hover information for built-in instructions.
     pub instruction_hovers_enabled: bool,
     /// Whether to run taint analysis and report security warnings.
@@ -55,6 +60,7 @@ impl Default for ServerConfig {
             // Use two tabs by default to give hints breathing room.
             inlay_hint_tabs: 2,
             library_paths: default_library_paths(),
+            code_lens_stack_effects: true,
             // Instruction hovers are disabled by default.
             instruction_hovers_enabled: false,
             // Taint analysis is enabled by default.
@@ -77,6 +83,7 @@ impl ServerConfig {
 pub struct ServerConfigBuilder {
     inlay_hint_tabs: Option<usize>,
     library_paths: Option<Vec<LibraryPath>>,
+    code_lens_stack_effects: Option<bool>,
     instruction_hovers_enabled: Option<bool>,
     taint_analysis_enabled: Option<bool>,
     inlay_hint_type: Option<InlayHintType>,
@@ -101,6 +108,12 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set whether to show stack-effect code lenses.
+    pub fn code_lens_stack_effects(mut self, enabled: bool) -> Self {
+        self.code_lens_stack_effects = Some(enabled);
+        self
+    }
+
     /// Set whether to run taint analysis and report security warnings.
     pub fn taint_analysis_enabled(mut self, enabled: bool) -> Self {
         self.taint_analysis_enabled = Some(enabled);
@@ -120,6 +133,7 @@ impl ServerConfigBuilder {
         ServerConfig {
             inlay_hint_tabs: self.inlay_hint_tabs.unwrap_or(2),
             library_paths: self.library_paths.unwrap_or_else(default_library_paths),
+            code_lens_stack_effects: self.code_lens_stack_effects.unwrap_or(true),
             instruction_hovers_enabled: self.instruction_hovers_enabled.unwrap_or(false),
             taint_analysis_enabled: self.taint_analysis_enabled.unwrap_or(true),
             inlay_hint_type: self.inlay_hint_type.unwrap_or(InlayHintType::Decompilation),

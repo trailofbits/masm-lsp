@@ -7,41 +7,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, R
 
 use crate::descriptions::{format_push_immediate, ToDescription};
 use crate::diagnostics::span_to_range;
-
-// Include the compile-time generated instruction map
-include!(concat!(env!("OUT_DIR"), "/instruction_map.rs"));
-
-/// Look up instruction info by name.
-///
-/// Handles both exact matches (e.g., "add") and parameterized instructions
-/// (e.g., "push.1" falling back to "push").
-fn get_instruction_info(name: &str) -> Option<&'static InstructionInfo> {
-    // First try exact match
-    if let Some(info) = INSTRUCTION_MAP.get(name) {
-        return Some(info);
-    }
-    // Try base instruction (strip after first dot)
-    let base = name.split('.').next()?;
-    INSTRUCTION_MAP.get(base)
-}
-
-/// Look up hover text for an instruction by name.
-///
-/// Returns formatted markdown hover text if the instruction is found.
-pub fn get_instruction_hover(name: &str) -> Option<String> {
-    let info = get_instruction_info(name)?;
-    Some(format_hover_text(name, info))
-}
-
-/// Format instruction info into markdown hover text.
-fn format_hover_text(name: &str, info: &InstructionInfo) -> String {
-    // Use just the base instruction name for the code block
-    let base_name = name.split('.').next().unwrap_or(name);
-    format!(
-        "```masm\n{}\n```\n\n---\n\n{}\n\n**Stack Input**\n\n`{}`\n\n**Stack Output**\n\n`{}`\n\n**Cycles**\n\n{}",
-        base_name, info.description, info.stack_input, info.stack_output, info.cycles
-    )
-}
+use crate::instruction_docs::get_instruction_info;
 
 /// The kind of invocation instruction.
 #[derive(Clone, Copy)]
@@ -361,6 +327,7 @@ impl Visit for InstructionCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instruction_docs::get_instruction_info;
     use miden_assembly_syntax::ast::Immediate;
     use miden_assembly_syntax::parser::{IntValue, PushValue};
     use miden_assembly_syntax::Felt;
@@ -435,15 +402,15 @@ mod tests {
     #[test]
     fn instruction_map_contains_common_instructions() {
         // Test that common instructions are in the map
-        assert!(INSTRUCTION_MAP.contains_key("add"));
-        assert!(INSTRUCTION_MAP.contains_key("push"));
-        assert!(INSTRUCTION_MAP.contains_key("nop"));
-        assert!(INSTRUCTION_MAP.contains_key("dup"));
+        assert!(get_instruction_info("add").is_some());
+        assert!(get_instruction_info("push").is_some());
+        assert!(get_instruction_info("nop").is_some());
+        assert!(get_instruction_info("dup").is_some());
     }
 
     #[test]
     fn instruction_map_lookup_returns_info() {
-        let info = INSTRUCTION_MAP.get("add");
+        let info = get_instruction_info("add");
         assert!(info.is_some());
         let info = info.unwrap();
         assert!(!info.description.is_empty());
@@ -627,7 +594,7 @@ mod tests {
     fn render_note_falls_back_to_static_map() {
         let inst = Span::unknown(Instruction::Add);
         let hint = render_note(&inst);
-        // Should get the static hint from INSTRUCTION_MAP
+        // Should get the static hint from the instruction table
         assert!(hint.is_some());
         assert!(!hint.unwrap().is_empty());
     }
