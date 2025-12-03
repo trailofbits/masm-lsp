@@ -230,14 +230,22 @@ fn test_u32_wrapping_add_imm_pop1_push1() {
 }
 
 #[test]
+fn test_u32_wrapping_sub_pop2_push1() {
+    let state = analyze_proc("push.10 push.3 u32wrapping_sub");
+
+    assert_eq!(state.stack.depth(), 1);
+    assert!(state.stack.peek(0).unwrap().bounds.is_u32());
+}
+
+#[test]
 fn test_u32_overflowing_add_pop2_push2() {
     // u32overflowing_add pops 2, pushes 2 (result, overflow)
     let state = analyze_proc("push.10 push.20 u32overflowing_add");
 
     assert_eq!(state.stack.depth(), 2);
-    // Result on top (position 0), overflow flag below (position 1)
-    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // result
-    assert_eq!(state.stack.peek(1).unwrap().bounds, Bounds::Bool); // overflow
+    // Overflow flag on top, result below
+    assert_eq!(state.stack.peek(0).unwrap().bounds, Bounds::Bool); // overflow
+    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // result
 }
 
 #[test]
@@ -246,8 +254,28 @@ fn test_u32_overflowing_add3_pop3_push2() {
     let state = analyze_proc("push.1 push.2 push.3 u32overflowing_add3");
 
     assert_eq!(state.stack.depth(), 2);
-    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // result
-    assert_eq!(state.stack.peek(1).unwrap().bounds, Bounds::Bool); // carry
+    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // carry
+    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // result
+}
+
+#[test]
+fn test_u32_overflowing_sub_pop2_push2() {
+    // u32overflowing_sub pops 2, pushes 2 (result, borrow flag)
+    let state = analyze_proc("push.10 push.3 u32overflowing_sub");
+
+    assert_eq!(state.stack.depth(), 2);
+    assert_eq!(state.stack.peek(0).unwrap().bounds, Bounds::Bool); // borrow flag
+    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // result
+}
+
+#[test]
+fn test_u32_overflowing_mul_pop2_push2_flag_on_top() {
+    // u32overflowing_mul pops 2, pushes 2 (result, high bits)
+    let state = analyze_proc("push.2 push.3 u32overflowing_mul");
+
+    assert_eq!(state.stack.depth(), 2);
+    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // high bits
+    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // result
 }
 
 #[test]
@@ -260,13 +288,23 @@ fn test_u32_wrapping_add3_pop3_push1() {
 }
 
 #[test]
+fn test_u32_overflowing_madd_overflow_on_top() {
+    // u32overflowing_madd pops 3, pushes 2 (overflow, result)
+    let state = analyze_proc("push.1 push.2 push.3 u32overflowing_madd");
+
+    assert_eq!(state.stack.depth(), 2);
+    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // overflow/upper bits
+    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // result
+}
+
+#[test]
 fn test_u32_divmod_pop2_push2() {
-    // u32divmod pops 2, pushes 2 (quotient, remainder)
+    // u32divmod pops 2, pushes 2 (remainder, quotient)
     let state = analyze_proc("push.10 push.3 u32divmod");
 
     assert_eq!(state.stack.depth(), 2);
-    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // quotient
-    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // remainder
+    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // remainder
+    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // quotient
 }
 
 #[test]
@@ -275,8 +313,8 @@ fn test_u32_divmod_imm_pop1_push2() {
     let state = analyze_proc("push.10 u32divmod.3");
 
     assert_eq!(state.stack.depth(), 2);
-    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // quotient
-    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // remainder
+    assert!(state.stack.peek(0).unwrap().bounds.is_u32()); // remainder
+    assert!(state.stack.peek(1).unwrap().bounds.is_u32()); // quotient
 }
 
 #[test]

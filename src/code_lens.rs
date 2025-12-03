@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::{CodeLens, Command};
 use crate::analysis::{ContractStore, StackEffect};
 use crate::diagnostics::span_to_range;
 use crate::stack_effect::format_stack_change_from_counts;
-use crate::stack_effect::ToStackEffect;
+use crate::stack_effect::FormatStackEffect;
 use crate::symbol_resolution::create_resolver;
 
 /// Collect stack-effect code lenses for all instructions in a module.
@@ -27,7 +27,7 @@ pub fn collect_code_lenses(
                 return None;
             };
             let label = contract_stack_effect(inst.inner(), contracts, &resolver)
-                .or_else(|| inst.inner().to_stack_effect())?;
+                .or_else(|| inst.inner().format_stack_effect())?;
             Some(CodeLens {
                 range,
                 command: Some(Command {
@@ -237,6 +237,90 @@ mod tests {
             .map(|cmd| cmd.title.clone())
             .expect("label for u32xor");
 
-        assert_eq!(xor_label, "[a, b, ...] → [a ^ b, ...] (net effect: -1)");
+        assert_eq!(xor_label, "[a, b, ...] → [b ^ a, ...] (net effect: -1)");
+    }
+
+    #[test]
+    fn sub_binary_ops_use_second_minus_top() {
+        let source = "begin\n  push.1 push.2 sub\n  push.5 push.3 u32wrapping_sub\nend\n";
+        let uri = Url::parse("file:///tmp/code-lens-sub.masm").unwrap();
+        let miden_uri = to_miden_uri(&uri);
+
+        let sources = DefaultSourceManager::default();
+        sources.load(SourceLanguage::Masm, miden_uri.clone(), source.to_string());
+        let file = sources.get_by_uri(&miden_uri).expect("source file");
+        let module = file
+            .clone()
+            .parse_with_options(&sources, ParseOptions::default())
+            .expect("parsed module");
+
+        let lenses = collect_code_lenses(&module, &sources, None);
+
+        let mut collector = InstructionCollector::default();
+        let _ = visit::visit_module(&mut collector, &module);
+
+        let sub_inst = collector
+            .instructions
+            .iter()
+            .find(|span| matches!(span.inner(), Instruction::Sub))
+            .expect("sub present");
+        let sub_range = span_to_range(&sources, sub_inst.span()).expect("sub range");
+        let sub_label = lenses
+            .iter()
+            .find(|lens| lens.range == sub_range)
+            .and_then(|lens| lens.command.as_ref())
+            .map(|cmd| cmd.title.clone())
+            .expect("label for sub");
+        assert_eq!(sub_label, "[a, b, ...] → [b - a, ...] (net effect: -1)");
+
+        let u32_sub_inst = collector
+            .instructions
+            .iter()
+            .find(|span| matches!(span.inner(), Instruction::U32WrappingSub))
+            .expect("u32wrapping_sub present");
+        let u32_sub_range = span_to_range(&sources, u32_sub_inst.span()).expect("u32wrapping_sub range");
+        let u32_sub_label = lenses
+            .iter()
+            .find(|lens| lens.range == u32_sub_range)
+            .and_then(|lens| lens.command.as_ref())
+            .map(|cmd| cmd.title.clone())
+            .expect("label for u32wrapping_sub");
+        assert_eq!(
+            u32_sub_label,
+            "[a, b, ...] → [b - a, ...] (net effect: -1)"
+        );
+    }
+
+    #[test]
+    fn u32_overflowing_add_shows_flag_first() {
+        let source = "begin\n  push.1 push.2 u32overflowing_add\nend\n";
+        let uri = Url::parse("file:///tmp/code-lens-u32-overflow.masm").unwrap();
+        let miden_uri = to_miden_uri(&uri);
+
+        let sources = DefaultSourceManager::default();
+        sources.load(SourceLanguage::Masm, miden_uri.clone(), source.to_string());
+        let file = sources.get_by_uri(&miden_uri).expect("source file");
+        let module = file
+            .clone()
+            .parse_with_options(&sources, ParseOptions::default())
+            .expect("parsed module");
+
+        let lenses = collect_code_lenses(&module, &sources, None);
+        let mut collector = InstructionCollector::default();
+        let _ = visit::visit_module(&mut collector, &module);
+        let inst = collector
+            .instructions
+            .iter()
+            .find(|span| matches!(span.inner(), Instruction::U32OverflowingAdd))
+            .expect("u32overflowing_add present");
+        let range = span_to_range(&sources, inst.span()).expect("range");
+        let label = lenses
+            .iter()
+            .find(|lens| lens.range == range)
+            .and_then(|lens| lens.command.as_ref())
+            .map(|cmd| cmd.title.clone())
+            .expect("label");
+
+        assert_eq!(label, "[a, b, ...] → [carry, b + a, ...] (net effect: 0)");
     }
 }

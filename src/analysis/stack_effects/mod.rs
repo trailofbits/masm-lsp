@@ -905,49 +905,49 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         Instruction::U32OverflowingAdd => {
             state.stack.pop();
             state.stack.pop();
-            let overflow = state.make_derived(Bounds::Bool);
             let result = state.make_derived(Bounds::u32());
-            state.stack.push(overflow);
             state.stack.push(result);
+            let overflow = state.make_derived(Bounds::Bool);
+            state.stack.push(overflow);
         }
         Instruction::U32OverflowingAddImm(imm) => {
             state.stack.pop();
-            let overflow = state.make_derived(Bounds::Bool);
             let result = state.make_derived(Bounds::u32());
-            state.stack.push(overflow);
             state.stack.push(result);
+            let overflow = state.make_derived(Bounds::Bool);
+            state.stack.push(overflow);
             let _ = imm;
         }
         Instruction::U32OverflowingSub => {
             state.stack.pop();
             state.stack.pop();
-            let underflow = state.make_derived(Bounds::Bool);
             let result = state.make_derived(Bounds::u32());
-            state.stack.push(underflow);
             state.stack.push(result);
+            let underflow = state.make_derived(Bounds::Bool);
+            state.stack.push(underflow);
         }
         Instruction::U32OverflowingSubImm(imm) => {
             state.stack.pop();
-            let underflow = state.make_derived(Bounds::Bool);
             let result = state.make_derived(Bounds::u32());
-            state.stack.push(underflow);
             state.stack.push(result);
+            let underflow = state.make_derived(Bounds::Bool);
+            state.stack.push(underflow);
             let _ = imm;
         }
         Instruction::U32OverflowingMul => {
             state.stack.pop();
             state.stack.pop();
-            let overflow = state.make_derived(Bounds::Bool);
             let result = state.make_derived(Bounds::u32());
-            state.stack.push(overflow);
             state.stack.push(result);
+            let overflow = state.make_derived(Bounds::u32());
+            state.stack.push(overflow);
         }
         Instruction::U32OverflowingMulImm(imm) => {
             state.stack.pop();
-            let overflow = state.make_derived(Bounds::Bool);
             let result = state.make_derived(Bounds::u32());
-            state.stack.push(overflow);
             state.stack.push(result);
+            let overflow = state.make_derived(Bounds::u32());
+            state.stack.push(overflow);
             let _ = imm;
         }
 
@@ -957,10 +957,10 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             state.stack.pop();
             state.stack.pop();
             state.stack.pop();
-            let carry = state.make_derived(Bounds::Bool);
             let result = state.make_derived(Bounds::u32());
-            state.stack.push(carry);
             state.stack.push(result);
+            let carry = state.make_derived(Bounds::u32());
+            state.stack.push(carry);
         }
         Instruction::U32WrappingAdd3 => {
             // pop 3, push 1
@@ -975,10 +975,10 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             state.stack.pop();
             state.stack.pop();
             state.stack.pop();
-            let overflow = state.make_derived(Bounds::u32()); // Can overflow beyond bool
             let result = state.make_derived(Bounds::u32());
-            state.stack.push(overflow);
             state.stack.push(result);
+            let overflow = state.make_derived(Bounds::u32()); // Can overflow beyond bool
+            state.stack.push(overflow);
         }
         Instruction::U32WrappingMadd => {
             // pop 3 (a, b, c), push 1 (a*b + c wrapped)
@@ -1020,20 +1020,20 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             // pop 2, push 2 (quotient, remainder)
             if let Some(effect) = static_effect {
                 pop_n(state, effect.pops);
-                let remainder = state.make_derived(Bounds::u32());
                 let quotient = state.make_derived(Bounds::u32());
-                state.stack.push(remainder);
                 state.stack.push(quotient);
+                let remainder = state.make_derived(Bounds::u32());
+                state.stack.push(remainder);
             }
         }
         Instruction::U32DivModImm(imm) => {
             // pop 1, push 2 (quotient, remainder)
             if let Some(effect) = static_effect {
                 pop_n(state, effect.pops);
-                let remainder = state.make_derived(Bounds::u32());
                 let quotient = state.make_derived(Bounds::u32());
-                state.stack.push(remainder);
                 state.stack.push(quotient);
+                let remainder = state.make_derived(Bounds::u32());
+                state.stack.push(remainder);
                 let _ = imm;
             }
         }
