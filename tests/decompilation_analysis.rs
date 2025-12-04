@@ -4,7 +4,7 @@
 //! and outputs detailed reports about failures and coverage.
 
 mod common;
-
+use common::fixtures::collect_labels_and_diags;
 use common::fixtures::load_example;
 use masm_lsp::decompiler::collect_decompilation_hints;
 use miden_assembly_syntax::ast::ModuleKind;
@@ -143,6 +143,8 @@ fn analyze_file(path: &str) -> Option<FileAnalysis> {
 
     let url = Url::parse(&uri_str).unwrap();
 
+    // Use an empty contract store to avoid per-file contract inference in this perf-heavy test.
+    let empty_contracts = masm_lsp::analysis::ContractStore::new();
     let result = collect_decompilation_hints(
         &module,
         &source_manager,
@@ -150,7 +152,7 @@ fn analyze_file(path: &str) -> Option<FileAnalysis> {
         &visible_range,
         4, // indent
         &content,
-        None, // no contracts
+        Some(&empty_contracts),
     );
 
     // Collect hints
@@ -382,4 +384,37 @@ fn analyze_decompilation_coverage() {
     }
 
     eprintln!("\n══════════════════════════════════════════════════════════════════\n");
+}
+
+#[test]
+fn test_base_legendre_decompiles() {
+    let source = r#"
+proc base_legendre
+    repeat.31
+        dup
+        mul
+    end
+
+    dup
+
+    repeat.32
+        dup
+        mul
+    end
+
+    swap
+    dup
+    eq.0
+    add
+
+    div
+end
+
+"#;
+
+    let (labels, diags) = collect_labels_and_diags(source);
+
+    // should decompile without errors
+    assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    assert!(!labels.is_empty(), "expected decompilation, got none");
 }

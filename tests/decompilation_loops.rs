@@ -1,71 +1,5 @@
-use masm_lsp::decompiler::collect_decompilation_hints;
-use miden_assembly_syntax::ast::ModuleKind;
-use miden_assembly_syntax::{Parse, ParseOptions};
-use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
-use tower_lsp::lsp_types::{InlayHintLabel, Position, Range, Url};
-
-fn collect_labels_and_diags(source: &str) -> (Vec<String>, Vec<String>) {
-    // Prepare source manager and parse module
-    let source_manager = DefaultSourceManager::default();
-    let uri = miden_debug_types::Uri::from("file:///test.masm");
-    source_manager.load(SourceLanguage::Masm, uri.clone(), source.to_string());
-
-    let source_file = source_manager
-        .get_by_uri(&uri)
-        .expect("failed to load source");
-
-    let opts = ParseOptions {
-        kind: ModuleKind::Library,
-        path: None,
-        ..Default::default()
-    };
-
-    let module = source_file
-        .parse_with_options(&source_manager, opts)
-        .expect("failed to parse MASM");
-
-    let line_count = source.lines().count() as u32;
-    let last_line_len = source.lines().last().map(|l| l.len()).unwrap_or(0) as u32;
-    let visible_range = Range {
-        start: Position {
-            line: 0,
-            character: 0,
-        },
-        end: Position {
-            line: line_count,
-            character: last_line_len,
-        },
-    };
-
-    let url = Url::parse("file:///test.masm").unwrap();
-
-    let result = collect_decompilation_hints(
-        &module,
-        &source_manager,
-        &url,
-        &visible_range,
-        4,
-        source,
-        None,
-    );
-
-    let labels = result
-        .hints
-        .iter()
-        .filter_map(|h| match &h.label {
-            InlayHintLabel::String(s) => Some(s.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    let diags = result
-        .diagnostics
-        .into_iter()
-        .map(|d| d.message)
-        .collect::<Vec<_>>();
-
-    (labels, diags)
-}
+mod common;
+use common::fixtures::collect_labels_and_diags;
 
 #[test]
 fn repeat_consuming_produces_parametric_indices() {
@@ -238,6 +172,32 @@ end
             .any(|d| d.contains("while") || d.contains("stack effect")),
         "expected diagnostic about while loop effect, got {:?}",
         diags
+    );
+}
+
+/// Large neutral repeat loops should be summarized instead of failing.
+#[test]
+fn large_neutral_repeat_is_summarized() {
+    // repeat.20 with a stack-neutral body (dup; drop) used to exceed the neutral
+    // iteration cutoff and fail; we now summarize and still emit hints.
+    let source = r#"
+pub proc neutral_loop(a_0: felt, a_1: felt)
+    repeat.20
+        dup
+        drop
+    end
+end
+"#;
+
+    let (labels, diags) = collect_labels_and_diags(source);
+    assert!(
+        diags.is_empty(),
+        "expected no diagnostics for summarized neutral loop, got {:?}",
+        diags
+    );
+    assert!(
+        !labels.is_empty(),
+        "expected decompilation hints to be produced"
     );
 }
 
