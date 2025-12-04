@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use miden_assembly_syntax::ast::{Immediate, Instruction};
 
-use crate::analysis::static_effect::{StackOp, StaticEffect};
+use crate::analysis::semantics::{semantics_of, InstructionSemantics};
+use crate::analysis::static_effect::StackOp;
 use crate::descriptions::{format_push_immediate, format_u32_immediate, format_u8_immediate};
 use crate::instruction_docs::get_instruction_info;
 
@@ -15,8 +16,8 @@ pub trait FormatStackEffect {
 
 impl FormatStackEffect for Instruction {
     fn format_stack_effect(&self) -> Option<String> {
-        let net_effect = StaticEffect::of(self).map(|e| e.net());
-        if let Some(label) = format_by_effect(self, net_effect) {
+        let semantics = semantics_of(self);
+        if let Some(label) = format_by_effect(self, semantics) {
             return Some(label);
         }
 
@@ -25,7 +26,7 @@ impl FormatStackEffect for Instruction {
         let info = get_instruction_info(&rendered);
         if let Some(info) = info {
             let (input, output) = canonicalize_shapes(info.stack_input, info.stack_output);
-            return Some(format_change(&input, &output, net_effect));
+            return Some(format_change(&input, &output, semantics.map(|s| s.net())));
         }
 
         None
@@ -33,7 +34,9 @@ impl FormatStackEffect for Instruction {
 }
 
 /// Format instructions with known effects into before/after stack strings.
-fn format_by_effect(inst: &Instruction, net_effect: Option<i32>) -> Option<String> {
+fn format_by_effect(inst: &Instruction, semantics: Option<InstructionSemantics>) -> Option<String> {
+    let net_effect = semantics.map(|s| s.net());
+
     if let Some(op) = StackOp::of(inst) {
         return format_stack_op(op, net_effect?);
     }
@@ -47,13 +50,14 @@ fn format_by_effect(inst: &Instruction, net_effect: Option<i32>) -> Option<Strin
     }
 
     if is_memory(inst) {
-        return None; // fall back to metadata for memory ops
+        // Prefer semantics counts so memory ops reflect overrides.
+        if let Some(sem) = semantics {
+            return Some(format_stack_change_from_counts(sem.pops, sem.pushes));
+        }
+        return None; // fall back to metadata when semantics are unknown
     }
 
-    match StaticEffect::of(inst) {
-        Some(_) => format_static(inst),
-        None => None,
-    }
+    semantics.and_then(|sem| format_static(inst, sem))
 }
 
 fn push_count(inst: &Instruction) -> Option<usize> {
@@ -111,14 +115,13 @@ fn is_memory(inst: &Instruction) -> bool {
 }
 
 /// Try to format common static operations (arithmetic, comparisons, etc.).
-fn format_static(inst: &Instruction) -> Option<String> {
-    if let Some(label) = format_immediate_instruction(inst) {
+fn format_static(inst: &Instruction, semantics: InstructionSemantics) -> Option<String> {
+    if let Some(label) = format_immediate_instruction(inst, Some(semantics.net())) {
         return Some(label);
     }
 
-    let static_effect = StaticEffect::of(inst)?;
-    let net_effect = static_effect.net();
-    if let Some(label) = format_u32_instruction(inst, static_effect) {
+    let net_effect = semantics.net();
+    if let Some(label) = format_u32_instruction(inst, semantics) {
         return Some(label);
     }
     let rendered = inst.to_string();
@@ -130,7 +133,7 @@ fn format_static(inst: &Instruction) -> Option<String> {
     match base {
         "add" | "sub" | "mul" | "div" | "and" | "or" | "xor" | "eq" | "neq" | "lt" | "lte"
         | "gt" | "gte"
-            if static_effect.pops >= 2 && static_effect.pushes >= 1 =>
+            if semantics.pops >= 2 && semantics.pushes >= 1 =>
         {
             Some(binary_op(op_symbol(base), net_effect))
         }
@@ -141,12 +144,16 @@ fn format_static(inst: &Instruction) -> Option<String> {
         "ilog2" => Some(unary_op("log2(a)", net_effect)),
         "is_odd" => Some(unary_op("is_odd(a)", net_effect)),
         "eqw" => Some(word_equality(Some(net_effect))),
-        "caller" => Some(format_change("[A, b, ...]", "[H, b, ...]", Some(net_effect))),
+        "caller" => Some(format_change(
+            "[A, b, ...]",
+            "[H, b, ...]",
+            Some(net_effect),
+        )),
         "reversew" => Some(reverse_word(Some(net_effect))),
         "padw" => Some(format_change("[...]", "[0, 0, 0, 0]", Some(net_effect))),
         _ => Some(format_stack_change_from_counts(
-            static_effect.pops,
-            static_effect.pushes,
+            semantics.pops,
+            semantics.pushes,
         )),
     }
 }
@@ -171,9 +178,7 @@ fn op_symbol(base: &str) -> &'static str {
 }
 
 /// Render immediate arithmetic/comparison instructions with the constant inline.
-fn format_immediate_instruction(inst: &Instruction) -> Option<String> {
-    let net_effect = StaticEffect::of(inst).map(|e| e.net());
-
+fn format_immediate_instruction(inst: &Instruction, net_effect: Option<i32>) -> Option<String> {
     match inst {
         Instruction::AddImm(imm) => Some(format_change(
             "[a, ...]",
@@ -264,10 +269,13 @@ fn format_immediate_instruction(inst: &Instruction) -> Option<String> {
 }
 
 /// Render u32 operations with their explicit expressions when possible.
-fn format_u32_instruction(inst: &Instruction, static_effect: StaticEffect) -> Option<String> {
+fn format_u32_instruction(
+    inst: &Instruction,
+    semantics: crate::analysis::semantics::InstructionSemantics,
+) -> Option<String> {
     use Instruction::*;
 
-    let net_effect = static_effect.net();
+    let net_effect = semantics.net();
     match inst {
         U32WrappingAdd => Some(binary_op("+", net_effect)),
         U32WrappingSub => Some(binary_op("-", net_effect)),
@@ -279,10 +287,7 @@ fn format_u32_instruction(inst: &Instruction, static_effect: StaticEffect) -> Op
         )),
         U32OverflowingAddImm(imm) => Some(format_change(
             "[a, ...]",
-            &format!(
-                "[carry, a + {}, ...]",
-                format_u32_immediate(imm)
-            ),
+            &format!("[carry, a + {}, ...]", format_u32_immediate(imm)),
             Some(net_effect),
         )),
         U32OverflowingSub => Some(format_change(
@@ -292,10 +297,7 @@ fn format_u32_instruction(inst: &Instruction, static_effect: StaticEffect) -> Op
         )),
         U32OverflowingSubImm(imm) => Some(format_change(
             "[a, ...]",
-            &format!(
-                "[borrow, a - {}, ...]",
-                format_u32_immediate(imm)
-            ),
+            &format!("[borrow, a - {}, ...]", format_u32_immediate(imm)),
             Some(net_effect),
         )),
         U32OverflowingMul => Some(format_change(
@@ -305,10 +307,7 @@ fn format_u32_instruction(inst: &Instruction, static_effect: StaticEffect) -> Op
         )),
         U32OverflowingMulImm(imm) => Some(format_change(
             "[a, ...]",
-            &format!(
-                "[carry, a * {}, ...]",
-                format_u32_immediate(imm)
-            ),
+            &format!("[carry, a * {}, ...]", format_u32_immediate(imm)),
             Some(net_effect),
         )),
         U32And => Some(binary_op("&", net_effect)),
@@ -544,7 +543,7 @@ fn format_swap_double_word(net_effect: i32) -> String {
 }
 
 /// Normalize stack input/output shapes by renaming variables alphabetically.
-fn canonicalize_shapes(input: &str, output: &str) -> (String, String) {
+pub(crate) fn canonicalize_shapes(input: &str, output: &str) -> (String, String) {
     let mut mapper = NameMapper::default();
     let before = mapper.render(input);
     let after = mapper.render(output);

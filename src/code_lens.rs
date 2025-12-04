@@ -278,17 +278,15 @@ mod tests {
             .iter()
             .find(|span| matches!(span.inner(), Instruction::U32WrappingSub))
             .expect("u32wrapping_sub present");
-        let u32_sub_range = span_to_range(&sources, u32_sub_inst.span()).expect("u32wrapping_sub range");
+        let u32_sub_range =
+            span_to_range(&sources, u32_sub_inst.span()).expect("u32wrapping_sub range");
         let u32_sub_label = lenses
             .iter()
             .find(|lens| lens.range == u32_sub_range)
             .and_then(|lens| lens.command.as_ref())
             .map(|cmd| cmd.title.clone())
             .expect("label for u32wrapping_sub");
-        assert_eq!(
-            u32_sub_label,
-            "[a, b, ...] → [b - a, ...] (net effect: -1)"
-        );
+        assert_eq!(u32_sub_label, "[a, b, ...] → [b - a, ...] (net effect: -1)");
     }
 
     #[test]

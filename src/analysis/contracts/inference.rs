@@ -24,13 +24,14 @@ use crate::symbol_path::SymbolPath;
 use crate::symbol_resolution::SymbolResolver;
 
 use super::super::abstract_interpretation::{AbstractState, SymbolicExpr};
+use super::super::call_effect::{resolve_call_effect, CallEffect};
 use super::super::call_graph::{CallGraph, TopologicalNode};
-use super::super::static_effect::StackLike;
+use super::super::dispatcher::{actions_for, Action, SourceKind};
+use super::super::static_effect::{apply_stack_manipulation, StackLike, StackLikeResult};
 use super::store::ContractStore;
 use super::types::{
     InputKind, OutputKind, ProcContract, ProcSignature, StackEffect, ValidationBehavior,
 };
-use crate::analysis::static_effect::StaticEffect;
 use crate::analysis::types::Bounds;
 use crate::analysis::utils::push_imm_to_u64;
 use crate::analysis::while_loops::infer_while_bound;
@@ -399,55 +400,6 @@ impl<'a> SignatureAnalyzer<'a> {
         self.push_n(pushes, SymbolicExpr::Top);
     }
 
-    /// Duplicate element at position n to top (dup.n)
-    fn dup(&mut self, n: usize) {
-        self.abstract_state.ensure_depth(n + 1);
-        if let Some(expr) = self.abstract_state.peek(n) {
-            let cloned = expr.clone();
-            self.abstract_state.push(cloned);
-        }
-    }
-
-    /// Duplicate word at position n to top (dupw.n)
-    fn dupw(&mut self, n: usize) {
-        let start = n * 4;
-        self.abstract_state.ensure_depth(start + 4);
-        // Duplicate 4 elements from word n to top
-        for i in 0..4 {
-            if let Some(expr) = self.abstract_state.peek(start + 3 - i) {
-                let cloned = expr.clone();
-                self.abstract_state.push(cloned);
-            }
-        }
-    }
-
-    /// Swap word 0 (top) with word at word_offset (swapw.N)
-    fn swapw(&mut self, word_offset: usize) {
-        let start = word_offset * 4;
-        self.abstract_state.ensure_depth(start + 4);
-        for i in 0..4 {
-            self.abstract_state.swap(i, start + i);
-        }
-    }
-
-    /// Move word at position n to top (movupw.n)
-    fn movupw(&mut self, n: usize) {
-        let start = n * 4;
-        // movupw moves 4 elements together
-        for _ in 0..4 {
-            self.abstract_state.movup(start);
-        }
-    }
-
-    /// Move top word to position n (movdnw.n)
-    fn movdnw(&mut self, n: usize) {
-        let start = n * 4;
-        // movdnw moves 4 elements together
-        for _ in 0..4 {
-            self.abstract_state.movdn(start);
-        }
-    }
-
     // ═══════════════════════════════════════════════════════════════════════
     // Memory operation detection for input signature inference
     // ═══════════════════════════════════════════════════════════════════════
@@ -537,6 +489,53 @@ impl<'a> SignatureAnalyzer<'a> {
         self.bounds_stack.last().and_then(|b| b.as_const())
     }
 
+    /// Apply dispatcher actions as generic pop/push effects.
+    fn apply_actions(&mut self, inst: &Instruction) {
+        let actions = actions_for(inst);
+        let mut saw_unknown = false;
+        for action in actions {
+            match action {
+                Action::Pop(n) => {
+                    self.pop_n(n);
+                    for _ in 0..n {
+                        self.pop_bounds();
+                    }
+                }
+                Action::Push { count, kind } => {
+                    let (expr, bounds) = match kind {
+                        SourceKind::Advice => (SymbolicExpr::Advice, Bounds::Field),
+                        SourceKind::Literal => (SymbolicExpr::Constant(0), Bounds::Const(0)),
+                        SourceKind::Memory => (
+                            SymbolicExpr::MemoryLoad {
+                                address: Box::new(SymbolicExpr::Top),
+                            },
+                            Bounds::Field,
+                        ),
+                        SourceKind::Merkle => (
+                            SymbolicExpr::MemoryLoad {
+                                address: Box::new(SymbolicExpr::Top),
+                            },
+                            Bounds::Field,
+                        ),
+                        SourceKind::StackCopy | SourceKind::Derived => {
+                            (SymbolicExpr::Top, Bounds::Field)
+                        }
+                    };
+                    self.push_n(count, expr);
+                    for _ in 0..count {
+                        self.push_bounds(bounds.clone());
+                    }
+                }
+                Action::Stack(_) => {} // handled by apply_stack_manipulation already
+                Action::Unknown => saw_unknown = true,
+            }
+        }
+
+        if saw_unknown {
+            self.unknown_effect = true;
+        }
+    }
+
     /// Compute stack effect of a block without modifying this analyzer's state.
     /// Also returns the input usage detected within the block.
     fn compute_block_effect(&self, block: &Block) -> Option<BlockAnalysisResult> {
@@ -591,31 +590,19 @@ impl<'a> SignatureAnalyzer<'a> {
 
     /// Handle procedure call - apply transitive stack effect and propagate address usage.
     fn handle_procedure_call(&mut self, target: &InvocationTarget) {
-        // MAST root calls have unknown effect
-        if matches!(target, InvocationTarget::MastRoot(_)) {
-            self.unknown_effect = true;
-            return;
-        }
+        // Resolve contract for signature propagation (may be None).
+        let resolved = self.resolver.resolve_target(target);
+        let contract = resolved
+            .as_ref()
+            .and_then(|p| self.contracts.and_then(|s| s.get(p)));
 
-        // Look up the contract using the resolved fully-qualified path
-        let contract = self.contracts.and_then(|store| {
-            let resolved = self.resolver.resolve_target(target)?;
-            store.get(&resolved)
-        });
-
-        match contract.map(|c| &c.stack_effect) {
-            Some(StackEffect::Known { inputs, outputs }) => {
+        match resolve_call_effect(Some(self.resolver), self.contracts, target) {
+            CallEffect::Known { inputs, outputs } => {
                 // Propagate address usage from callee to our inputs
                 if let Some(sig) = contract.and_then(|c| c.signature.as_ref()) {
-                    // Ensure we have enough depth to peek at argument positions
                     self.abstract_state.ensure_depth(sig.inputs.len());
-
-                    // Check each input parameter of the callee
-                    // Callee's input i corresponds to stack position i
-                    // (input 0 is at top of stack, input 1 is below, etc.)
                     for (i, kind) in sig.inputs.iter().enumerate() {
                         if let Some(arg_expr) = self.abstract_state.peek(i) {
-                            // If we're passing an input to an address parameter, propagate
                             if let Some(our_input) = expr_input_position(arg_expr) {
                                 if kind.is_output() {
                                     self.record_input_write(our_input);
@@ -628,17 +615,14 @@ impl<'a> SignatureAnalyzer<'a> {
                     }
                 }
 
-                // Apply stack effect
-                self.pop_n(*inputs);
-                self.push_n(*outputs, SymbolicExpr::Top);
+                self.pop_n(inputs);
+                self.push_n(outputs, SymbolicExpr::Top);
             }
-            Some(StackEffect::KnownInputs { inputs }) => {
-                // We know inputs but not outputs - apply inputs, mark outputs unknown
-                self.pop_n(*inputs);
+            CallEffect::KnownInputs { inputs } => {
+                self.pop_n(inputs);
                 self.unknown_effect = true;
             }
-            Some(StackEffect::Unknown) | None => {
-                // Unknown effect - mark as unknown
+            CallEffect::Unknown => {
                 self.unknown_effect = true;
             }
         }
@@ -690,6 +674,22 @@ impl<'a> SignatureAnalyzer<'a> {
         // Check for memory operations to infer input signatures (before applying stack effects)
         self.check_memory_operation(inst);
 
+        // Fast-path: pure stack manipulation handled by shared helper.
+        if let StackLikeResult::Applied = apply_stack_manipulation(&mut self.abstract_state, inst) {
+            match inst {
+                Instruction::Drop => {
+                    self.pop_bounds();
+                }
+                Instruction::DropW => {
+                    for _ in 0..4 {
+                        self.pop_bounds();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Track stack effects with proper provenance
         match inst {
             // ─────────────────────────────────────────────────────────────────
@@ -711,12 +711,16 @@ impl<'a> SignatureAnalyzer<'a> {
             // ─────────────────────────────────────────────────────────────────
             // STARK/complex operations - mark as unknown
             // ─────────────────────────────────────────────────────────────────
-            Instruction::FriExt2Fold4
-            | Instruction::HornerBase
-            | Instruction::HornerExt
-            | Instruction::EvalCircuit
-            | Instruction::LogPrecompile
-            | Instruction::SysEvent(_) => {
+            Instruction::FriExt2Fold4 => {
+                self.unknown_effect = true;
+                return;
+            }
+            Instruction::HornerBase | Instruction::HornerExt => {
+                // Horner evaluation: consumes 16, produces 16 (stack-neutral)
+                self.apply_pop_push(16, 16);
+                return;
+            }
+            Instruction::EvalCircuit | Instruction::LogPrecompile | Instruction::SysEvent(_) => {
                 self.unknown_effect = true;
                 return;
             }
@@ -804,323 +808,6 @@ impl<'a> SignatureAnalyzer<'a> {
             }
 
             // ─────────────────────────────────────────────────────────────────
-            // Drop operations
-            // ─────────────────────────────────────────────────────────────────
-            Instruction::Drop => {
-                self.pop_one();
-                self.pop_bounds();
-                return;
-            }
-            Instruction::DropW => {
-                self.pop_n(4);
-                for _ in 0..4 {
-                    self.pop_bounds();
-                }
-                return;
-            }
-
-            // ─────────────────────────────────────────────────────────────────
-            // Dup operations - preserve symbolic expressions
-            // ─────────────────────────────────────────────────────────────────
-            Instruction::Dup0 => {
-                self.dup(0);
-                return;
-            }
-            Instruction::Dup1 => {
-                self.dup(1);
-                return;
-            }
-            Instruction::Dup2 => {
-                self.dup(2);
-                return;
-            }
-            Instruction::Dup3 => {
-                self.dup(3);
-                return;
-            }
-            Instruction::Dup4 => {
-                self.dup(4);
-                return;
-            }
-            Instruction::Dup5 => {
-                self.dup(5);
-                return;
-            }
-            Instruction::Dup6 => {
-                self.dup(6);
-                return;
-            }
-            Instruction::Dup7 => {
-                self.dup(7);
-                return;
-            }
-            Instruction::Dup8 => {
-                self.dup(8);
-                return;
-            }
-            Instruction::Dup9 => {
-                self.dup(9);
-                return;
-            }
-            Instruction::Dup10 => {
-                self.dup(10);
-                return;
-            }
-            Instruction::Dup11 => {
-                self.dup(11);
-                return;
-            }
-            Instruction::Dup12 => {
-                self.dup(12);
-                return;
-            }
-            Instruction::Dup13 => {
-                self.dup(13);
-                return;
-            }
-            Instruction::Dup14 => {
-                self.dup(14);
-                return;
-            }
-            Instruction::Dup15 => {
-                self.dup(15);
-                return;
-            }
-            Instruction::DupW0 => {
-                self.dupw(0);
-                return;
-            }
-            Instruction::DupW1 => {
-                self.dupw(1);
-                return;
-            }
-            Instruction::DupW2 => {
-                self.dupw(2);
-                return;
-            }
-            Instruction::DupW3 => {
-                self.dupw(3);
-                return;
-            }
-
-            // ─────────────────────────────────────────────────────────────────
-            // Swap operations - preserve symbolic expressions through swap
-            // ─────────────────────────────────────────────────────────────────
-            Instruction::Swap1 => {
-                self.abstract_state.swap(0, 1);
-                return;
-            }
-            Instruction::Swap2 => {
-                self.abstract_state.swap(0, 2);
-                return;
-            }
-            Instruction::Swap3 => {
-                self.abstract_state.swap(0, 3);
-                return;
-            }
-            Instruction::Swap4 => {
-                self.abstract_state.swap(0, 4);
-                return;
-            }
-            Instruction::Swap5 => {
-                self.abstract_state.swap(0, 5);
-                return;
-            }
-            Instruction::Swap6 => {
-                self.abstract_state.swap(0, 6);
-                return;
-            }
-            Instruction::Swap7 => {
-                self.abstract_state.swap(0, 7);
-                return;
-            }
-            Instruction::Swap8 => {
-                self.abstract_state.swap(0, 8);
-                return;
-            }
-            Instruction::Swap9 => {
-                self.abstract_state.swap(0, 9);
-                return;
-            }
-            Instruction::Swap10 => {
-                self.abstract_state.swap(0, 10);
-                return;
-            }
-            Instruction::Swap11 => {
-                self.abstract_state.swap(0, 11);
-                return;
-            }
-            Instruction::Swap12 => {
-                self.abstract_state.swap(0, 12);
-                return;
-            }
-            Instruction::Swap13 => {
-                self.abstract_state.swap(0, 13);
-                return;
-            }
-            Instruction::Swap14 => {
-                self.abstract_state.swap(0, 14);
-                return;
-            }
-            Instruction::Swap15 => {
-                self.abstract_state.swap(0, 15);
-                return;
-            }
-            Instruction::SwapW1 => {
-                self.swapw(1);
-                return;
-            }
-            Instruction::SwapW2 => {
-                self.swapw(2);
-                return;
-            }
-            Instruction::SwapW3 => {
-                self.swapw(3);
-                return;
-            }
-            Instruction::SwapDw => {
-                // Swap double words [0..8] with [8..16]
-                self.abstract_state.ensure_depth(16);
-                for i in 0..8 {
-                    self.abstract_state.swap(i, 8 + i);
-                }
-                return;
-            }
-
-            // ─────────────────────────────────────────────────────────────────
-            // Move operations - preserve symbolic expressions
-            // ─────────────────────────────────────────────────────────────────
-            Instruction::MovUp2 => {
-                self.abstract_state.movup(2);
-                return;
-            }
-            Instruction::MovUp3 => {
-                self.abstract_state.movup(3);
-                return;
-            }
-            Instruction::MovUp4 => {
-                self.abstract_state.movup(4);
-                return;
-            }
-            Instruction::MovUp5 => {
-                self.abstract_state.movup(5);
-                return;
-            }
-            Instruction::MovUp6 => {
-                self.abstract_state.movup(6);
-                return;
-            }
-            Instruction::MovUp7 => {
-                self.abstract_state.movup(7);
-                return;
-            }
-            Instruction::MovUp8 => {
-                self.abstract_state.movup(8);
-                return;
-            }
-            Instruction::MovUp9 => {
-                self.abstract_state.movup(9);
-                return;
-            }
-            Instruction::MovUp10 => {
-                self.abstract_state.movup(10);
-                return;
-            }
-            Instruction::MovUp11 => {
-                self.abstract_state.movup(11);
-                return;
-            }
-            Instruction::MovUp12 => {
-                self.abstract_state.movup(12);
-                return;
-            }
-            Instruction::MovUp13 => {
-                self.abstract_state.movup(13);
-                return;
-            }
-            Instruction::MovUp14 => {
-                self.abstract_state.movup(14);
-                return;
-            }
-            Instruction::MovUp15 => {
-                self.abstract_state.movup(15);
-                return;
-            }
-            Instruction::MovUpW2 => {
-                self.movupw(2);
-                return;
-            }
-            Instruction::MovUpW3 => {
-                self.movupw(3);
-                return;
-            }
-
-            Instruction::MovDn2 => {
-                self.abstract_state.movdn(2);
-                return;
-            }
-            Instruction::MovDn3 => {
-                self.abstract_state.movdn(3);
-                return;
-            }
-            Instruction::MovDn4 => {
-                self.abstract_state.movdn(4);
-                return;
-            }
-            Instruction::MovDn5 => {
-                self.abstract_state.movdn(5);
-                return;
-            }
-            Instruction::MovDn6 => {
-                self.abstract_state.movdn(6);
-                return;
-            }
-            Instruction::MovDn7 => {
-                self.abstract_state.movdn(7);
-                return;
-            }
-            Instruction::MovDn8 => {
-                self.abstract_state.movdn(8);
-                return;
-            }
-            Instruction::MovDn9 => {
-                self.abstract_state.movdn(9);
-                return;
-            }
-            Instruction::MovDn10 => {
-                self.abstract_state.movdn(10);
-                return;
-            }
-            Instruction::MovDn11 => {
-                self.abstract_state.movdn(11);
-                return;
-            }
-            Instruction::MovDn12 => {
-                self.abstract_state.movdn(12);
-                return;
-            }
-            Instruction::MovDn13 => {
-                self.abstract_state.movdn(13);
-                return;
-            }
-            Instruction::MovDn14 => {
-                self.abstract_state.movdn(14);
-                return;
-            }
-            Instruction::MovDn15 => {
-                self.abstract_state.movdn(15);
-                return;
-            }
-            Instruction::MovDnW2 => {
-                self.movdnw(2);
-                return;
-            }
-            Instruction::MovDnW3 => {
-                self.movdnw(3);
-                return;
-            }
-
-            // ─────────────────────────────────────────────────────────────────
             // Reverse operations - these rearrange in place but need inputs
             // ─────────────────────────────────────────────────────────────────
             Instruction::Reversew => {
@@ -1157,14 +844,12 @@ impl<'a> SignatureAnalyzer<'a> {
                 return;
             }
 
-            // All other instructions - use static_effect()
+            // All other instructions - use dispatcher actions
             _ => {}
         }
 
-        // Use static_effect() for all remaining instructions
-        if let Some(effect) = StaticEffect::of(inst) {
-            self.apply_pop_push(effect.pops as usize, effect.pushes as usize);
-        }
+        // Use dispatcher actions for all remaining instructions
+        self.apply_actions(inst);
     }
 }
 

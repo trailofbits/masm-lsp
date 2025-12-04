@@ -21,11 +21,14 @@
 
 pub mod abstract_interpretation;
 pub mod analyzer;
+pub mod call_effect;
 pub mod call_graph;
 pub mod checker;
 pub mod checkers;
 pub mod contracts;
+pub mod dispatcher;
 pub mod locals;
+pub mod semantics;
 pub mod stack_effects;
 pub mod static_effect;
 pub mod types;
@@ -37,8 +40,8 @@ pub use analyzer::analyze_module;
 
 // Re-export contract types for workspace integration
 pub use contracts::{
-    infer_module_contracts, parse_procedure_signature, ContractStore, ParsedSignature,
-    ProcContract, StackEffect, ValidationBehavior,
+    infer_module_contracts, infer_module_contracts_with_store, parse_procedure_signature,
+    ContractStore, ParsedSignature, ProcContract, StackEffect, ValidationBehavior,
 };
 
 // Re-export core types for external use

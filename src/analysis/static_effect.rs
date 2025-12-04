@@ -2,9 +2,9 @@
 //!
 //! This module provides:
 //! - A unified `StackLike` trait for stack manipulation operations
-//! - Static stack effect tables for fast-path analysis
+//! - Static stack effect facade built on generated semantics
 
-use miden_assembly_syntax::ast::{Immediate, Instruction};
+use miden_assembly_syntax::ast::Instruction;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Static Stack Effects
@@ -185,282 +185,7 @@ impl StaticEffect {
     /// Returns `None` for instructions with dynamic effects (procedure calls,
     /// dynamic dispatch, etc.) that cannot be determined statically.
     pub fn of(inst: &Instruction) -> Option<StaticEffect> {
-        use Instruction::*;
-
-        Some(match inst {
-            // ─────────────────────────────────────────────────────────────────────
-            // Stack manipulation
-            // ─────────────────────────────────────────────────────────────────────
-            Drop => StaticEffect::new(1, 0),
-            DropW => StaticEffect::new(4, 0),
-
-            // Dup: pop 0, push 1 (copy from position n)
-            Dup0 | Dup1 | Dup2 | Dup3 | Dup4 | Dup5 | Dup6 | Dup7 | Dup8 | Dup9 | Dup10 | Dup11
-            | Dup12 | Dup13 | Dup14 | Dup15 => StaticEffect::new(0, 1),
-
-            // DupW: pop 0, push 4 (copy word from position n)
-            DupW0 | DupW1 | DupW2 | DupW3 => StaticEffect::new(0, 4),
-
-            // Swap: pop 0, push 0 (reorder only)
-            Swap1 | Swap2 | Swap3 | Swap4 | Swap5 | Swap6 | Swap7 | Swap8 | Swap9 | Swap10
-            | Swap11 | Swap12 | Swap13 | Swap14 | Swap15 => StaticEffect::new(0, 0),
-
-            // SwapW: swap words (reorder only)
-            SwapW1 | SwapW2 | SwapW3 | SwapDw => StaticEffect::new(0, 0),
-
-            // MovUp/MovDn: reorder only
-            MovUp2 | MovUp3 | MovUp4 | MovUp5 | MovUp6 | MovUp7 | MovUp8 | MovUp9 | MovUp10
-            | MovUp11 | MovUp12 | MovUp13 | MovUp14 | MovUp15 => StaticEffect::new(0, 0),
-
-            MovDn2 | MovDn3 | MovDn4 | MovDn5 | MovDn6 | MovDn7 | MovDn8 | MovDn9 | MovDn10
-            | MovDn11 | MovDn12 | MovDn13 | MovDn14 | MovDn15 => StaticEffect::new(0, 0),
-
-            // MovUpW/MovDnW: reorder words
-            MovUpW2 | MovUpW3 => StaticEffect::new(0, 0),
-            MovDnW2 | MovDnW3 => StaticEffect::new(0, 0),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Arithmetic operations
-            // ─────────────────────────────────────────────────────────────────────
-
-            // Binary: pop 2, push 1
-            Add | Sub | Mul | Div | And | Or | Xor => StaticEffect::new(2, 1),
-
-            // Binary with immediate: pop 1, push 1
-            AddImm(_) | SubImm(_) | MulImm(_) | DivImm(_) | ExpImm(_) => StaticEffect::new(1, 1),
-
-            // Unary: pop 1, push 1
-            Neg | Inv | Incr | Not | IsOdd | Pow2 | ILog2 => StaticEffect::new(1, 1),
-
-            // Exp: pop 2, push 1
-            Exp => StaticEffect::new(2, 1),
-            ExpBitLength(_) => StaticEffect::new(2, 1),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Comparison operations
-            // ─────────────────────────────────────────────────────────────────────
-
-            // Binary comparisons: pop 2, push 1
-            Eq | Neq | Lt | Lte | Gt | Gte => StaticEffect::new(2, 1),
-
-            // Comparisons with immediate: pop 1, push 1
-            EqImm(_) | NeqImm(_) => StaticEffect::new(1, 1),
-
-            // Word equality: pop 8 (two words), push 1
-            // Eqw compares two words: requires 8 elements, pushes flag (net +1)
-            Eqw => StaticEffect::new(8, 9),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // u32 operations
-            // ─────────────────────────────────────────────────────────────────────
-
-            // Assertions (no stack change, may trap)
-            U32Assert
-            | U32Assert2
-            | U32AssertW
-            | U32AssertWithError(_)
-            | U32Assert2WithError(_)
-            | U32AssertWWithError(_) => StaticEffect::new(0, 0),
-
-            // Test: push bool without consuming value
-            U32Test => StaticEffect::new(0, 1),
-            U32TestW => StaticEffect::new(0, 1),
-
-            // Wrapping arithmetic: pop 2, push 1
-            U32WrappingAdd | U32WrappingSub | U32WrappingMul => StaticEffect::new(2, 1),
-            U32WrappingAddImm(_) | U32WrappingSubImm(_) | U32WrappingMulImm(_) => {
-                StaticEffect::new(1, 1)
-            }
-
-            // Overflowing arithmetic: pop 2, push 2 (result + overflow flag)
-            U32OverflowingAdd | U32OverflowingSub | U32OverflowingMul => StaticEffect::new(2, 2),
-            U32OverflowingAddImm(_) | U32OverflowingSubImm(_) | U32OverflowingMulImm(_) => {
-                StaticEffect::new(1, 2)
-            }
-
-            // OverflowingAdd3/MAdd: pop 3, push 2
-            U32OverflowingAdd3 | U32OverflowingMadd => StaticEffect::new(3, 2),
-
-            // WrappingAdd3/MAdd: pop 3, push 1
-            U32WrappingAdd3 | U32WrappingMadd => StaticEffect::new(3, 1),
-
-            // Division: DivMod returns both quotient and remainder, Div/Mod return one value
-            U32DivMod => StaticEffect::new(2, 2),
-            U32Div | U32Mod => StaticEffect::new(2, 1),
-            U32DivModImm(_) => StaticEffect::new(1, 2),
-            U32DivImm(_) | U32ModImm(_) => StaticEffect::new(1, 1),
-
-            // Split: pop 1, push 2 (high, low)
-            U32Split => StaticEffect::new(1, 2),
-
-            // Cast: pop 1, push 1
-            U32Cast => StaticEffect::new(1, 1),
-
-            // Bitwise: pop 2, push 1
-            U32And | U32Or | U32Xor => StaticEffect::new(2, 1),
-
-            // Bitwise unary: pop 1, push 1
-            U32Not => StaticEffect::new(1, 1),
-
-            // Shifts: pop 2, push 1
-            U32Shl | U32Shr | U32Rotl | U32Rotr => StaticEffect::new(2, 1),
-            U32ShlImm(_) | U32ShrImm(_) | U32RotlImm(_) | U32RotrImm(_) => StaticEffect::new(1, 1),
-
-            // Popcount/leading/trailing: pop 1, push 1
-            U32Popcnt | U32Clz | U32Ctz | U32Clo | U32Cto => StaticEffect::new(1, 1),
-
-            // u32 comparisons: pop 2, push 1
-            U32Lt | U32Lte | U32Gt | U32Gte | U32Min | U32Max => StaticEffect::new(2, 1),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Push operations
-            // ─────────────────────────────────────────────────────────────────────
-            Push(_) => StaticEffect::new(0, 1),
-            PushFeltList(values) => StaticEffect::new(0, values.len()),
-            PadW => StaticEffect::new(0, 4),
-            PushSlice(_, range) => StaticEffect::new(0, range.len()),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Memory operations
-            // ─────────────────────────────────────────────────────────────────────
-
-            // Single element load: pop 1 (addr), push 1 (value)
-            MemLoad => StaticEffect::new(1, 1),
-            MemLoadImm(_) => StaticEffect::new(0, 1),
-
-            // Single element store: pop 2 (addr, value), push 0
-            MemStore => StaticEffect::new(2, 0),
-            MemStoreImm(_) => StaticEffect::new(1, 0),
-
-            // Word load: [A, a, ...] -> [V, ...] where A is word to overwrite, a is addr, V is loaded
-            // Pop 5 (4 word elements + 1 addr), push 4 (loaded word)
-            MemLoadWBe | MemLoadWLe => StaticEffect::new(5, 4),
-            // Immediate: [A, ...] -> [V, ...] - pop 4 (word to overwrite), push 4 (loaded word)
-            MemLoadWBeImm(_) | MemLoadWLeImm(_) => StaticEffect::new(4, 4),
-
-            // Word store: pop 5 (addr + word), push 0
-            MemStoreWBe | MemStoreWLe => StaticEffect::new(5, 0),
-            MemStoreWBeImm(_) | MemStoreWLeImm(_) => StaticEffect::new(4, 0),
-
-            // Memstream: pop 13 (addr + 12 state), push 13
-            MemStream => StaticEffect::new(13, 13),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Local memory operations
-            // ─────────────────────────────────────────────────────────────────────
-            LocLoad(_) => StaticEffect::new(0, 1),
-            LocStore(_) => StaticEffect::new(1, 0),
-            LocLoadWBe(_) | LocLoadWLe(_) => StaticEffect::new(0, 4),
-            LocStoreWBe(_) | LocStoreWLe(_) => StaticEffect::new(4, 0),
-            Locaddr(_) => StaticEffect::new(0, 1),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Advice operations
-            // ─────────────────────────────────────────────────────────────────────
-            AdvPush(n) => {
-                let count = match n {
-                    Immediate::Value(v) => v.into_inner() as usize,
-                    _ => return None, // Unknown count
-                };
-                StaticEffect::new(0, count)
-            }
-            AdvLoadW => StaticEffect::new(4, 4), // Pop address word, push value word
-            AdvPipe => StaticEffect::new(8, 8),  // Transform hasher state
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Cryptographic operations
-            // ─────────────────────────────────────────────────────────────────────
-            Hash => StaticEffect::new(4, 4),
-            HMerge => StaticEffect::new(8, 4),
-            HPerm => StaticEffect::new(12, 12),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Merkle tree operations
-            // ─────────────────────────────────────────────────────────────────────
-            MTreeGet => StaticEffect::new(6, 4), // Pop (depth, index, root), push value
-            MTreeSet => StaticEffect::new(10, 4), // Pop (depth, index, old_root, value), push new_root
-            MTreeMerge => StaticEffect::new(8, 4),
-            MTreeVerify | MTreeVerifyWithError(_) => StaticEffect::new(0, 0),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Extension field operations (ext2)
-            // ─────────────────────────────────────────────────────────────────────
-
-            // Binary ext2: pop 4, push 2
-            Ext2Add | Ext2Sub | Ext2Mul | Ext2Div => StaticEffect::new(4, 2),
-
-            // Unary ext2: pop 2, push 2
-            Ext2Neg | Ext2Inv => StaticEffect::new(2, 2),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Assertions
-            // ─────────────────────────────────────────────────────────────────────
-            Assert | AssertWithError(_) => StaticEffect::new(1, 0),
-            AssertEq | AssertEqWithError(_) => StaticEffect::new(2, 0),
-            Assertz | AssertzWithError(_) => StaticEffect::new(1, 0),
-            AssertEqw | AssertEqwWithError(_) => StaticEffect::new(8, 0),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Conditional operations
-            // ─────────────────────────────────────────────────────────────────────
-
-            // CSwap: pop condition + 2 values, push 2 values (possibly swapped)
-            CSwap => StaticEffect::new(3, 2),
-            // CSwapW: pop condition + 2 words (8 elements), push 2 words (possibly swapped)
-            CSwapW => StaticEffect::new(9, 8),
-            // CDrop: pop condition + 2 values, push 1 (selected value)
-            CDrop => StaticEffect::new(3, 1),
-            // CDropW: pop condition + 2 words (8 elements), push 1 word (selected)
-            CDropW => StaticEffect::new(9, 4),
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Other operations
-            // ─────────────────────────────────────────────────────────────────────
-            Sdepth => StaticEffect::new(0, 1),
-            Clk => StaticEffect::new(0, 1),
-            // Caller overwrites top word with caller hash (net 0)
-            Caller => StaticEffect::new(4, 4),
-            ProcRef(_) => StaticEffect::new(0, 4), // Push procedure hash
-
-            // Reverse operations (reorder only)
-            Reversew => StaticEffect::new(0, 0),
-            Reversedw => StaticEffect::new(0, 0),
-
-            // No-ops
-            Nop | Breakpoint | Debug(_) | Emit | EmitImm(_) | Trace(_) | SysEvent(_) => {
-                StaticEffect::new(0, 0)
-            }
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Procedure calls - DYNAMIC (unknown effects)
-            // ─────────────────────────────────────────────────────────────────────
-            Exec(_) | Call(_) | SysCall(_) => return None,
-            DynExec | DynCall => return None,
-
-            // ─────────────────────────────────────────────────────────────────────
-            // Complex STARK operations
-            // ─────────────────────────────────────────────────────────────────────
-
-            // horner_eval_base: reads c7..c0 (8), five garbage slots, alpha_addr, acc1, acc0
-            // Updates acc in place. Stack depth unchanged but positions 14-15 modified.
-            // For decompilation purposes, we model this as consuming and producing 16 elements.
-            HornerBase => StaticEffect::new(16, 16),
-
-            // horner_eval_ext: same pattern as horner_eval_base
-            HornerExt => StaticEffect::new(16, 16),
-
-            // fri_ext2fold4: [v7..v0, f_pos, d_seg, poe, e1, e0, a1, a0, layer_ptr, rem_ptr, ...]
-            // Outputs 16 elements with stack shift left by 1 (pulls from overflow)
-            FriExt2Fold4 => StaticEffect::new(17, 16),
-
-            // eval_circuit: [ptr, n_read, n_eval, ...] -> [ptr, n_read, n_eval, ...]
-            // Stack unchanged
-            EvalCircuit => StaticEffect::new(3, 3),
-
-            // log_precompile: [COMM (4), TAG (4), ...] -> [R1 (4), R0 (4), CAP_NEXT (4), ...]
-            // Pops 8, pushes 12
-            LogPrecompile => StaticEffect::new(8, 12),
-        })
+        crate::analysis::semantics::semantics_of(inst).map(|s| StaticEffect::new(s.pops, s.pushes))
     }
 }
 
@@ -675,6 +400,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instruction_docs::get_instruction_info;
 
     #[test]
     fn test_static_effect_arithmetic() {
@@ -723,5 +449,54 @@ mod tests {
         assert_eq!(StaticEffect::new(2, 1).net(), -1);
         assert_eq!(StaticEffect::new(1, 2).net(), 1);
         assert_eq!(StaticEffect::new(2, 2).net(), 0);
+    }
+
+    #[test]
+    fn docs_stack_shapes_match_effect_for_samples() {
+        let samples = [
+            Instruction::Add,
+            Instruction::Drop,
+            Instruction::Dup1,
+            Instruction::MemLoad,
+            Instruction::MemStore,
+        ];
+
+        for inst in samples {
+            let effect = StaticEffect::of(&inst).expect("static effect present");
+            let rendered = inst.to_string();
+            let info = get_instruction_info(&rendered).expect("docs entry");
+            let input_len = info
+                .stack_input
+                .trim_matches(['[', ']'])
+                .split(',')
+                .filter(|s| {
+                    let t = s.trim();
+                    !t.is_empty() && t != "..." && t.to_ascii_lowercase() != "stack"
+                })
+                .count();
+            let output_len = info
+                .stack_output
+                .trim_matches(['[', ']'])
+                .split(',')
+                .filter(|s| {
+                    let t = s.trim();
+                    !t.is_empty() && t != "..." && t.to_ascii_lowercase() != "stack"
+                })
+                .count();
+            assert!(
+                input_len >= effect.pops,
+                "doc stack_input len mismatch for {} (docs: {}, effect: {})",
+                rendered,
+                input_len,
+                effect.pops
+            );
+            assert!(
+                output_len >= effect.pushes,
+                "doc stack_output len mismatch for {} (docs: {}, effect: {})",
+                rendered,
+                output_len,
+                effect.pushes
+            );
+        }
     }
 }

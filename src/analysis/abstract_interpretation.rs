@@ -33,8 +33,10 @@ use std::fmt;
 
 use miden_assembly_syntax::ast::{Block, Instruction, InvocationTarget, Op};
 
-use super::contracts::{ContractStore, StackEffect};
-use super::static_effect::StackLike;
+use super::call_effect::{resolve_call_effect, CallEffect};
+use super::contracts::ContractStore;
+use super::dispatcher::{actions_for, Action};
+use super::static_effect::{apply_stack_manipulation, StackLike, StackOp};
 use crate::symbol_resolution::SymbolResolver;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -133,6 +135,12 @@ pub enum SymbolicExpr {
     /// Unknown value - we've lost track of what this is.
     /// This is the top element (⊤) of our lattice.
     Top,
+}
+
+impl Default for SymbolicExpr {
+    fn default() -> Self {
+        SymbolicExpr::Top
+    }
 }
 
 /// Binary operation kinds for symbolic expressions.
@@ -269,7 +277,20 @@ impl SymbolicExpr {
             // ParametricInput → add another term
             SymbolicExpr::ParametricInput { base, loop_terms } => {
                 let mut new_terms = loop_terms.clone();
-                new_terms.push(LoopTerm::new(stride, loop_depth));
+                let mut merged = false;
+                for term in new_terms.iter_mut() {
+                    if term.loop_depth == loop_depth {
+                        term.stride += stride;
+                        merged = true;
+                        break;
+                    }
+                }
+                if !merged {
+                    new_terms.push(LoopTerm::new(stride, loop_depth));
+                }
+                // Drop zero-coefficient terms and keep stable ordering by loop depth
+                new_terms.retain(|t| t.stride != 0);
+                new_terms.sort_by_key(|t| t.loop_depth);
                 SymbolicExpr::ParametricInput {
                     base: *base,
                     loop_terms: new_terms,
@@ -963,33 +984,6 @@ impl Default for AbstractStateSnapshot {
 // Transfer Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Try to resolve a procedure call's stack effect from the contract store.
-///
-/// Returns `Some((inputs, outputs))` if the procedure has a known stack effect,
-/// `None` otherwise.
-fn resolve_procedure_call_effect(
-    target: &InvocationTarget,
-    resolver: Option<&SymbolResolver>,
-    contracts: Option<&ContractStore>,
-) -> Option<(usize, usize)> {
-    let store = contracts?;
-    let resolver = resolver?;
-
-    // MAST roots can't be resolved symbolically
-    if matches!(target, InvocationTarget::MastRoot(_)) {
-        return None;
-    }
-
-    // Use the unified symbol resolution to get the fully-qualified path
-    let resolved_path = resolver.resolve_target(target)?;
-    let contract = store.get(&resolved_path)?;
-
-    match &contract.stack_effect {
-        StackEffect::Known { inputs, outputs } => Some((*inputs, *outputs)),
-        _ => None,
-    }
-}
-
 /// Apply the transfer function for an instruction to the abstract state.
 ///
 /// Returns a description of the operation for pseudocode generation, if any.
@@ -1018,213 +1012,23 @@ pub fn apply_transfer_event(
         return TransferEvent::None;
     }
 
+    // Fast-path: pure stack manipulation via shared helper.
+    if let Some(stack_op) = StackOp::of(inst) {
+        // Preserve dup events for pseudocode; other stack ops produce no event.
+        if let StackOp::Dup(n) = stack_op {
+            state.ensure_depth(n + 1);
+            let value = state.peek(n).cloned().unwrap_or(SymbolicExpr::Top);
+            let _ = apply_stack_manipulation(state, inst);
+            return TransferEvent::Dup {
+                source_pos: n,
+                value,
+            };
+        }
+        let _ = apply_stack_manipulation(state, inst);
+        return TransferEvent::None;
+    }
+
     match inst {
-        // ─────────────────────────────────────────────────────────────────────
-        // Stack manipulation
-        // ─────────────────────────────────────────────────────────────────────
-        Instruction::Drop => {
-            state.pop();
-            TransferEvent::None
-        }
-        Instruction::DropW => {
-            for _ in 0..4 {
-                state.pop();
-            }
-            TransferEvent::None
-        }
-
-        Instruction::Dup0 => transfer_dup_event(state, 0),
-        Instruction::Dup1 => transfer_dup_event(state, 1),
-        Instruction::Dup2 => transfer_dup_event(state, 2),
-        Instruction::Dup3 => transfer_dup_event(state, 3),
-        Instruction::Dup4 => transfer_dup_event(state, 4),
-        Instruction::Dup5 => transfer_dup_event(state, 5),
-        Instruction::Dup6 => transfer_dup_event(state, 6),
-        Instruction::Dup7 => transfer_dup_event(state, 7),
-        Instruction::Dup8 => transfer_dup_event(state, 8),
-        Instruction::Dup9 => transfer_dup_event(state, 9),
-        Instruction::Dup10 => transfer_dup_event(state, 10),
-        Instruction::Dup11 => transfer_dup_event(state, 11),
-        Instruction::Dup12 => transfer_dup_event(state, 12),
-        Instruction::Dup13 => transfer_dup_event(state, 13),
-        Instruction::Dup14 => transfer_dup_event(state, 14),
-        Instruction::Dup15 => transfer_dup_event(state, 15),
-
-        Instruction::Swap1 => {
-            state.swap(0, 1);
-            TransferEvent::None
-        }
-        Instruction::Swap2 => {
-            state.swap(0, 2);
-            TransferEvent::None
-        }
-        Instruction::Swap3 => {
-            state.swap(0, 3);
-            TransferEvent::None
-        }
-        Instruction::Swap4 => {
-            state.swap(0, 4);
-            TransferEvent::None
-        }
-        Instruction::Swap5 => {
-            state.swap(0, 5);
-            TransferEvent::None
-        }
-        Instruction::Swap6 => {
-            state.swap(0, 6);
-            TransferEvent::None
-        }
-        Instruction::Swap7 => {
-            state.swap(0, 7);
-            TransferEvent::None
-        }
-        Instruction::Swap8 => {
-            state.swap(0, 8);
-            TransferEvent::None
-        }
-        Instruction::Swap9 => {
-            state.swap(0, 9);
-            TransferEvent::None
-        }
-        Instruction::Swap10 => {
-            state.swap(0, 10);
-            TransferEvent::None
-        }
-        Instruction::Swap11 => {
-            state.swap(0, 11);
-            TransferEvent::None
-        }
-        Instruction::Swap12 => {
-            state.swap(0, 12);
-            TransferEvent::None
-        }
-        Instruction::Swap13 => {
-            state.swap(0, 13);
-            TransferEvent::None
-        }
-        Instruction::Swap14 => {
-            state.swap(0, 14);
-            TransferEvent::None
-        }
-        Instruction::Swap15 => {
-            state.swap(0, 15);
-            TransferEvent::None
-        }
-
-        Instruction::MovUp2 => {
-            state.movup(2);
-            TransferEvent::None
-        }
-        Instruction::MovUp3 => {
-            state.movup(3);
-            TransferEvent::None
-        }
-        Instruction::MovUp4 => {
-            state.movup(4);
-            TransferEvent::None
-        }
-        Instruction::MovUp5 => {
-            state.movup(5);
-            TransferEvent::None
-        }
-        Instruction::MovUp6 => {
-            state.movup(6);
-            TransferEvent::None
-        }
-        Instruction::MovUp7 => {
-            state.movup(7);
-            TransferEvent::None
-        }
-        Instruction::MovUp8 => {
-            state.movup(8);
-            TransferEvent::None
-        }
-        Instruction::MovUp9 => {
-            state.movup(9);
-            TransferEvent::None
-        }
-        Instruction::MovUp10 => {
-            state.movup(10);
-            TransferEvent::None
-        }
-        Instruction::MovUp11 => {
-            state.movup(11);
-            TransferEvent::None
-        }
-        Instruction::MovUp12 => {
-            state.movup(12);
-            TransferEvent::None
-        }
-        Instruction::MovUp13 => {
-            state.movup(13);
-            TransferEvent::None
-        }
-        Instruction::MovUp14 => {
-            state.movup(14);
-            TransferEvent::None
-        }
-        Instruction::MovUp15 => {
-            state.movup(15);
-            TransferEvent::None
-        }
-
-        Instruction::MovDn2 => {
-            state.movdn(2);
-            TransferEvent::None
-        }
-        Instruction::MovDn3 => {
-            state.movdn(3);
-            TransferEvent::None
-        }
-        Instruction::MovDn4 => {
-            state.movdn(4);
-            TransferEvent::None
-        }
-        Instruction::MovDn5 => {
-            state.movdn(5);
-            TransferEvent::None
-        }
-        Instruction::MovDn6 => {
-            state.movdn(6);
-            TransferEvent::None
-        }
-        Instruction::MovDn7 => {
-            state.movdn(7);
-            TransferEvent::None
-        }
-        Instruction::MovDn8 => {
-            state.movdn(8);
-            TransferEvent::None
-        }
-        Instruction::MovDn9 => {
-            state.movdn(9);
-            TransferEvent::None
-        }
-        Instruction::MovDn10 => {
-            state.movdn(10);
-            TransferEvent::None
-        }
-        Instruction::MovDn11 => {
-            state.movdn(11);
-            TransferEvent::None
-        }
-        Instruction::MovDn12 => {
-            state.movdn(12);
-            TransferEvent::None
-        }
-        Instruction::MovDn13 => {
-            state.movdn(13);
-            TransferEvent::None
-        }
-        Instruction::MovDn14 => {
-            state.movdn(14);
-            TransferEvent::None
-        }
-        Instruction::MovDn15 => {
-            state.movdn(15);
-            TransferEvent::None
-        }
-
         // ─────────────────────────────────────────────────────────────────────
         // Arithmetic operations
         // ─────────────────────────────────────────────────────────────────────
@@ -1325,30 +1129,52 @@ pub fn apply_transfer_event(
         }
 
         // ─────────────────────────────────────────────────────────────────────
+        // STARK Horner operations - known stack-neutral effect (16 → 16)
+        // ─────────────────────────────────────────────────────────────────────
+        Instruction::HornerBase | Instruction::HornerExt => {
+            // Consume 16 inputs, push 16 abstract outputs (accumulators updated)
+            for _ in 0..16 {
+                let _ = state.pop();
+            }
+            for _ in 0..16 {
+                state.push(SymbolicExpr::Top);
+            }
+            TransferEvent::None
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
         // Static procedure calls - resolve via ContractStore if available
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Exec(target) | Instruction::Call(target) | Instruction::SysCall(target) => {
-            if let Some(effect) = resolve_procedure_call_effect(target, resolver, contracts) {
-                // Apply the known stack effect
-                for _ in 0..effect.0 {
-                    state.pop();
+            match resolve_call_effect(resolver, contracts, target) {
+                CallEffect::Known { inputs, outputs } => {
+                    for _ in 0..inputs {
+                        state.pop();
+                    }
+                    for _ in 0..outputs {
+                        state.push(SymbolicExpr::Top);
+                    }
+                    TransferEvent::None
                 }
-                for _ in 0..effect.1 {
-                    state.push(SymbolicExpr::Top);
+                CallEffect::KnownInputs { inputs } => {
+                    for _ in 0..inputs {
+                        state.pop();
+                    }
+                    state.fail("procedure has unknown outputs");
+                    TransferEvent::None
                 }
-                TransferEvent::None
-            } else {
-                // Can't resolve - fail tracking
-                let target_name = match target {
-                    InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
-                    InvocationTarget::Path(path) => path.inner().as_str().to_string(),
-                    InvocationTarget::MastRoot(_) => "<mast_root>".to_string(),
-                };
-                state.fail(&format!(
-                    "procedure '{}' has unknown stack effect",
-                    target_name
-                ));
-                TransferEvent::None
+                CallEffect::Unknown => {
+                    let target_name = match target {
+                        InvocationTarget::Symbol(ident) => ident.as_str().to_string(),
+                        InvocationTarget::Path(path) => path.inner().as_str().to_string(),
+                        InvocationTarget::MastRoot(_) => "<mast_root>".to_string(),
+                    };
+                    state.fail(&format!(
+                        "procedure '{}' has unknown stack effect",
+                        target_name
+                    ));
+                    TransferEvent::None
+                }
             }
         }
 
@@ -1363,37 +1189,46 @@ pub fn apply_transfer_event(
         // ─────────────────────────────────────────────────────────────────────
         // Default - use static stack effect if available
         // ─────────────────────────────────────────────────────────────────────
-        _ => {
-            use super::static_effect::StaticEffect;
-
-            // Try to get static stack effect for the instruction
-            if let Some(effect) = StaticEffect::of(inst) {
-                // Pop the correct number of inputs
-                for _ in 0..effect.pops {
-                    state.pop();
-                }
-                // Push Top for each output (we don't track the semantic meaning)
-                for _ in 0..effect.pushes {
-                    state.push(SymbolicExpr::Top);
-                }
-                TransferEvent::None
-            } else {
-                // No static effect - instruction has dynamic stack effect
-                state.fail(&format!("instruction {:?} has unknown stack effect", inst));
-                TransferEvent::None
-            }
-        }
+        _ => apply_actions_transfer(inst, state),
     }
 }
 
-/// State-only dup helper.
-fn transfer_dup_event(state: &mut AbstractState, n: usize) -> TransferEvent {
-    state.dup(n);
-    let expr = state.peek(0).cloned().unwrap_or(SymbolicExpr::Top);
-    TransferEvent::Dup {
-        source_pos: n,
-        value: expr,
+fn apply_actions_transfer(inst: &Instruction, state: &mut AbstractState) -> TransferEvent {
+    let actions = actions_for(inst);
+    let mut saw_unknown = false;
+    for action in actions {
+        match action {
+            Action::Pop(n) => {
+                for _ in 0..n {
+                    state.pop();
+                }
+            }
+            Action::Push { count, kind } => {
+                use crate::analysis::dispatcher::SourceKind;
+                let expr = match kind {
+                    SourceKind::Literal => SymbolicExpr::Constant(0),
+                    SourceKind::Advice => SymbolicExpr::Advice,
+                    SourceKind::Memory => SymbolicExpr::MemoryLoad {
+                        address: Box::new(SymbolicExpr::Top),
+                    },
+                    SourceKind::Merkle => SymbolicExpr::MemoryLoad {
+                        address: Box::new(SymbolicExpr::Top),
+                    },
+                    SourceKind::StackCopy | SourceKind::Derived => SymbolicExpr::Top,
+                };
+                for _ in 0..count {
+                    state.push(expr.clone());
+                }
+            }
+            Action::Stack(_) => {} // handled earlier
+            Action::Unknown => saw_unknown = true,
+        }
     }
+
+    if saw_unknown {
+        state.fail(&format!("instruction {:?} has unknown stack effect", inst));
+    }
+    TransferEvent::None
 }
 
 /// State-only binary op helper.
@@ -1604,6 +1439,32 @@ pub struct LoopAnalysis {
 /// too complex to analyze (due to exponential expression growth).
 const MAX_NEUTRAL_LOOP_ITERATIONS: usize = 16;
 
+/// Determine whether to summarize a neutral repeat loop instead of unrolling it.
+///
+/// For large iteration counts, naive unrolling causes exponential expression
+/// growth (e.g., repeated squaring). When we already have a per-iteration
+/// snapshot, we can reuse it to approximate the loop body.
+fn should_summarize_neutral_loop(iterations: usize, analysis: &LoopAnalysis) -> bool {
+    analysis.net_effect_per_iteration == 0
+        && iterations > MAX_NEUTRAL_LOOP_ITERATIONS
+        && !analysis.post_iteration_stack.is_empty()
+}
+
+/// Apply a summarized snapshot to the current abstract state.
+///
+/// This preserves any deeper stack slots and replaces the top portion touched
+/// by the loop with the analyzed post-iteration stack to avoid blowup.
+fn apply_neutral_loop_summary(state: &mut AbstractState, analysis: &LoopAnalysis) {
+    state.ensure_depth(analysis.min_inputs_required);
+    let prefix_len = state.depth().saturating_sub(analysis.min_inputs_required);
+    let mut new_stack = state.stack[..prefix_len].to_vec();
+    new_stack.extend(analysis.post_iteration_stack.iter().cloned());
+    state.stack = new_stack;
+    state.discovered_inputs = state
+        .discovered_inputs
+        .max(analysis.min_inputs_required);
+}
+
 /// Infer parametric structure for a loop by comparing consecutive iterations.
 ///
 /// For consuming loops we rely on `lift_for_current_loop` to add loop terms and
@@ -1683,22 +1544,22 @@ pub fn analyze_repeat_loop(body: &Block, iteration_count: usize) -> LoopAnalysis
     // Calculate net effect from the stable iteration
     let net_effect = post_second_depth as i32 - pre_second_depth as i32;
 
-    // Early check: stack-neutral loops with many iterations cause exponential
-    // expression growth (e.g., `repeat.31 { dup; mul }` creates 2^31 nodes).
-    // Fail fast with a clear diagnostic instead of hanging.
+    // Early check: stack-neutral loops with many iterations can cause exponential
+    // expression growth if fully unrolled. Instead of failing decompilation,
+    // summarize the loop and keep the first-iteration snapshot so downstream
+    // consumers can still produce hints.
     if net_effect == 0 && iteration_count > MAX_NEUTRAL_LOOP_ITERATIONS {
         return LoopAnalysis {
             min_inputs_required: discovered_inputs,
             net_effect_per_iteration: 0,
             total_inputs_for_loop: Some(discovered_inputs),
             is_consistent: true,
-            pattern_description: None,
-            post_iteration_stack: stable_state.stack.clone(),
-            failure_reason: Some(format!(
-                "repeat.{} loop with stack-neutral body causes exponential complexity; \
-                 decompilation skipped",
+            pattern_description: Some(format!(
+                "Loop summarized ({} iterations, stack-neutral)",
                 iteration_count
             )),
+            post_iteration_stack: stable_state.stack.clone(),
+            failure_reason: None,
         };
     }
 
@@ -2071,7 +1932,8 @@ fn execute_op_abstract(op: &Op, state: &mut AbstractState) {
         }
         Op::Repeat { count, body, .. } => {
             // For nested repeat loops, check for exponential complexity first
-            let analysis = analyze_repeat_loop(body, *count as usize);
+            let iterations = *count as usize;
+            let analysis = analyze_repeat_loop(body, iterations);
 
             if let Some(reason) = analysis.failure_reason.as_ref() {
                 state.fail(reason);
@@ -2083,13 +1945,18 @@ fn execute_op_abstract(op: &Op, state: &mut AbstractState) {
                 return;
             }
 
+            if should_summarize_neutral_loop(iterations, &analysis) {
+                apply_neutral_loop_summary(state, &analysis);
+                return;
+            }
+
             state.enter_loop(analysis.net_effect_per_iteration);
             if analysis.net_effect_per_iteration < 0 {
                 state.lift_for_current_loop(analysis.net_effect_per_iteration);
             }
 
             // Execute all iterations symbolically
-            for _ in 0..*count {
+            for _ in 0..iterations {
                 if state.has_failed() {
                     break;
                 }
@@ -2218,7 +2085,8 @@ fn pre_analyze_op(op: &Op, state: &mut AbstractState) {
         }
         Op::Repeat { count, body, .. } => {
             // Analyze the repeat loop
-            let analysis = analyze_repeat_loop(body, *count as usize);
+            let iterations = *count as usize;
+            let analysis = analyze_repeat_loop(body, iterations);
 
             // Ensure we have enough inputs for the entire loop
             if let Some(total) = analysis.total_inputs_for_loop {
@@ -2235,8 +2103,13 @@ fn pre_analyze_op(op: &Op, state: &mut AbstractState) {
                 return;
             }
 
+            if should_summarize_neutral_loop(iterations, &analysis) {
+                apply_neutral_loop_summary(state, &analysis);
+                return;
+            }
+
             // Execute the loop to update state properly
-            for _ in 0..*count {
+            for _ in 0..iterations {
                 if state.has_failed() {
                     return;
                 }

@@ -4,7 +4,9 @@ use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module};
 use miden_debug_types::{DefaultSourceManager, Spanned};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use crate::analysis::{infer_module_contracts, ContractStore, ProcContract};
+use crate::analysis::{
+    infer_module_contracts_with_store, ContractStore, ProcContract,
+};
 use crate::diagnostics::span_to_range;
 use crate::symbol_path::SymbolPath;
 
@@ -216,9 +218,11 @@ impl WorkspaceIndex {
     // Contract methods
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// Update contracts for a document by inferring them from procedure implementations.
+    /// Update contracts for a document by inferring them from procedure implementations,
+    /// seeding inference with the current workspace store for cross-file calls.
     pub fn update_contracts(&mut self, module: &Module, source_manager: &DefaultSourceManager) {
-        let contracts = infer_module_contracts(module, source_manager);
+        let contracts =
+            infer_module_contracts_with_store(module, source_manager, Some(&self.contracts));
         self.contracts.update_document(contracts);
     }
 

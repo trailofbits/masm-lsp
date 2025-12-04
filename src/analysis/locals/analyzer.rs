@@ -24,6 +24,7 @@ use miden_assembly_syntax::ast::{
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Span};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
+use crate::analysis::call_effect::{resolve_call_effect, CallEffect};
 use crate::analysis::contracts::ContractStore;
 use crate::analysis::static_effect::{apply_stack_manipulation, StackLike, StackLikeResult};
 use crate::analysis::utils::u16_imm_to_u16;
@@ -438,12 +439,18 @@ impl<'a> LocalsAnalyzer<'a> {
             // Other instructions - use static effect for stack tracking
             // ─────────────────────────────────────────────────────────────────
             _ => {
-                use crate::analysis::static_effect::StaticEffect;
-
-                // Use static_effect to track stack changes for other instructions
-                if let Some(effect) = StaticEffect::of(inst.inner()) {
-                    addr_stack.pop_n(effect.pops as usize);
-                    addr_stack.push_defaults(effect.pushes as usize);
+                let actions = crate::analysis::dispatcher::actions_for(inst.inner());
+                for action in actions {
+                    match action {
+                        crate::analysis::dispatcher::Action::Pop(n) => addr_stack.pop_n(n),
+                        crate::analysis::dispatcher::Action::Push { count, .. } => {
+                            addr_stack.push_defaults(count)
+                        }
+                        crate::analysis::dispatcher::Action::Stack(_) => {}
+                        crate::analysis::dispatcher::Action::Unknown => {
+                            // Unknown stack effect, skip conservative update
+                        }
+                    }
                 }
             }
         }
@@ -467,7 +474,7 @@ impl<'a> LocalsAnalyzer<'a> {
             }
         };
 
-        // Look up the contract for this procedure
+        // Look up the contract for signature propagation (if available)
         let contract = self.contracts.and_then(|store| {
             store
                 .get_by_suffix(target_name)
@@ -476,34 +483,29 @@ impl<'a> LocalsAnalyzer<'a> {
 
         match contract {
             Some(c) => {
-                // Get stack effect to know how many inputs are consumed
-                if let Some(num_inputs) = c.stack_effect.inputs() {
-                    // Check each input position for local addresses
-                    // that are passed to output address parameters
-                    if let Some(sig) = c.signature.as_ref() {
-                        for (i, kind) in sig.inputs.iter().enumerate() {
-                            // Check if this input position contains a local address
-                            // and if the parameter is an output address
-                            if kind.is_output() {
-                                if let Some(local_idx) = addr_stack.get_local_at(i) {
-                                    // Mark the local as initialized - callee will write to it
-                                    state.init_single(local_idx);
+                // Resolve stack effect using shared helper
+                match resolve_call_effect(None, self.contracts, target) {
+                    CallEffect::Known { inputs, outputs } => {
+                        // Check each input position for local addresses passed to output params
+                        if let Some(sig) = c.signature.as_ref() {
+                            for (i, kind) in sig.inputs.iter().enumerate() {
+                                if kind.is_output() {
+                                    if let Some(local_idx) = addr_stack.get_local_at(i) {
+                                        state.init_single(local_idx);
+                                    }
                                 }
                             }
                         }
+                        addr_stack.pop_n(inputs);
+                        addr_stack.push_defaults(outputs);
                     }
-
-                    // Apply stack effect: pop inputs, push outputs
-                    addr_stack.pop_n(num_inputs);
-                    if let Some(num_outputs) = c.stack_effect.outputs() {
-                        addr_stack.push_defaults(num_outputs);
-                    } else {
-                        // Unknown outputs - clear tracking
+                    CallEffect::KnownInputs { inputs } => {
+                        addr_stack.pop_n(inputs);
+                        addr_stack.clear(); // unknown outputs
+                    }
+                    CallEffect::Unknown => {
                         addr_stack.clear();
                     }
-                } else {
-                    // Unknown inputs - clear tracking
-                    addr_stack.clear();
                 }
             }
             None => {

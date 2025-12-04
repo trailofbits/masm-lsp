@@ -15,7 +15,8 @@ use tower_lsp::lsp_types::{
 
 use crate::analysis::{
     abstract_interpretation::{analyze_repeat_loop, analyze_while_loop, LoopTerm},
-    pre_analyze_procedure, ContractStore, StackEffect, SymbolicExpr,
+    call_effect::{resolve_call_effect, CallEffect},
+    infer_module_contracts, pre_analyze_procedure, ContractStore, StackEffect, SymbolicExpr,
 };
 use crate::diagnostics::{span_to_range, SOURCE_DECOMPILATION};
 use crate::symbol_resolution::SymbolResolver;
@@ -1147,7 +1148,6 @@ impl<'a> PseudocodeCollector<'a> {
         inst: &miden_assembly_syntax::ast::Instruction,
         span: SourceSpan,
     ) -> Option<PseudocodeTemplate> {
-        use crate::analysis::contracts::StackEffect;
         use miden_assembly_syntax::ast::Instruction;
         let state = self.state.as_mut()?;
 
@@ -1155,14 +1155,8 @@ impl<'a> PseudocodeCollector<'a> {
             Instruction::Exec(target)
             | Instruction::Call(target)
             | Instruction::SysCall(target) => {
-                let resolved_path = self.resolver.resolve_target(target);
-                let stack_effect = resolved_path
-                    .as_ref()
-                    .and_then(|path| self.contracts.and_then(|c| c.get(path)))
-                    .map(|c| c.stack_effect.clone());
-
-                match stack_effect {
-                    Some(StackEffect::Known { inputs, outputs }) => {
+                match resolve_call_effect(Some(&self.resolver), self.contracts, target) {
+                    CallEffect::Known { inputs, outputs } => {
                         let mut input_vars = Vec::new();
                         for _ in 0..inputs {
                             input_vars.push(state.pop());
@@ -1198,7 +1192,7 @@ impl<'a> PseudocodeCollector<'a> {
                         out.text(")");
                         Some(out.build())
                     }
-                    Some(StackEffect::KnownInputs { inputs }) => {
+                    CallEffect::KnownInputs { inputs } => {
                         let mut input_vars = Vec::new();
                         for _ in 0..inputs {
                             input_vars.push(state.pop());
@@ -1233,7 +1227,7 @@ impl<'a> PseudocodeCollector<'a> {
                         out.text(")");
                         Some(out.build())
                     }
-                    _ => {
+                    CallEffect::Unknown => {
                         self.fail_decompilation(
                             span,
                             &format!("call target `{target}` has no known stack effect"),
@@ -1855,6 +1849,8 @@ pub struct PseudocodeCollector<'a> {
     next_counter_id: usize,
     /// Current procedure name (for diagnostics)
     current_proc_name: Option<String>,
+    /// Whether provided contracts came from a local inference fallback (not workspace-wide).
+    contracts_are_fallback: bool,
 }
 
 impl<'a> PseudocodeCollector<'a> {
@@ -1863,6 +1859,7 @@ impl<'a> PseudocodeCollector<'a> {
         sources: &'a DefaultSourceManager,
         contracts: Option<&'a ContractStore>,
         source_text: &'a str,
+        contracts_are_fallback: bool,
     ) -> Self {
         Self {
             state: None,
@@ -1880,6 +1877,7 @@ impl<'a> PseudocodeCollector<'a> {
             loop_stack: Vec::new(),
             next_counter_id: 0,
             current_proc_name: None,
+            contracts_are_fallback,
         }
     }
 
@@ -2774,6 +2772,17 @@ impl<'a> PseudocodeCollector<'a> {
                 if let (Some(ref mut state), Some(ref entry_stack)) =
                     (&mut self.state, &loop_entry_stack)
                 {
+                    // If the loop body grew the stack (common when the condition is rebuilt),
+                    // drop extras from the top to match the entry depth before creating phis.
+                    let exit_depth = state.depth();
+                    let entry_depth = entry_stack.len();
+                    if exit_depth > entry_depth {
+                        let drop_count = exit_depth - entry_depth;
+                        for _ in 0..drop_count {
+                            state.pop();
+                        }
+                    }
+
                     if let Err(err) = state.create_loop_phis(entry_stack) {
                         self.fail_decompilation(
                             op.span(),
@@ -2863,13 +2872,10 @@ impl<'a> PseudocodeCollector<'a> {
                             .iter()
                             .skip(unaffected)
                             .filter(|id| {
-                                state
-                                    .ctx
-                                    .get_value(**id)
-                                    .map_or(false, |v| match v.kind {
-                                        super::ssa::VarKind::Local(idx) => idx >= local_base,
-                                        _ => false,
-                                    })
+                                state.ctx.get_value(**id).map_or(false, |v| match v.kind {
+                                    super::ssa::VarKind::Local(idx) => idx >= local_base,
+                                    _ => false,
+                                })
                             })
                             .cloned()
                             .collect();
@@ -2977,7 +2983,13 @@ impl<'a> Visit for PseudocodeCollector<'a> {
         // Get contract info
         let contract = self.contracts.and_then(|c| c.get_by_name(&proc_name));
         let contract_effect = contract.map(|c| c.stack_effect.clone());
-        let contract_signature = contract.and_then(|c| c.signature.clone());
+        // Ignore contract signature when using locally inferred fallback contracts to
+        // avoid showing partial/noisy signatures in decompilation output.
+        let contract_signature = if self.contracts_are_fallback {
+            None
+        } else {
+            contract.and_then(|c| c.signature.clone())
+        };
 
         // Pre-analyze procedure (only used as fallback when no contract is available)
         let pre_analysis = pre_analyze_procedure(proc.body());
@@ -2986,18 +2998,24 @@ impl<'a> Visit for PseudocodeCollector<'a> {
         // Determine input/output counts
         // Prefer contract-declared inputs when available, as pre-analysis can over-estimate
         // for procedures with consuming loops (e.g., repeat.N with negative stack effect)
-        let (initial_input_count, output_count) = match &contract_effect {
-            Some(StackEffect::Known { inputs, outputs }) => {
-                // Contract provides exact input count - use it
-                (*inputs, Some(*outputs))
-            }
-            Some(StackEffect::KnownInputs { inputs }) => {
-                // Contract provides input count - use it
-                (*inputs, None)
-            }
-            _ => {
-                // No contract - use pre-analysis
-                (pre_analyzed_inputs, None)
+        let (initial_input_count, output_count) = if self.contracts_are_fallback {
+            // When using locally inferred contracts (no workspace context), prefer
+            // pre-analysis for the procedure signature to avoid over/under-estimates.
+            (pre_analyzed_inputs, None)
+        } else {
+            match &contract_effect {
+                Some(StackEffect::Known { inputs, outputs }) => {
+                    // Contract provides exact input count - use it
+                    (*inputs, Some(*outputs))
+                }
+                Some(StackEffect::KnownInputs { inputs }) => {
+                    // Contract provides input count - use it
+                    (*inputs, None)
+                }
+                _ => {
+                    // No contract - use pre-analysis
+                    (pre_analyzed_inputs, None)
+                }
             }
         };
 
@@ -3017,6 +3035,7 @@ impl<'a> Visit for PseudocodeCollector<'a> {
                 output_count,
                 contract_signature.as_ref(),
                 None,
+                false,
             );
             self.add_literal_hint(line, &signature);
         }
@@ -3080,6 +3099,7 @@ impl<'a> Visit for PseudocodeCollector<'a> {
                         final_output_count,
                         None,
                         output_names.as_deref(),
+                        false,
                     );
                     if let Some(sig_hint) = self.hints.get_mut(self.proc_hint_start) {
                         *sig_hint = SsaHint::new(
@@ -3150,7 +3170,23 @@ pub fn collect_decompilation_hints(
     source_text: &str,
     contracts: Option<&ContractStore>,
 ) -> DecompilationResult {
-    let mut collector = PseudocodeCollector::new(module, sources, contracts, source_text);
+    // Prefer workspace contracts when available; otherwise, infer contracts for this
+    // module so intra-file calls have known stack effects during decompilation.
+    let mut owned_contracts = None;
+    let contracts = match contracts {
+        Some(c) => Some(c),
+        None => {
+            let inferred = infer_module_contracts(module, sources);
+            let mut store = ContractStore::new();
+            store.update_document(inferred);
+            owned_contracts = Some(store);
+            owned_contracts.as_ref()
+        }
+    };
+
+    let contracts_are_fallback = owned_contracts.is_some();
+    let mut collector =
+        PseudocodeCollector::new(module, sources, contracts, source_text, contracts_are_fallback);
     let _ = visit::visit_module(&mut collector, module);
 
     // Fixed padding (in columns) between instruction end and hint.

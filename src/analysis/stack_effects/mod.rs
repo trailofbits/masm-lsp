@@ -3,16 +3,41 @@
 //! This module defines how each instruction affects the symbolic stack,
 //! including pushing/popping values and applying validation.
 
-use miden_assembly_syntax::ast::{Immediate, Instruction};
+use miden_assembly_syntax::ast::Instruction;
 use miden_debug_types::SourceSpan;
 
-use super::static_effect::{apply_stack_manipulation, StackLike, StackLikeResult, StaticEffect};
+use super::dispatcher::{actions_for, Action, SourceKind};
+use super::static_effect::{apply_stack_manipulation, StackLike, StackLikeResult};
 use super::types::{AnalysisState, Bounds, TrackedValue};
 use super::utils::{felt_imm_to_u64, push_imm_to_u64};
 
 fn pop_n(state: &mut AnalysisState, n: usize) {
     for _ in 0..n {
         state.stack.pop();
+    }
+}
+
+fn collect_pops_into(target: &mut Vec<Option<TrackedValue>>, state: &mut AnalysisState, n: usize) {
+    for _ in 0..n {
+        target.push(state.stack.pop());
+    }
+}
+
+fn apply_pop_push_actions<FPop, FPush>(
+    state: &mut AnalysisState,
+    actions: &[Action],
+    mut on_pop: FPop,
+    mut on_push: FPush,
+) where
+    FPop: FnMut(&mut AnalysisState, usize),
+    FPush: FnMut(&mut AnalysisState, usize, SourceKind),
+{
+    for action in actions {
+        match action {
+            Action::Pop(n) => on_pop(state, *n),
+            Action::Push { count, kind } => on_push(state, *count, kind.clone()),
+            Action::Stack(_) | Action::Unknown => {}
+        }
     }
 }
 
@@ -26,6 +51,59 @@ where
     }
 }
 
+fn push_derived_with_bounds(state: &mut AnalysisState, n: usize, bounds: Bounds) {
+    push_n_with(state, n, |state| state.make_derived(bounds.clone()));
+}
+
+fn collect_popped_values(
+    state: &mut AnalysisState,
+    actions: &[Action],
+) -> Vec<Option<TrackedValue>> {
+    let mut popped = Vec::new();
+    for action in actions {
+        if let Action::Pop(n) = action {
+            collect_pops_into(&mut popped, state, *n);
+        }
+    }
+    popped
+}
+
+fn push_from_actions<F>(state: &mut AnalysisState, actions: &[Action], mut f: F)
+where
+    F: FnMut(&mut AnalysisState, usize, SourceKind),
+{
+    for action in actions {
+        if let Action::Push { count, kind } = action {
+            f(state, *count, kind.clone());
+        }
+    }
+}
+
+fn apply_binary_bounds<F>(state: &mut AnalysisState, actions: &[Action], compute: F)
+where
+    F: Fn(Option<&TrackedValue>, Option<&TrackedValue>) -> Bounds,
+{
+    let popped = collect_popped_values(state, actions);
+    let a = popped.get(1).and_then(|v| v.as_ref());
+    let b = popped.get(0).and_then(|v| v.as_ref());
+    let new_bounds = compute(a, b);
+    push_from_actions(state, actions, |state, n, _| {
+        push_derived_with_bounds(state, n, new_bounds.clone())
+    });
+}
+
+fn apply_unary_bounds<F>(state: &mut AnalysisState, actions: &[Action], compute: F)
+where
+    F: Fn(Option<&TrackedValue>) -> Bounds,
+{
+    let popped = collect_popped_values(state, actions);
+    let a = popped.get(0).and_then(|v| v.as_ref());
+    let new_bounds = compute(a);
+    push_from_actions(state, actions, |state, n, _| {
+        push_derived_with_bounds(state, n, new_bounds.clone())
+    });
+}
+
 /// Apply an instruction's effect on the analysis state.
 ///
 /// This updates the symbolic stack to reflect what values would be
@@ -35,68 +113,28 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         return;
     }
 
-    let static_effect = StaticEffect::of(inst);
+    let actions = actions_for(inst);
 
     match inst {
-        // ─────────────────────────────────────────────────────────────────────
-        // Advice operations (UNTRUSTED input)
-        // ─────────────────────────────────────────────────────────────────────
-        Instruction::AdvPush(n) => {
-            let count = match n {
-                Immediate::Value(v) => v.into_inner() as usize,
-                _ => 1,
-            };
-            for _ in 0..count {
-                let taint = state.make_advice(span);
-                state.stack.push(taint);
-            }
-        }
-
-        Instruction::AdvLoadW => {
-            // Pop the address word first
-            for _ in 0..4 {
-                state.stack.pop();
-            }
-            // Push 4 untrusted values
-            for _ in 0..4 {
-                let taint = state.make_advice(span);
-                state.stack.push(taint);
-            }
-        }
-
-        Instruction::AdvPipe => {
-            // Consumes 2 words, produces 2 words of advice
-            for _ in 0..8 {
-                state.stack.pop();
-            }
-            for _ in 0..8 {
-                let taint = state.make_advice(span);
-                state.stack.push(taint);
-            }
-        }
-
         // ─────────────────────────────────────────────────────────────────────
         // Merkle operations
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MTreeGet => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_merkle(span));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_merkle(span))
+            });
         }
 
         Instruction::MTreeSet => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
 
         Instruction::MTreeMerge => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
 
         Instruction::MTreeVerify | Instruction::MTreeVerifyWithError(_) => {
@@ -133,656 +171,207 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Stack manipulation - Drop
-        // ─────────────────────────────────────────────────────────────────────
-        Instruction::Drop => {
-            state.stack.pop();
-        }
-
-        Instruction::DropW => {
-            for _ in 0..4 {
-                state.stack.pop();
-            }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Stack manipulation - Dup
-        // If the position doesn't exist in our tracking, push an untracked value
-        // to maintain consistency with actual stack state.
-        // ─────────────────────────────────────────────────────────────────────
-        Instruction::Dup0 => {
-            if !state.stack.dup(0) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup1 => {
-            if !state.stack.dup(1) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup2 => {
-            if !state.stack.dup(2) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup3 => {
-            if !state.stack.dup(3) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup4 => {
-            if !state.stack.dup(4) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup5 => {
-            if !state.stack.dup(5) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup6 => {
-            if !state.stack.dup(6) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup7 => {
-            if !state.stack.dup(7) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup8 => {
-            if !state.stack.dup(8) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup9 => {
-            if !state.stack.dup(9) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup10 => {
-            if !state.stack.dup(10) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup11 => {
-            if !state.stack.dup(11) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup12 => {
-            if !state.stack.dup(12) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup13 => {
-            if !state.stack.dup(13) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup14 => {
-            if !state.stack.dup(14) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-        Instruction::Dup15 => {
-            if !state.stack.dup(15) {
-                state.stack.push(TrackedValue::default());
-            }
-        }
-
-        Instruction::DupW0 => {
-            // Duplicate word at positions 0-3 onto top
-            // Each dup pushes and shifts indices, so we always dup position 3
-            // This copies bottom-to-top: pos3, then pos2 (now at 3), then pos1, then pos0
-            for _ in 0..4 {
-                state.stack.dup(3);
-            }
-        }
-        Instruction::DupW1 => {
-            // Duplicate word at positions 4-7 onto top
-            for _ in 0..4 {
-                state.stack.dup(7);
-            }
-        }
-        Instruction::DupW2 => {
-            // Duplicate word at positions 8-11 onto top
-            for _ in 0..4 {
-                state.stack.dup(11);
-            }
-        }
-        Instruction::DupW3 => {
-            // Duplicate word at positions 12-15 onto top
-            for _ in 0..4 {
-                state.stack.dup(15);
-            }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Stack manipulation - Swap
-        // ─────────────────────────────────────────────────────────────────────
-        Instruction::Swap1 => {
-            state.stack.swap(0, 1);
-        }
-        Instruction::Swap2 => {
-            state.stack.swap(0, 2);
-        }
-        Instruction::Swap3 => {
-            state.stack.swap(0, 3);
-        }
-        Instruction::Swap4 => {
-            state.stack.swap(0, 4);
-        }
-        Instruction::Swap5 => {
-            state.stack.swap(0, 5);
-        }
-        Instruction::Swap6 => {
-            state.stack.swap(0, 6);
-        }
-        Instruction::Swap7 => {
-            state.stack.swap(0, 7);
-        }
-        Instruction::Swap8 => {
-            state.stack.swap(0, 8);
-        }
-        Instruction::Swap9 => {
-            state.stack.swap(0, 9);
-        }
-        Instruction::Swap10 => {
-            state.stack.swap(0, 10);
-        }
-        Instruction::Swap11 => {
-            state.stack.swap(0, 11);
-        }
-        Instruction::Swap12 => {
-            state.stack.swap(0, 12);
-        }
-        Instruction::Swap13 => {
-            state.stack.swap(0, 13);
-        }
-        Instruction::Swap14 => {
-            state.stack.swap(0, 14);
-        }
-        Instruction::Swap15 => {
-            state.stack.swap(0, 15);
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Stack manipulation - Move
-        // ─────────────────────────────────────────────────────────────────────
-        Instruction::MovUp2 => {
-            state.stack.movup(2);
-        }
-        Instruction::MovUp3 => {
-            state.stack.movup(3);
-        }
-        Instruction::MovUp4 => {
-            state.stack.movup(4);
-        }
-        Instruction::MovUp5 => {
-            state.stack.movup(5);
-        }
-        Instruction::MovUp6 => {
-            state.stack.movup(6);
-        }
-        Instruction::MovUp7 => {
-            state.stack.movup(7);
-        }
-        Instruction::MovUp8 => {
-            state.stack.movup(8);
-        }
-        Instruction::MovUp9 => {
-            state.stack.movup(9);
-        }
-        Instruction::MovUp10 => {
-            state.stack.movup(10);
-        }
-        Instruction::MovUp11 => {
-            state.stack.movup(11);
-        }
-        Instruction::MovUp12 => {
-            state.stack.movup(12);
-        }
-        Instruction::MovUp13 => {
-            state.stack.movup(13);
-        }
-        Instruction::MovUp14 => {
-            state.stack.movup(14);
-        }
-        Instruction::MovUp15 => {
-            state.stack.movup(15);
-        }
-
-        Instruction::MovDn2 => {
-            state.stack.movdn(2);
-        }
-        Instruction::MovDn3 => {
-            state.stack.movdn(3);
-        }
-        Instruction::MovDn4 => {
-            state.stack.movdn(4);
-        }
-        Instruction::MovDn5 => {
-            state.stack.movdn(5);
-        }
-        Instruction::MovDn6 => {
-            state.stack.movdn(6);
-        }
-        Instruction::MovDn7 => {
-            state.stack.movdn(7);
-        }
-        Instruction::MovDn8 => {
-            state.stack.movdn(8);
-        }
-        Instruction::MovDn9 => {
-            state.stack.movdn(9);
-        }
-        Instruction::MovDn10 => {
-            state.stack.movdn(10);
-        }
-        Instruction::MovDn11 => {
-            state.stack.movdn(11);
-        }
-        Instruction::MovDn12 => {
-            state.stack.movdn(12);
-        }
-        Instruction::MovDn13 => {
-            state.stack.movdn(13);
-        }
-        Instruction::MovDn14 => {
-            state.stack.movdn(14);
-        }
-        Instruction::MovDn15 => {
-            state.stack.movdn(15);
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
         // Stack manipulation - Pad
         // ─────────────────────────────────────────────────────────────────────
         Instruction::PadW => {
-            if let Some(effect) = static_effect {
-                push_n_with(state, effect.pushes, |state| state.make_literal(0, None));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_literal(0, None))
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Arithmetic - propagate bounds through operations
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::Add => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.add(&b.bounds),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
-        Instruction::AddImm(imm) => {
-            let a = state.stack.pop();
-            let imm_val = felt_imm_to_u64(imm).unwrap_or(0);
-            let new_bounds = match a.as_ref() {
-                Some(a) => a.bounds.add(&Bounds::Const(imm_val)),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
+        Instruction::Add => apply_binary_bounds(state, &actions, |a, b| match (a, b) {
+            (Some(a), Some(b)) => a.bounds.add(&b.bounds),
+            _ => Bounds::Field,
+        }),
+        Instruction::AddImm(imm) => apply_unary_bounds(state, &actions, |a| match a {
+            Some(a) => a
+                .bounds
+                .add(&Bounds::Const(felt_imm_to_u64(imm).unwrap_or(0))),
+            _ => Bounds::Field,
+        }),
 
-        Instruction::Sub => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.sub(&b.bounds),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
-        Instruction::SubImm(imm) => {
-            let a = state.stack.pop();
-            let imm_val = felt_imm_to_u64(imm).unwrap_or(0);
-            let new_bounds = match a.as_ref() {
-                Some(a) => a.bounds.sub(&Bounds::Const(imm_val)),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
+        Instruction::Sub => apply_binary_bounds(state, &actions, |a, b| match (a, b) {
+            (Some(a), Some(b)) => a.bounds.sub(&b.bounds),
+            _ => Bounds::Field,
+        }),
+        Instruction::SubImm(imm) => apply_unary_bounds(state, &actions, |a| match a {
+            Some(a) => a
+                .bounds
+                .sub(&Bounds::Const(felt_imm_to_u64(imm).unwrap_or(0))),
+            _ => Bounds::Field,
+        }),
 
-        Instruction::Mul => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.mul(&b.bounds),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
-        Instruction::MulImm(imm) => {
-            let a = state.stack.pop();
-            let imm_val = felt_imm_to_u64(imm).unwrap_or(0);
-            let new_bounds = match a.as_ref() {
-                Some(a) => a.bounds.mul(&Bounds::Const(imm_val)),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
+        Instruction::Mul => apply_binary_bounds(state, &actions, |a, b| match (a, b) {
+            (Some(a), Some(b)) => a.bounds.mul(&b.bounds),
+            _ => Bounds::Field,
+        }),
+        Instruction::MulImm(imm) => apply_unary_bounds(state, &actions, |a| match a {
+            Some(a) => a
+                .bounds
+                .mul(&Bounds::Const(felt_imm_to_u64(imm).unwrap_or(0))),
+            _ => Bounds::Field,
+        }),
 
-        Instruction::Div => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.div(&b.bounds),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
-        Instruction::DivImm(imm) => {
-            let a = state.stack.pop();
-            let imm_val = felt_imm_to_u64(imm).unwrap_or(0);
-            let new_bounds = match a.as_ref() {
-                Some(a) if imm_val != 0 => a.bounds.div(&Bounds::Const(imm_val)),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
+        Instruction::Div => apply_binary_bounds(state, &actions, |a, b| match (a, b) {
+            (Some(a), Some(b)) => a.bounds.div(&b.bounds),
+            _ => Bounds::Field,
+        }),
+        Instruction::DivImm(imm) => apply_unary_bounds(state, &actions, |a| match a {
+            Some(a) => {
+                let imm_val = felt_imm_to_u64(imm).unwrap_or(0);
+                if imm_val != 0 {
+                    a.bounds.div(&Bounds::Const(imm_val))
+                } else {
+                    Bounds::Field
+                }
+            }
+            _ => Bounds::Field,
+        }),
 
-        Instruction::Neg => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Field);
-            state.stack.push(result);
-        }
+        Instruction::Neg => apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+            push_derived_with_bounds(state, n, Bounds::Field)
+        }),
 
-        Instruction::Inv => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Field);
-            state.stack.push(result);
-        }
+        Instruction::Inv => apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+            push_derived_with_bounds(state, n, Bounds::Field)
+        }),
 
-        Instruction::Incr => {
-            let a = state.stack.pop();
-            let new_bounds = match a.as_ref() {
-                Some(a) => a.bounds.incr(),
-                _ => Bounds::Field,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
+        Instruction::Incr => apply_unary_bounds(state, &actions, |a| match a {
+            Some(a) => a.bounds.incr(),
+            _ => Bounds::Field,
+        }),
 
         // ─────────────────────────────────────────────────────────────────────
         // Comparison operations - propagate bounds through comparisons
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::Eq => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.eq(&b.bounds),
+        Instruction::Eq | Instruction::Neq | Instruction::Lt | Instruction::Lte => {
+            apply_binary_bounds(state, &actions, |a, b| match (a, b) {
+                (Some(a), Some(b)) => match inst {
+                    Instruction::Eq => a.bounds.eq(&b.bounds),
+                    Instruction::Neq => a.bounds.neq(&b.bounds),
+                    Instruction::Lt => a.bounds.lt(&b.bounds),
+                    Instruction::Lte => a.bounds.lte(&b.bounds),
+                    _ => Bounds::Bool,
+                },
                 _ => Bounds::Bool,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
+            });
         }
-        Instruction::EqImm(imm) => {
-            let a = state.stack.pop();
+        Instruction::EqImm(imm) | Instruction::NeqImm(imm) => {
             let imm_val = felt_imm_to_u64(imm).unwrap_or(0);
-            let new_bounds = match a.as_ref() {
-                Some(a) => a.bounds.eq(&Bounds::Const(imm_val)),
+            apply_unary_bounds(state, &actions, |a| match a {
+                Some(a) => match inst {
+                    Instruction::EqImm(_) => a.bounds.eq(&Bounds::Const(imm_val)),
+                    Instruction::NeqImm(_) => a.bounds.neq(&Bounds::Const(imm_val)),
+                    _ => Bounds::Bool,
+                },
                 _ => Bounds::Bool,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
+            });
         }
 
-        Instruction::Neq => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.neq(&b.bounds),
-                _ => Bounds::Bool,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
-        Instruction::NeqImm(imm) => {
-            let a = state.stack.pop();
-            let imm_val = felt_imm_to_u64(imm).unwrap_or(0);
-            let new_bounds = match a.as_ref() {
-                Some(a) => a.bounds.neq(&Bounds::Const(imm_val)),
-                _ => Bounds::Bool,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
+        Instruction::Gt => apply_binary_bounds(state, &actions, |a, b| match (a, b) {
+            (Some(a), Some(b)) => a.bounds.gt(&b.bounds),
+            _ => Bounds::Bool,
+        }),
 
-        Instruction::Lt => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.lt(&b.bounds),
-                _ => Bounds::Bool,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
-
-        Instruction::Lte => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.lte(&b.bounds),
-                _ => Bounds::Bool,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
-
-        Instruction::Gt => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.gt(&b.bounds),
-                _ => Bounds::Bool,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
-
-        Instruction::Gte => {
-            let b = state.stack.pop();
-            let a = state.stack.pop();
-            let new_bounds = match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => a.bounds.gte(&b.bounds),
-                _ => Bounds::Bool,
-            };
-            let result = state.make_derived(new_bounds);
-            state.stack.push(result);
-        }
+        Instruction::Gte => apply_binary_bounds(state, &actions, |a, b| match (a, b) {
+            (Some(a), Some(b)) => a.bounds.gte(&b.bounds),
+            _ => Bounds::Bool,
+        }),
 
         Instruction::IsOdd => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Bool);
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::Bool)
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Boolean operations
         // ─────────────────────────────────────────────────────────────────────
-        Instruction::And => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Bool);
-            state.stack.push(result);
-        }
-
-        Instruction::Or => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Bool);
-            state.stack.push(result);
-        }
-
-        Instruction::Xor => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Bool);
-            state.stack.push(result);
+        Instruction::And | Instruction::Or | Instruction::Xor => {
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::Bool)
+            });
         }
 
         Instruction::Not => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Bool);
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::Bool)
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Memory operations - single element
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MemLoad => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_memory(span));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_memory(span))
+            });
         }
         Instruction::MemLoadImm(_) => {
-            if let Some(effect) = static_effect {
-                push_n_with(state, effect.pushes, |state| state.make_memory(span));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_memory(span))
+            });
         }
 
         Instruction::MemStore => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
         Instruction::MemStoreImm(_) => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Memory operations - word level (4 elements)
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MemLoadWBe | Instruction::MemLoadWLe => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_memory(span));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_memory(span))
+            });
         }
         Instruction::MemLoadWBeImm(_) | Instruction::MemLoadWLeImm(_) => {
-            if let Some(effect) = static_effect {
-                push_n_with(state, effect.pushes, |state| state.make_memory(span));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_memory(span))
+            });
         }
 
         Instruction::MemStoreWBe | Instruction::MemStoreWLe => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
         Instruction::MemStoreWBeImm(_) | Instruction::MemStoreWLeImm(_) => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Local memory operations
         // ─────────────────────────────────────────────────────────────────────
         Instruction::LocLoad(_) => {
-            if let Some(effect) = static_effect {
-                push_n_with(state, effect.pushes, |state| state.make_memory(span));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_memory(span))
+            });
         }
         Instruction::LocLoadWBe(_) | Instruction::LocLoadWLe(_) => {
-            if let Some(effect) = static_effect {
-                push_n_with(state, effect.pushes, |state| state.make_memory(span));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_memory(span))
+            });
         }
 
         Instruction::LocStore(_) => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
         Instruction::LocStoreWBe(_) | Instruction::LocStoreWLe(_) => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Memory streaming
         // ─────────────────────────────────────────────────────────────────────
         Instruction::MemStream => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_memory(span));
-            }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Word-level stack manipulation
-        // ─────────────────────────────────────────────────────────────────────
-
-        // SwapW - swap words (groups of 4)
-        Instruction::SwapW1 => {
-            // Swap word 0-3 with word 4-7
-            for i in 0..4 {
-                state.stack.swap(i, i + 4);
-            }
-        }
-        Instruction::SwapW2 => {
-            // Swap word 0-3 with word 8-11
-            for i in 0..4 {
-                state.stack.swap(i, i + 8);
-            }
-        }
-        Instruction::SwapW3 => {
-            // Swap word 0-3 with word 12-15
-            for i in 0..4 {
-                state.stack.swap(i, i + 12);
-            }
-        }
-        Instruction::SwapDw => {
-            // Swap double word (0-7 with 8-15)
-            for i in 0..8 {
-                state.stack.swap(i, i + 8);
-            }
-        }
-
-        // MovUpW - move word up to top
-        Instruction::MovUpW2 => {
-            // Move word at positions 8-11 to 0-3
-            // This moves 4 elements: positions 8,9,10,11 become 0,1,2,3
-            for _ in 0..4 {
-                state.stack.movup(8);
-            }
-        }
-        Instruction::MovUpW3 => {
-            // Move word at positions 12-15 to 0-3
-            for _ in 0..4 {
-                state.stack.movup(12);
-            }
-        }
-
-        // MovDnW - move word down from top
-        Instruction::MovDnW2 => {
-            // Move word at positions 0-3 to 8-11
-            for _ in 0..4 {
-                state.stack.movdn(8);
-            }
-        }
-        Instruction::MovDnW3 => {
-            // Move word at positions 0-3 to 12-15
-            for _ in 0..4 {
-                state.stack.movdn(12);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_memory(span))
+            });
         }
 
         // Reverse operations
@@ -818,11 +407,10 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
             }
         }
         Instruction::U32Assert2 | Instruction::U32Assert2WithError(_) => {
-            if let Some(t) = state.stack.peek_mut(0) {
-                t.apply_validation();
-            }
-            if let Some(t) = state.stack.peek_mut(1) {
-                t.apply_validation();
+            for i in 0..2 {
+                if let Some(t) = state.stack.peek_mut(i) {
+                    t.apply_validation();
+                }
             }
         }
         Instruction::U32AssertW | Instruction::U32AssertWWithError(_) => {
@@ -846,226 +434,253 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // u32 split/cast - special arity
         Instruction::U32Split => {
             // pop 1 field element, push 2 u32 values (hi, lo)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                let hi = state.make_derived(Bounds::u32());
-                let lo = state.make_derived(Bounds::u32());
-                // Static effect pushes 2
-                state.stack.push(lo);
-                state.stack.push(hi);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let lo = state.make_derived(Bounds::u32());
+                    let hi = state.make_derived(Bounds::u32());
+                    state.stack.push(lo);
+                    state.stack.push(hi);
+                } else {
+                    push_n_with(state, n, |state| state.make_derived(Bounds::u32()));
+                }
+            });
         }
         Instruction::U32Cast => {
             // pop 1, push 1 u32 (truncate to u32)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::u32()))
+            });
         }
 
         // u32 binary wrapping arithmetic - pop 2, push 1
         Instruction::U32WrappingAdd => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
         Instruction::U32WrappingAddImm(imm) => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
             let _ = imm;
         }
         Instruction::U32WrappingSub => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
         Instruction::U32WrappingSubImm(imm) => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
             let _ = imm;
         }
         Instruction::U32WrappingMul => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
         Instruction::U32WrappingMulImm(imm) => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
             let _ = imm;
         }
 
         // u32 binary overflowing arithmetic - pop 2, push 2 (result + overflow flag)
         Instruction::U32OverflowingAdd => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let overflow = state.make_derived(Bounds::Bool);
-            state.stack.push(overflow);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let result = state.make_derived(Bounds::u32());
+                    state.stack.push(result);
+                    let overflow = state.make_derived(Bounds::Bool);
+                    state.stack.push(overflow);
+                } else {
+                    push_derived_with_bounds(state, n, Bounds::u32());
+                }
+            });
         }
         Instruction::U32OverflowingAddImm(imm) => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let overflow = state.make_derived(Bounds::Bool);
-            state.stack.push(overflow);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let result = state.make_derived(Bounds::u32());
+                    state.stack.push(result);
+                    let overflow = state.make_derived(Bounds::Bool);
+                    state.stack.push(overflow);
+                } else {
+                    push_derived_with_bounds(state, n, Bounds::u32());
+                }
+            });
             let _ = imm;
         }
         Instruction::U32OverflowingSub => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let underflow = state.make_derived(Bounds::Bool);
-            state.stack.push(underflow);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let result = state.make_derived(Bounds::u32());
+                    state.stack.push(result);
+                    let underflow = state.make_derived(Bounds::Bool);
+                    state.stack.push(underflow);
+                } else {
+                    push_derived_with_bounds(state, n, Bounds::u32());
+                }
+            });
         }
         Instruction::U32OverflowingSubImm(imm) => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let underflow = state.make_derived(Bounds::Bool);
-            state.stack.push(underflow);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let result = state.make_derived(Bounds::u32());
+                    state.stack.push(result);
+                    let underflow = state.make_derived(Bounds::Bool);
+                    state.stack.push(underflow);
+                } else {
+                    push_derived_with_bounds(state, n, Bounds::u32());
+                }
+            });
             let _ = imm;
         }
         Instruction::U32OverflowingMul => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let overflow = state.make_derived(Bounds::u32());
-            state.stack.push(overflow);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let result = state.make_derived(Bounds::u32());
+                    state.stack.push(result);
+                    let overflow = state.make_derived(Bounds::u32());
+                    state.stack.push(overflow);
+                } else {
+                    push_derived_with_bounds(state, n, Bounds::u32());
+                }
+            });
         }
         Instruction::U32OverflowingMulImm(imm) => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let overflow = state.make_derived(Bounds::u32());
-            state.stack.push(overflow);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let result = state.make_derived(Bounds::u32());
+                    state.stack.push(result);
+                    let overflow = state.make_derived(Bounds::u32());
+                    state.stack.push(overflow);
+                } else {
+                    push_derived_with_bounds(state, n, Bounds::u32());
+                }
+            });
             let _ = imm;
         }
 
         // u32 ternary operations - pop 3
         Instruction::U32OverflowingAdd3 => {
             // pop 3, push 2 (result + carry)
-            state.stack.pop();
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let carry = state.make_derived(Bounds::u32());
-            state.stack.push(carry);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let result = state.make_derived(Bounds::u32());
+                    state.stack.push(result);
+                    let carry = state.make_derived(Bounds::u32());
+                    state.stack.push(carry);
+                } else {
+                    push_derived_with_bounds(state, n, Bounds::u32());
+                }
+            });
         }
         Instruction::U32WrappingAdd3 => {
             // pop 3, push 1
-            state.stack.pop();
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
         Instruction::U32OverflowingMadd => {
             // pop 3 (a, b, c), push 2 (a*b + c with overflow)
-            state.stack.pop();
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
-            let overflow = state.make_derived(Bounds::u32()); // Can overflow beyond bool
-            state.stack.push(overflow);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let result = state.make_derived(Bounds::u32());
+                    state.stack.push(result);
+                    let overflow = state.make_derived(Bounds::u32()); // Can overflow beyond bool
+                    state.stack.push(overflow);
+                } else {
+                    push_derived_with_bounds(state, n, Bounds::u32());
+                }
+            });
         }
         Instruction::U32WrappingMadd => {
             // pop 3 (a, b, c), push 1 (a*b + c wrapped)
-            state.stack.pop();
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
 
         // u32 division - pop 2, push 1
         Instruction::U32Div => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::u32()))
+            });
         }
         Instruction::U32DivImm(imm) => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
-                let _ = imm;
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::u32()))
+            });
+            let _ = imm;
         }
         Instruction::U32Mod => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::u32()))
+            });
         }
         Instruction::U32ModImm(imm) => {
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
-                let _ = imm;
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::u32()))
+            });
+            let _ = imm;
         }
         Instruction::U32DivMod => {
             // pop 2, push 2 (quotient, remainder)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                let quotient = state.make_derived(Bounds::u32());
-                state.stack.push(quotient);
-                let remainder = state.make_derived(Bounds::u32());
-                state.stack.push(remainder);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let quotient = state.make_derived(Bounds::u32());
+                    state.stack.push(quotient);
+                    let remainder = state.make_derived(Bounds::u32());
+                    state.stack.push(remainder);
+                } else {
+                    push_n_with(state, n, |state| state.make_derived(Bounds::u32()));
+                }
+            });
         }
         Instruction::U32DivModImm(imm) => {
             // pop 1, push 2 (quotient, remainder)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                let quotient = state.make_derived(Bounds::u32());
-                state.stack.push(quotient);
-                let remainder = state.make_derived(Bounds::u32());
-                state.stack.push(remainder);
-                let _ = imm;
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                if n == 2 {
+                    let quotient = state.make_derived(Bounds::u32());
+                    state.stack.push(quotient);
+                    let remainder = state.make_derived(Bounds::u32());
+                    state.stack.push(remainder);
+                } else {
+                    push_n_with(state, n, |state| state.make_derived(Bounds::u32()));
+                }
+            });
+            let _ = imm;
         }
 
         // u32 bitwise - pop 2, push 1
         Instruction::U32And | Instruction::U32Or | Instruction::U32Xor => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
         // u32 bitwise not - pop 1, push 1
         Instruction::U32Not => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
 
         // u32 shift/rotate - pop 2, push 1 (or pop 1 for Imm variants)
         Instruction::U32Shr | Instruction::U32Shl | Instruction::U32Rotr | Instruction::U32Rotl => {
-            state.stack.pop(); // shift amount
-            state.stack.pop(); // value
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
         Instruction::U32ShrImm(imm)
         | Instruction::U32ShlImm(imm)
         | Instruction::U32RotrImm(imm)
         | Instruction::U32RotlImm(imm) => {
-            state.stack.pop(); // value only, shift amount from immediate
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
             let _ = imm;
         }
 
@@ -1075,25 +690,23 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         | Instruction::U32Clz
         | Instruction::U32Clo
         | Instruction::U32Cto => {
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
 
         // u32 comparison - pop 2, push 1 bool
         Instruction::U32Lt | Instruction::U32Lte | Instruction::U32Gt | Instruction::U32Gte => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::Bool);
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::Bool)
+            });
         }
 
         // u32 min/max - pop 2, push 1
         Instruction::U32Min | Instruction::U32Max => {
-            state.stack.pop();
-            state.stack.pop();
-            let result = state.make_derived(Bounds::u32());
-            state.stack.push(result);
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::u32())
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1104,17 +717,15 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         | Instruction::Ext2Mul
         | Instruction::Ext2Div => {
             // Binary ops: pop 4 (two ext2 elements), push 2 (one ext2 element)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
         Instruction::Ext2Neg | Instruction::Ext2Inv => {
             // Unary ops: pop 2, push 2
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1122,73 +733,46 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Hash => {
             // Hash: pop 4 (word), push 4 (hash result)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
         Instruction::HMerge => {
             // HMerge: pop 8 (two words), push 4 (merged hash)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
         Instruction::HPerm => {
             // HPerm: pop 12, push 12 (permutation - same count)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Conditional operations
         // ─────────────────────────────────────────────────────────────────────
         Instruction::CSwap => {
-            // Pop condition, conditionally swap top two elements
-            // Stack: [c, b, a, ...] -> [b, a, ...] or [a, b, ...] based on c
-            state.stack.pop(); // condition
-                               // Since we don't know if swap happens, keep elements but mark as unknown bounds
-            if let Some(t) = state.stack.peek_mut(0) {
-                t.bounds = Bounds::Field;
-            }
-            if let Some(t) = state.stack.peek_mut(1) {
-                t.bounds = Bounds::Field;
-            }
+            // Conditionals can reorder or drop; conservatively reset bounds.
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::Field)
+            });
         }
         Instruction::CSwapW => {
-            // Pop condition, conditionally swap top two words
-            state.stack.pop(); // condition
-                               // Mark affected positions as unknown
-            for i in 0..8 {
-                if let Some(t) = state.stack.peek_mut(i) {
-                    t.bounds = Bounds::Field;
-                }
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::Field)
+            });
         }
         Instruction::CDrop => {
-            // Pop condition, conditionally drop one of top two elements
-            // Stack: [c, b, a, ...] -> [a] if c=1, [b] if c=0
-            state.stack.pop(); // condition
-            state.stack.pop(); // one of the values
-                               // Remaining value has unknown bounds
-            if let Some(t) = state.stack.peek_mut(0) {
-                t.bounds = Bounds::Field;
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::Field)
+            });
         }
         Instruction::CDropW => {
-            // Pop condition, conditionally drop one of top two words
-            state.stack.pop(); // condition
-            for _ in 0..4 {
-                state.stack.pop(); // one word
-            }
-            // Remaining word has unknown bounds
-            for i in 0..4 {
-                if let Some(t) = state.stack.peek_mut(i) {
-                    t.bounds = Bounds::Field;
-                }
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_derived_with_bounds(state, n, Bounds::Field)
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1196,27 +780,19 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Assert | Instruction::AssertWithError(_) => {
             // Pop condition, no push
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
         Instruction::AssertEq | Instruction::AssertEqWithError(_) => {
             // Pop two values to compare
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
         Instruction::AssertEqw | Instruction::AssertEqwWithError(_) => {
             // Pop two words to compare
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
         Instruction::Assertz | Instruction::AssertzWithError(_) => {
             // Pop one value to check if zero
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |_state, _, _| {});
         }
         Instruction::Eqw => {
             // Compare two words, push equality flag without consuming operands
@@ -1230,28 +806,27 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         Instruction::Sdepth => {
             // Push current stack depth (trusted, from VM)
-            if let Some(effect) = static_effect {
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::u32()))
+            });
         }
         Instruction::Caller => {
             // Overwrite top word with caller hash (trusted)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
         Instruction::Clk => {
             // Push current clock cycle (trusted, from VM)
-            if let Some(effect) = static_effect {
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
         Instruction::Locaddr(_) => {
             // Push local memory address (trusted literal)
-            if let Some(effect) = static_effect {
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::u32()))
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1259,31 +834,27 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // ─────────────────────────────────────────────────────────────────────
         Instruction::ILog2 => {
             // Pop 1, push 1 (integer log base 2)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::u32()));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::u32()))
+            });
         }
         Instruction::Pow2 => {
             // Pop 1 (exponent), push 1 (2^exp)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
         Instruction::Exp => {
             // Pop 2 (base, exp), push 1 (base^exp)
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
         Instruction::ExpImm(_) | Instruction::ExpBitLength(_) => {
             // Pop 1, push 1
-            if let Some(effect) = static_effect {
-                pop_n(state, effect.pops);
-                push_n_with(state, effect.pushes, |state| state.make_derived(Bounds::Field));
-            }
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1319,14 +890,17 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         // STARK proof verification operations
         // ─────────────────────────────────────────────────────────────────────
         Instruction::FriExt2Fold4 => {
-            // Complex STARK operation - clear tracking to be safe
+            // Clear until we model this precisely.
             state.stack.clear();
         }
-        Instruction::HornerBase
-        | Instruction::HornerExt
-        | Instruction::EvalCircuit
-        | Instruction::LogPrecompile => {
-            // Complex operations with variable stack effects
+        Instruction::HornerBase | Instruction::HornerExt => {
+            // Pop 16 inputs, push 16 derived outputs (accumulators updated)
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, _| {
+                push_n_with(state, n, |state| state.make_derived(Bounds::Field))
+            });
+        }
+        Instruction::EvalCircuit | Instruction::LogPrecompile => {
+            // These are still treated conservatively.
             state.stack.clear();
         }
 
@@ -1336,6 +910,18 @@ pub fn apply_effect(inst: &Instruction, state: &mut AnalysisState, span: SourceS
         Instruction::SysEvent(_) => {
             // System events may have complex stack effects
             state.stack.clear();
+        }
+        _ => {
+            // Default: apply dispatcher actions as generic pop/push with source-aware values.
+            apply_pop_push_actions(state, &actions, pop_n, |state, n, kind| match kind {
+                SourceKind::Advice => push_n_with(state, n, |state| state.make_advice(span)),
+                SourceKind::Literal => push_n_with(state, n, |state| state.make_literal(0, None)),
+                SourceKind::StackCopy | SourceKind::Derived => {
+                    push_derived_with_bounds(state, n, Bounds::Field)
+                }
+                SourceKind::Memory => push_n_with(state, n, |state| state.make_memory(span)),
+                SourceKind::Merkle => push_n_with(state, n, |state| state.make_merkle(span)),
+            });
         }
     }
 }

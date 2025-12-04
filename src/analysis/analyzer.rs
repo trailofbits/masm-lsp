@@ -20,9 +20,10 @@ use tower_lsp::lsp_types::{
 use crate::diagnostics::SOURCE_ANALYSIS;
 use crate::symbol_resolution::SymbolResolver;
 
+use super::call_effect::{resolve_call_effect, CallEffect};
 use super::checker::{AnalysisFinding, CheckContext, Checker, Severity};
 use super::checkers::default_checkers;
-use super::contracts::{ContractStore, StackEffect};
+use super::contracts::ContractStore;
 use super::stack_effects::apply_effect;
 use super::types::{AnalysisState, ValueOrigin};
 
@@ -125,38 +126,32 @@ impl<'a> Analyzer<'a> {
             }
         };
 
-        // Use the unified symbol resolution to look up the contract
-        let stack_effect = self.contracts.and_then(|store| {
-            let resolved_path = self.resolver.resolve_target(target)?;
-            store.get(&resolved_path).map(|c| &c.stack_effect)
-        });
-
         let state = match &mut self.current_state {
             Some(s) => s,
             None => return,
         };
 
-        match stack_effect {
-            Some(StackEffect::Known { inputs, outputs }) => {
+        match resolve_call_effect(Some(&self.resolver), self.contracts, target) {
+            CallEffect::Known { inputs, outputs } => {
                 // Pop inputs
-                for _ in 0..*inputs {
+                for _ in 0..inputs {
                     state.stack.pop();
                 }
                 // Push outputs as derived values (procedure return values)
-                for _ in 0..*outputs {
+                for _ in 0..outputs {
                     let taint = state.make_proc_return(target_name.clone());
                     state.stack.push(taint);
                 }
             }
-            Some(StackEffect::KnownInputs { inputs }) => {
+            CallEffect::KnownInputs { inputs } => {
                 // We know inputs but not outputs - pop inputs, then clear tracking
-                for _ in 0..*inputs {
+                for _ in 0..inputs {
                     state.stack.pop();
                 }
                 // Unknown outputs - clear tracking to avoid false positives
                 state.stack.clear();
             }
-            Some(StackEffect::Unknown) | None => {
+            CallEffect::Unknown => {
                 // Unknown stack effect - clear tracking to avoid false positives
                 state.stack.clear();
             }
