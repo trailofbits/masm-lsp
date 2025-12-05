@@ -4,9 +4,7 @@ use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module};
 use miden_debug_types::{DefaultSourceManager, Spanned};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use crate::analysis::{
-    infer_module_contracts_with_store, ContractStore, ProcContract,
-};
+use crate::analysis::{infer_module_contracts_with_store, ContractStore, ProcContract};
 use crate::diagnostics::span_to_range;
 use crate::symbol_path::SymbolPath;
 

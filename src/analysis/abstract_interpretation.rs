@@ -1460,9 +1460,7 @@ fn apply_neutral_loop_summary(state: &mut AbstractState, analysis: &LoopAnalysis
     let mut new_stack = state.stack[..prefix_len].to_vec();
     new_stack.extend(analysis.post_iteration_stack.iter().cloned());
     state.stack = new_stack;
-    state.discovered_inputs = state
-        .discovered_inputs
-        .max(analysis.min_inputs_required);
+    state.discovered_inputs = state.discovered_inputs.max(analysis.min_inputs_required);
 }
 
 /// Infer parametric structure for a loop by comparing consecutive iterations.
