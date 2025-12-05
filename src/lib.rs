@@ -1,23 +1,23 @@
-pub mod analysis;
+pub use masm_analysis as analysis;
+pub use masm_analysis::descriptions;
+pub use masm_analysis::instruction_docs;
+pub use masm_analysis::stack_effect;
+pub use masm_analysis::symbol_path;
+pub use masm_analysis::symbol_resolution;
+pub use masm_decompiler as decompiler;
 pub mod client;
 pub mod code_lens;
 pub mod cursor_resolution;
-pub mod decompiler;
-pub mod descriptions;
 pub mod diagnostics;
 pub mod index;
 pub mod inlay_hints;
-pub mod instruction_docs;
 pub mod module_path;
 pub mod server;
 pub mod service;
-pub mod stack_effect;
-pub mod symbol_path;
-pub mod symbol_resolution;
 pub mod util;
 
 pub use cursor_resolution::ResolutionError;
-pub use symbol_path::SymbolPath;
+pub use masm_analysis::symbol_path::SymbolPath;
 
 /// The type of inlay hints to display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

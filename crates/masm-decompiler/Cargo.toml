@@ -1,0 +1,17 @@
+[package]
+name = "masm-decompiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+masm-analysis = { path = "../masm-analysis" }
+masm-instructions = { path = "../masm-instructions" }
+miden-assembly-syntax = { git = "https://github.com/0xMiden/miden-vm", package = "miden-assembly-syntax", default-features = true }
+miden-debug-types = { git = "https://github.com/0xMiden/miden-vm", package = "miden-debug-types", default-features = true }
+tower-lsp = "0.20"
+thiserror = "1.0"
+serde_json = "1.0"
+
+[dev-dependencies]
+proptest = "1.4"
+criterion = { version = "0.5", features = ["async_tokio"] }

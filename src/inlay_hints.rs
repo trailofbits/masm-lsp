@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, R
 
 use crate::descriptions::{format_push_immediate, ToDescription};
 use crate::diagnostics::span_to_range;
-use crate::instruction_docs::get_instruction_info;
+use crate::instruction_docs::{get_instruction_info, instruction_description};
 
 /// The kind of invocation instruction.
 #[derive(Clone, Copy)]
@@ -275,7 +275,7 @@ fn render_note(instruction: &Span<Instruction>) -> Option<String> {
     // Fall back to static lookup - use description for inlay hints
     let rendered = instruction.inner().to_string();
     let info = get_instruction_info(&rendered)?;
-    Some(info.description.to_string())
+    Some(instruction_description(&rendered, info))
 }
 
 #[derive(Default)]
