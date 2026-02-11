@@ -3,834 +3,834 @@
 [[instructions]]
 name = "lte"
 description = "c = 1, if a ≤ b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (a ≤ b, ...)"
 
 [[instructions]]
 name = "lte.{n}"
-description = "c = 1, if a ≤ b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a ≤ {n}, and 0 otherwise."
+stack_effect = "(a, ...) → (a ≤ {n}, ...)"
 
 [[instructions]]
 name = "lt"
 description = "c = 1, if a < b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (a < b, ...)"
 
 [[instructions]]
 name = "lt.{n}"
-description = "c = 1, if a < b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a < {n}, and 0 otherwise."
+stack_effect = "(a, ...) → (a < {n}, ...)"
 
 [[instructions]]
 name = "gte"
 description = "c = 1, if a ≥ b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (a ≥ b, ...)"
 
 [[instructions]]
 name = "gte.{n}"
-description = "c = 1, if a ≥ b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a ≥ {n}, and 0 otherwise."
+stack_effect = "(b, a, ...) → (a ≥ {n}, ...)"
 
 [[instructions]]
 name = "gt"
 description = "c = 1, if a > b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (a > b, ...)"
 
 [[instructions]]
 name = "gt.{n}"
-description = "c = 1, if a > b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a > {n}, and 0 otherwise."
+stack_effect = "(a, ...) → (a > {n}, ...)"
 
 [[instructions]]
 name = "eq"
 description = "c = 1, if a = b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (a = b, ...)"
 
 [[instructions]]
 name = "eq.{n}"
-description = "c = 1, if a = b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a = {n}, and 0 otherwise."
+stack_effect = "(a, ...) → (a = {n}, ...)"
 
 [[instructions]]
 name = "neq"
 description = "c = 1, if a ≠ b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (a ≠ b, ...)"
 
 [[instructions]]
 name = "neq.{n}"
-description = "c = 1, if a ≠ b, and 0 otherwise."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a ≠ {n}, and 0 otherwise."
+stack_effect = "(a, ...) → (a ≠ {n}, ...)"
 
 [[instructions]]
 name = "eqw"
 description = "c = 1, if a_i = b_i for all i in {0,1,2,3}, and 0 otherwise."
-stack_effect = "(A, B, ...) → (c, A, B, ...)."
+stack_effect = "(A, B, ...) → (A = B, A, B, ...)"
 
 [[instructions]]
 name = "is_odd"
 description = "b = 1, if a is odd, and 0 otherwise."
-stack_effect = "(a, ...) → (b, ...)."
+stack_effect = "(a, ...) → (a & 1, ...)"
 
 [[instructions]]
 name = "assert"
 description = "Removes a if a = 1. Fails if a ≠ 1."
-stack_effect = "(a, ...) → (...)."
+stack_effect = "(a, ...) → (...)"
 
 [[instructions]]
 name = "assertz"
 description = "Removes a if a = 0. Fails if a ≠ 0."
-stack_effect = "(a, ...) → (...)."
+stack_effect = "(a, ...) → (...)"
 
 [[instructions]]
 name = "assert_eq"
 description = "Removes a, b if a = b. Fails if a ≠ b."
-stack_effect = "(b, a, ...) → (...)."
+stack_effect = "(b, a, ...) → (...)"
 
 [[instructions]]
 name = "assert_eqw"
 description = "Removes A, B if A = B. Fails if A ≠ B."
-stack_effect = "(B, A, ...) → (...)."
+stack_effect = "(B, A, ...) → (...)"
 
 [[instructions]]
 name = "add"
 description = "c = (a + b) mod p."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (a + b, ...)"
 
 [[instructions]]
 name = "add.{n}"
 description = "c = (a + {n}) mod p"
-stack_effect = "(a, ...) → (a + {n}, ...)."
+stack_effect = "(a, ...) → (a + {n}, ...)"
 
 [[instructions]]
 name = "sub"
 description = "c = (a - b) mod p."
-stack_effect = "(b, a, ...) → (a - b, ...)."
+stack_effect = "(b, a, ...) → (a - b, ...)"
 
 [[instructions]]
 name = "sub.{n}"
 description = "c = (a - {n}) mod p."
-stack_effect = "(a, ...) → (a - {n}, ...)."
+stack_effect = "(a, ...) → (a - {n}, ...)"
 
 [[instructions]]
 name = "mul"
 description = "c = (a * b) mod p."
-stack_effect = "(b, a, ...) → (a * b, ...)."
+stack_effect = "(b, a, ...) → (a * b, ...)"
 
 [[instructions]]
 name = "mul.{n}"
 description = "c = (a * {n}) mod p."
-stack_effect = "(a, ...) → (a * {n}, ...)."
+stack_effect = "(a, ...) → (a * {n}, ...)"
 
 [[instructions]]
 name = "div"
 description = "c = (a * b^-1) mod p."
-stack_effect = "(b, a, ...) → (a / b, ...)."
+stack_effect = "(b, a, ...) → (a / b, ...)"
 
 [[instructions]]
 name = "div.{n}"
 description = "c = (a * {n}^-1) mod p."
-stack_effect = "(a, ...) → ( a / {n}, ...)."
+stack_effect = "(a, ...) → ( a / {n}, ...)"
 
 [[instructions]]
 name = "neg"
 description = "b = -a mod p."
-stack_effect = "(a, ...) → (-a, ...)."
+stack_effect = "(a, ...) → (-a, ...)"
 
 [[instructions]]
 name = "inv"
 description = "b = a^-1 mod p."
-stack_effect = "(a, ...) → (a^-1, ...)."
+stack_effect = "(a, ...) → (a^-1, ...)"
 
 [[instructions]]
 name = "pow2"
 description = "b = 2^a. Fails if a > 63."
-stack_effect = "(a, ...) → (2^a, ...)."
+stack_effect = "(a, ...) → (2^a, ...)"
 
 [[instructions]]
 name = "exp.u{n}"
-description = "c = a^b. Fails if {n} is outside [0, 63)."
-stack_effect = "(b, a, ...) → (a^b, ...)."
+description = "c = a^b. Fails if {n} is outside [0, 63)"
+stack_effect = "(b, a, ...) → (a^b, ...)"
 
 [[instructions]]
 name = "exp.{n}"
-description = "c = a^b. Fails if {n} is outside [0, 63)."
-stack_effect = "(b, a, ...) → (a^b, ...)."
+description = "c = a^b. Fails if {n} is outside [0, 63)"
+stack_effect = "(b, a, ...) → (a^b, ...)"
 
 [[instructions]]
 name = "ilog2"
 description = "b = ⌊log_2(a)⌋. Fails if a = 0."
-stack_effect = "(a, ...) → (⌊log_2(a)⌋, ...)."
+stack_effect = "(a, ...) → (⌊log_2(a)⌋, ...)"
 
 [[instructions]]
 name = "not"
 description = "b = 1 - a. Fails if a > 1."
-stack_effect = "(a, ...) → (1 - a, ...)."
+stack_effect = "(a, ...) → (1 - a, ...)"
 
 [[instructions]]
 name = "and"
 description = "c = a * b. Fails if max(a, b) > 1."
-stack_effect = "(b, a, ...) → (a and b, ...)."
+stack_effect = "(b, a, ...) → (a and b, ...)"
 
 [[instructions]]
 name = "or"
 description = "c = a + b - a * b. Fails if max(a, b) > 1."
-stack_effect = "(b, a, ...) → (a or b, ...)."
+stack_effect = "(b, a, ...) → (a or b, ...)"
 
 [[instructions]]
 name = "xor"
 description = "c = a + b - 2 * a * b. Fails if max(a, b) > 1."
-stack_effect = "(b, a, ...) → (a xor b, ...)."
+stack_effect = "(b, a, ...) → (a xor b, ...)"
 
 [[instructions]]
 name = "ext2add"
 description = "c1 = (a1 + b1) mod p ; c0 = (a0 + b0) mod p"
-stack_effect = "(b1, b0, a1, a0, ...) → (a1 + b1, a0 + b0, ...)."
+stack_effect = "(b1, b0, a1, a0, ...) → (a1 + b1, a0 + b0, ...)"
 
 [[instructions]]
 name = "ext2sub"
 description = "c1 = (a1 - b1) mod p ; c0 = (a0 - b0) mod p"
-stack_effect = "(b1, b0, a1, a0, ...) → (a1 - b1, a0 - b0, ...)."
+stack_effect = "(b1, b0, a1, a0, ...) → (a1 - b1, a0 - b0, ...)"
 
 [[instructions]]
 name = "ext2mul"
 description = "c1 = (a0 + a1)(b0 + b1) - a0b0 mod p ; c0 = a0b0 - 2a1b1 mod p"
-stack_effect = "(b1, b0, a1, a0, ...) → (c1, c0, ...)."
+stack_effect = "(b1, b0, a1, a0, ...) → (c1, c0, ...)"
 
 [[instructions]]
 name = "ext2neg"
 description = "c1 = -a1 ; c0 = -a0"
-stack_effect = "(a1, a0, ...) → (-a1, -a0, ...)."
+stack_effect = "(a1, a0, ...) → (-a1, -a0, ...)"
 
 [[instructions]]
 name = "ext2inv"
 description = "c = a^-1 in F_p[x]/(x^2 - x + 2). Fails if a = 0."
-stack_effect = "(a1, a0, ...) → (c1, c0, ...)."
+stack_effect = "(a1, a0, ...) → (c1, c0, ...)"
 
 [[instructions]]
 name = "ext2div"
 description = "c = a * b^-1 in F_p[x]/(x^2 - x + 2). Fails if b = 0."
-stack_effect = "(b1, b0, a1, a0, ...) → (c1, c0, ...)."
+stack_effect = "(b1, b0, a1, a0, ...) → (c1, c0, ...)"
 
 [[instructions]]
 name = "u32test"
 description = "b = 1, if a < 2^32, and 0 otherwise."
-stack_effect = "(a, ...) → (b, a, ...)."
+stack_effect = "(a, ...) → (a < 2^32, a, ...)"
 
 [[instructions]]
 name = "u32testw"
 description = "b = 1, if a_i < 2^32 for all i in {0,1,2,3}, and 0 otherwise."
-stack_effect = "(A, ...) → (b, A, ...)."
+stack_effect = "(A, ...) → (b, A, ...)"
 
 [[instructions]]
 name = "u32assert"
 description = "Fails if a ≥ 2^32."
-stack_effect = "(a, ...) → (a, ...)."
+stack_effect = "(a, ...) → (a, ...)"
 
 [[instructions]]
 name = "u32assert2"
 description = "Fails if a ≥ 2^32 or b ≥ 2^32."
-stack_effect = "(b, a,...) → (b, a,...)."
+stack_effect = "(b, a,...) → (b, a,...)"
 
 [[instructions]]
 name = "u32assertw"
 description = "Fails if any element of A is ≥ 2^32."
-stack_effect = "(A, ...) → (A, ...)."
+stack_effect = "(A, ...) → (A, ...)"
 
 [[instructions]]
 name = "u32cast"
 description = "b = a mod 2^32."
-stack_effect = "(a, ...) → (b, ...)."
+stack_effect = "(a, ...) → (a mod 2^32, ...)"
 
 [[instructions]]
 name = "u32split"
-description = "b = a mod 2^32, c = floor( a / 2^32 )."
-stack_effect = "(a, ...) → (c, b, ...)."
+description = "b = a mod 2^32, c = ⌊a / 2^32⌋"
+stack_effect = "(a, ...) → (⌊a / 2^32⌋, a mod 2^32, ...)"
 
 [[instructions]]
 name = "u32overflowing_add"
-description = "c = (a + b) mod 2^32, d = 1, if (a + b) ≥ 2^32, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (d, c, ...)."
+description = "c = (a + b) mod 2^32, d = 1, if (a + b) ≥ 2^32, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (overflow, (a + b) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32overflowing_add.{n}"
-description = "c = (a + b) mod 2^32, d = 1, if (a + b) ≥ 2^32, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (d, c, ...)."
+description = "c = (a + {n}) mod 2^32, d = 1, if (a + {n}) ≥ 2^32, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → (overflow, (a + {n}) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32wrapping_add"
-description = "c = (a + b) mod 2^32. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = (a + b) mod 2^32. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → ((a + b) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32wrapping_add.{n}"
-description = "c = (a + b) mod 2^32. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = (a + {n}) mod 2^32. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → ((a + {n}) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32overflowing_add3"
-description = "d = (a+b+c) mod 2^32, e = floor( (a+b+c)/2^32 ). Undefined if max(a,b,c) ≥ 2^32."
-stack_effect = "(c, b, a, ...) → (e, d, ...)."
+description = "d = (a+b+c) mod 2^32, e = ⌊(a+b+c) / 2^32⌋. Undefined if max(a,b,c) ≥ 2^32."
+stack_effect = "(c, b, a, ...) → (⌊(a+b+c) / 2^32⌋, (a+b+c) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32wrapping_add3"
 description = "d = (a+b+c) mod 2^32. Undefined if max(a,b,c) ≥ 2^32."
-stack_effect = "(c, b, a, ...) → (d, ...)."
+stack_effect = "(c, b, a, ...) → ((a+b+c) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32overflowing_sub"
-description = "c = (a - b) mod 2^32, d = 1, if a < b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (d, c, ...)."
+description = "c = (a - b) mod 2^32, d = 1, if a < b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (overflow, (a - b) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32overflowing_sub.{n}"
-description = "c = (a - b) mod 2^32, d = 1, if a < b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (d, c, ...)."
+description = "c = (a - {n}) mod 2^32, d = 1, if a < b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → (overflow, (a - {n}) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32wrapping_sub"
-description = "c = (a - b) mod 2^32. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = (a - b) mod 2^32. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → ((a - b) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32wrapping_sub.{n}"
-description = "c = (a - b) mod 2^32. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = (a - {n}) mod 2^32. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → ((a - {n}) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32overflowing_mul"
-description = "c = (a * b) mod 2^32, d = floor((a * b) / 2^32). Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (d, c, ...)."
+description = "c = (a * b) mod 2^32, d = ⌊(a * b) / 2^32⌋. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (⌊(a * b) / 2^32⌋, (a * b) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32overflowing_mul.{n}"
-description = "c = (a * b) mod 2^32, d = floor((a * b) / 2^32). Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (d, c, ...)."
+description = "c = (a * {n}) mod 2^32, d = ⌊(a * b) / 2^32⌋. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → (⌊(a * {n}) / 2^32⌋, (a * {n}) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32wrapping_mul"
-description = "c = (a * b) mod 2^32. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = (a * b) mod 2^32. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → ((a * b) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32wrapping_mul.{n}"
-description = "c = (a * b) mod 2^32. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = (a * {n}) mod 2^32. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → ((a * {n}) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32overflowing_madd"
-description = "d = (a * b+c) mod 2^32, e = floor((a * b+c) / 2^32). Undefined if max(a,b,c) ≥ 2^32."
-stack_effect = "(b, a, c, ...) → (e, d, ...)."
+description = "d = (a * b + c) mod 2^32, e = ⌊(a * b + c) / 2^32⌋. Undefined if max(a,b,c) ≥ 2^32."
+stack_effect = "(b, a, c, ...) → (⌊(a * b + c) / 2^32⌋, (a * b + c) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32wrapping_madd"
 description = "d = (a * b+c) mod 2^32. Undefined if max(a,b,c) ≥ 2^32."
-stack_effect = "(b, a, c, ...) → (d, ...)."
+stack_effect = "(b, a, c, ...) → ((a * b + c) mod 2^32, ...)"
 
 [[instructions]]
 name = "u32div"
-description = "c = floor(a/b). Fails if b=0. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = ⌊a / b⌋. Fails if b = 0. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (⌊a / b⌋, ...)"
 
 [[instructions]]
 name = "u32div.{n}"
-description = "c = floor(a/{n}). Fails if {n} = 0. Undefined if max(a,{n}) ≥ 2^32."
-stack_effect = "(a, ...) → (floor(a/{n}), ...)."
+description = "c = ⌊a / {n}⌋. Fails if {n} = 0. Undefined if max(a, {n}) ≥ 2^32."
+stack_effect = "(a, ...) → (⌊a / b⌋, ...)"
 
 [[instructions]]
 name = "u32mod"
-description = "c = a mod b. Fails if b = 0. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (a mod b, ...)."
+description = "c = a mod b. Fails if b = 0. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a mod b, ...)"
 
 [[instructions]]
 name = "u32mod.{n}"
-description = "c = a mod {n}. Fails if {n} = 0. Undefined if max(a,{n}) ≥ 2^32."
-stack_effect = "(a, ...) → (a mod {n}, ...)."
+description = "c = a mod {n}. Fails if {n} = 0. Undefined if max(a, {n}) ≥ 2^32."
+stack_effect = "(a, ...) → (a mod {n}, ...)"
 
 [[instructions]]
 name = "u32divmod"
-description = "c = floor( a/b ), d = a mod b. Fails if b = 0. Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (d, c, ...)."
+description = "c = ⌊a / b⌋, d = a mod b. Fails if b = 0. Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a mod b, ⌊a / b⌋, ...)"
 
 [[instructions]]
 name = "u32divmod.{n}"
-description = "c = floor(a/{n}), d = a mod b. Fails if {n} = 0. Undefined if max(a,{n}) ≥ 2^32."
-stack_effect = "(a, ...) → (d, c, ...)."
+description = "c = ⌊a / {n}⌋, d = a mod {n}. Fails if {n} = 0. Undefined if max(a, {n}) ≥ 2^32."
+stack_effect = "(a, ...) → (a mod {n}, ⌊a / {n}⌋, ...)"
 
 [[instructions]]
 name = "u32and"
-description = "Bitwise AND. Fails if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "Bitwise AND. Fails if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a bitand b, ...)"
 
 [[instructions]]
 name = "u32and.{n}"
-description = "Bitwise AND. Fails if max(a,{n}) ≥ 2^32."
-stack_effect = "(b, a, ...) → (a bitand {n}, ...)."
+description = "Bitwise AND. Fails if max(a, {n}) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a bitand {n}, ...)"
 
 [[instructions]]
 name = "u32or"
-description = "Bitwise OR. Fails if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (a bitor b, ...)."
+description = "Bitwise OR. Fails if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a bitor b, ...)"
 
 [[instructions]]
 name = "u32or.{n}"
-description = "Bitwise OR. Fails if max(a,{n}) ≥ 2^32."
-stack_effect = "(a, ...) → (a bitor {n}, ...)."
+description = "Bitwise OR. Fails if max(a, {n}) ≥ 2^32."
+stack_effect = "(a, ...) → (a bitor {n}, ...)"
 
 [[instructions]]
 name = "u32xor"
-description = "Bitwise XOR. Fails if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (a bitxor b, ...)."
+description = "Bitwise XOR. Fails if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a bitxor b, ...)"
 
 [[instructions]]
 name = "u32xor.{n}"
-description = "Bitwise XOR. Fails if max(a,{n}) ≥ 2^32."
-stack_effect = "(b, a, ...) → (a bitxor {n}, ...)."
+description = "Bitwise XOR. Fails if max(a, {n}) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a bitxor {n}, ...)"
 
 [[instructions]]
 name = "u32not"
 description = "Bitwise NOT. Fails if a ≥ 2^32."
-stack_effect = "(a, ...) → (~a, ...)."
+stack_effect = "(a, ...) → (~a, ...)"
 
 [[instructions]]
 name = "u32not.{n}"
 description = "Bitwise NOT. Fails if a ≥ 2^32."
-stack_effect = "(a, ...) → (~a, ...)."
+stack_effect = "(a, ...) → (~a, ...)"
 
 [[instructions]]
 name = "u32shl"
 description = "c = (a * 2^b) mod 2^32. Undefined if a ≥ 2^32 or b > 31."
-stack_effect = "(b, a, ...) → (a << b, ...)."
+stack_effect = "(b, a, ...) → (a << b, ...)"
 
 [[instructions]]
 name = "u32shl.{n}"
 description = "c = (a * 2^{n}) mod 2^32. Undefined if a ≥ 2^32 or {n} > 31."
-stack_effect = "(a, ...) → (a << {n}, ...)."
+stack_effect = "(a, ...) → (a << {n}, ...)"
 
 [[instructions]]
 name = "u32shr"
 description = "c = floor(a / 2^b). Undefined if a ≥ 2^32 or b > 31."
-stack_effect = "(b, a, ...) → (a >> b, ...)."
+stack_effect = "(b, a, ...) → (a >> b, ...)"
 
 [[instructions]]
 name = "u32shr.{n}"
 description = "c = floor(a / 2^b). Undefined if a ≥ 2^32 or b > 31."
-stack_effect = "(a, ...) → (a >> {n}, ...)."
+stack_effect = "(a, ...) → (a >> {n}, ...)"
 
 [[instructions]]
 name = "u32rotl"
 description = "Rotate left. Undefined if a ≥ 2^32 or b > 31."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (rotl(a, b), ...)"
 
 [[instructions]]
 name = "u32rotl.{n}"
-description = "Rotate left. Undefined if a ≥ 2^32 or b > 31."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "Rotate left. Undefined if a ≥ 2^32 or {n} > 31."
+stack_effect = "(a, ...) → (rotl(a, {n}), ...)"
 
 [[instructions]]
 name = "u32rotr"
 description = "Rotate right. Undefined if a ≥ 2^32 or b > 31."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(b, a, ...) → (rotr(a, b), ...)"
 
 [[instructions]]
 name = "u32rotr.{n}"
 description = "Rotate right. Undefined if a ≥ 2^32 or b > 31."
-stack_effect = "(b, a, ...) → (c, ...)."
+stack_effect = "(a, ...) → (rotr(a, {n}), ...)"
 
 [[instructions]]
 name = "u32popcnt"
 description = "Population count (Hamming weight). Undefined if a ≥ 2^32."
-stack_effect = "(a, ...) → (b, ...)."
+stack_effect = "(a, ...) → (popcount(a), ...)"
 
 [[instructions]]
 name = "u32clz"
 description = "Count leading zeros. Undefined if a ≥ 2^32."
-stack_effect = "(a, ...) → (b, ...)."
+stack_effect = "(a, ...) → (clz(a), ...)"
 
 [[instructions]]
 name = "u32ctz"
 description = "Count trailing zeros. Undefined if a ≥ 2^32."
-stack_effect = "(a, ...) → (b, ...)."
+stack_effect = "(a, ...) → (ctz(a), ...)"
 
 [[instructions]]
 name = "u32clo"
 description = "Count leading ones. Undefined if a ≥ 2^32."
-stack_effect = "(a, ...) → (b, ...)."
+stack_effect = "(a, ...) → (clo(a), ...)"
 
 [[instructions]]
 name = "u32cto"
 description = "Count trailing ones. Undefined if a ≥ 2^32."
-stack_effect = "(a, ...) → (b, ...)."
+stack_effect = "(a, ...) → (cto(a), ...)"
 
 [[instructions]]
 name = "u32lt"
-description = "c = 1, if a < b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a < b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a < b, ...)"
 
 [[instructions]]
 name = "u32lt.{n}"
-description = "c = 1, if a < b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a < {n}, and 0 otherwise. . Undefined if max(a, {n}) ≥ 2^32."
+stack_effect = "(a, ...) → (a < {n}, ...)"
 
 [[instructions]]
 name = "u32lte"
-description = "c = 1, if a ≤ b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a ≤ b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a ≤ b, ...)"
 
 [[instructions]]
 name = "u32lte.{n}"
-description = "c = 1, if a ≤ b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a ≤ {n}, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → (a ≤ {n}, ...)"
 
 [[instructions]]
 name = "u32gt"
-description = "c = 1, if a > b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a > b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a > b, ...)"
 
 [[instructions]]
 name = "u32gt.{n}"
-description = "c = 1, if a > b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a > {n}, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → (a > {n}, ...)"
 
 [[instructions]]
 name = "u32gte"
-description = "c = 1, if a ≥ b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a ≥ b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (a ≥ b, ...)"
 
 [[instructions]]
 name = "u32gte.{n}"
-description = "c = 1, if a ≥ b, and 0 otherwise. . Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = 1, if a ≥ {n}, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(a, ...) → (a ≥ {n}, ...)"
 
 [[instructions]]
 name = "u32min"
-description = "c = min(a,b). Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = min(a, b). Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (min(a, b), ...)"
 
 [[instructions]]
 name = "u32min.{n}"
-description = "c = min(a,b). Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = min(a, {n}). Undefined if max(a, {n}) ≥ 2^32."
+stack_effect = "(a, ...) → (min(a, {n}), ...)"
 
 [[instructions]]
 name = "u32max"
-description = "c = max(a,b). Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = max(a, b). Undefined if max(a, b) ≥ 2^32."
+stack_effect = "(b, a, ...) → (max(a, b), ...)"
 
 [[instructions]]
 name = "u32max.{n}"
-description = "c = max(a,b). Undefined if max(a,b) ≥ 2^32."
-stack_effect = "(b, a, ...) → (c, ...)."
+description = "c = max(a, {n}). Undefined if max(a, {n}) ≥ 2^32."
+stack_effect = "(a, ...) → (max(a, {n}), ...)"
 
 [[instructions]]
 name = "drop"
 description = "Deletes the top stack item."
-stack_effect = "(a, ...) → (...)."
+stack_effect = "(a, ...) → (...)"
 
 [[instructions]]
 name = "dropw"
 description = "Deletes a word (4 elements) from the top of the stack."
-stack_effect = "(A, ...) → (...)."
+stack_effect = "(A, ...) → (...)"
 
 [[instructions]]
 name = "padw"
 description = "Pushes four 0 values onto the stack."
-stack_effect = "(...) → (0,0,0,0, ...)."
+stack_effect = "(...) → (0, 0, 0, 0, ...)"
 
 [[instructions]]
 name = "dup.{n}"
-description = "Pushes a copy of the {nth} stack item (0-indexed) onto the stack. dup is dup.0. Valid for {n} in 0..=15."
-stack_effect = "(..., a, ...) → (a, ..., a, ...)."
+description = "Pushes a copy of the {nth} stack item (0-indexed) onto the stack."
+stack_effect = "(..., a, ...) → (a, ..., a, ...)"
 
 [[instructions]]
 name = "dupw.{n}"
-description = "Pushes a copy of the {nth} stack word (0-indexed) onto the stack. dupw is dupw.0. Valid for {n} in 0..=3."
-stack_effect = "(..., A, ...) → (A, ..., A, ...)."
+description = "Pushes a copy of the {nth} stack word (0-indexed) onto the stack."
+stack_effect = "(..., A, ...) → (A, ..., A, ...)"
 
 [[instructions]]
 name = "swap.{n}"
-description = "Swaps the top stack item with the {nth} stack item (1-indexed). swap is swap.1. Valid for {n} in 1..=15."
-stack_effect = "(a, ..., b, ...) → (b, ..., a, ...)."
+description = "Swaps the top stack item with the {nth} stack item (1-indexed)."
+stack_effect = "(a, ..., b, ...) → (b, ..., a, ...)"
 
 [[instructions]]
 name = "swapw.{n}"
-description = "Swaps the top stack word with the {nth} stack word (1-indexed). swapw is swapw.1. Valid for {n} in 1..=3."
-stack_effect = "(A, ..., B, ...) → (B, ..., A, ...)."
+description = "Swaps the top stack word with the {nth} stack word (1-indexed)."
+stack_effect = "(A, ..., B, ...) → (B, ..., A, ...)"
 
 [[instructions]]
 name = "swapdw"
 description = "Swaps words: 1st with 3rd, 2nd with 4th."
-stack_effect = "(D,C,B,A, ...) → (B,A,D,C ...)."
+stack_effect = "(D, C, B, A, ...) → (B, A, D, C, ...)"
 
 [[instructions]]
 name = "movup.{n}"
-description = "Moves the {nth} stack item (2-indexed) to the top. Valid for {n} in 2..=15."
-stack_effect = "(..., a, ...) → (a, ...)."
+description = "Moves the {nth} stack item (2-indexed) to the top."
+stack_effect = "(..., a, ...) → (a, ...)"
 
 [[instructions]]
 name = "movupw.{n}"
-description = "Moves the {nth} stack word (2-indexed) to the top. Valid for {n} in 2..=3."
-stack_effect = "(..., A, ...) → (A, ...)."
+description = "Moves the {nth} stack word (2-indexed) to the top."
+stack_effect = "(..., A, ...) → (A, ...)"
 
 [[instructions]]
 name = "movdn.{n}"
-description = "Moves the top stack item to the {nth} position (2-indexed). Valid for {n} in 2..=15."
-stack_effect = "(a, ...) → (..., a, ...)."
+description = "Moves the top stack item to the {nth} position (2-indexed)."
+stack_effect = "(a, ...) → (..., a, ...)"
 
 [[instructions]]
 name = "movdnw.{n}"
-description = "Moves the top stack word to the {nth} word position (2-indexed). Valid for {n} in 2..=3."
-stack_effect = "(A, ...) → (..., A, ...)."
+description = "Moves the top stack word to the {nth} word position (2-indexed)."
+stack_effect = "(A, ...) → (..., A, ...)"
 
 [[instructions]]
 name = "cswap"
-description = "If c = 1, d=b, e=a. If c = 0, d=a, e=b. Fails if c > 1."
-stack_effect = "(c, b, a, ...) → (e, d, ...)."
+description = "If c = 1, d = b, e = a. If c = 0, d = a, e = b. Fails if c > 1."
+stack_effect = "(c, b, a, ...) → (c ? a : b, c ? b : a, ...)"
 
 [[instructions]]
 name = "cswapw"
-description = "If c = 1, D=B, E=A. If c = 0, D=A, E=B. Fails if c > 1."
-stack_effect = "(c, B, A, ...) → (E, D, ...)."
+description = "If c = 1, D = B, E = A. If c = 0, D = A, E = B. Fails if c > 1."
+stack_effect = "(c, B, A, ...) → (c ? A : B, c ? B : A, ...)"
 
 [[instructions]]
 name = "cdrop"
-description = "If c = 1, d=b. If c = 0, d=a. Fails if c > 1."
-stack_effect = "(c, b, a, ...) → (d, ...)."
+description = "If c = 1, d = b. If c = 0, d = a. Fails if c > 1."
+stack_effect = "(c, b, a, ...) → (c ? b : a, ...)"
 
 [[instructions]]
 name = "cdropw"
-description = "If c = 1, D=B. If c = 0, D=A. Fails if c > 1."
-stack_effect = "(c, B, A, ...) → (D, ...)."
+description = "If c = 1, D = B. If c = 0, D = A. Fails if c > 1."
+stack_effect = "(c, B, A, ...) → (c ? B : A, ...)"
 
 [[instructions]]
 name = "push.{n}"
-description = "Pushes up to 16 field elements (decimal or hex) onto the stack. Hex words (32 bytes) are little-endian; short hex values are big-endian. Example: push.0x1234.0x5678 or push.0x34120000...78560000..."
-stack_effect = "(...) → (c, b, a, ...)."
+description = "Pushes a field element onto the stack."
+stack_effect = "(...) → ({n}, ...)"
 
 [[instructions]]
 name = "clk"
 description = "Pushes current clock cycle t."
-stack_effect = "(...) → (t, ...)."
+stack_effect = "(...) → (t, ...)"
 
 [[instructions]]
 name = "sdepth"
 description = "Pushes current stack depth d."
-stack_effect = "(...) → (d, ...)."
+stack_effect = "(...) → (d, ...)"
 
 [[instructions]]
 name = "caller"
-description = "In context 0, overwrites the top 4 stack items with hash H of the function that syscall'd into the current context, or [0, 0, 0, 0] when not servicing a SYSCALL. In any other context, H corresponds to the hash of the function that entered the current context."
-stack_effect = "(A, b,...) → (H, b,...)."
+description = "In context 0, overwrites the top 4 stack items with hash H of the function that syscalled into the current context."
+stack_effect = "(A, ...) → (H, ...)"
 
 [[instructions]]
 name = "locaddr.{n}"
 description = "Pushes absolute memory address a of local memory at index {n}."
-stack_effect = "(...) → (a, ...)."
+stack_effect = "(...) → (a, ...)"
 
 [[instructions]]
 name = "procref.{n}"
 description = "Pushes MAST root A of procedure {n}."
-stack_effect = "(...) → (A, ...)."
+stack_effect = "(...) → (A, ...)"
 
 [[instructions]]
 name = "adv_push.{n}"
-description = "Pops {n} values from advice stack to operand stack (1st popped is deepest). Valid {n} in 1..=16. Fails if advice stack has < n values."
-stack_effect = "(...) → (a, ...)."
+description = "Pops {n} values from advice stack to operand stack (1st popped is deepest)."
+stack_effect = "(...) → (a, ...)"
 
 [[instructions]]
 name = "adv_loadw"
-description = "Pops word A (4 elements) from advice stack, overwrites top word of operand stack. Fails if advice stack has < 4 values."
-stack_effect = "(0,0,0,0, ...) → (A, ...)."
+description = "Pops word A (4 elements) from advice stack, overwrites top word of operand stack."
+stack_effect = "(B, ...) → (A, ...)"
 
 [[instructions]]
 name = "adv_pipe"
-description = "Pops 2 words [D,E] from advice stack. Overwrites top 2 words of operand stack. Writes [D,E] to memory at a and a+1. a' ← a+2. Fails if advice stack has < 8 values."
-stack_effect = "(C,B,A,a,...) → (E,D,A,a',...)."
+description = "Pops 2 words (D, E) from advice stack. Overwrites top 2 words of operand stack. Writes (D, E) to memory at a and a + 1. b ← a + 2."
+stack_effect = "(C, B, A, a, ...) → (E, D, A, b,...)"
 
 [[instructions]]
 name = "adv.push_mapval"
 description = "Pushes values from advice_map[K] to advice stack."
-stack_effect = "(K, ...) → (K, ...)."
+stack_effect = "(...) → (...)"
 
 [[instructions]]
 name = "adv.push_mapvaln"
-description = "Pushes [n, ele1, ele2, ...] from advice_map[K] to advice stack, where n is element count."
-stack_effect = "(K, ...) → (K, ...)."
+description = "Pushes (n, a1, a2, ...) from advice_map[K] to advice stack, where n is element count."
+stack_effect = "(...) → (...)"
 
 [[instructions]]
 name = "adv.push_mtnode"
 description = "Pushes Merkle tree node (root R, depth d, index i) from Merkle store to advice stack."
-stack_effect = "(d, i, R, ...) → (d, i, R, ...)."
+stack_effect = "(d, i, R, ...) → (d, i, R, ...)"
 
 [[instructions]]
 name = "adv.insert_mem"
 description = "advice_map[K] ← mem[a..b]."
-stack_effect = "(K, a, b, ...) → (K, a, b, ...)."
+stack_effect = "(K, a, b, ...) → (K, a, b, ...)"
 
 [[instructions]]
 name = "adv.insert_hdword"
-description = "K ← hash(A || B, domain=0). advice_map[K] ← [A,B]."
-stack_effect = "(B, A, ...) → (B, A, ...)."
+description = "K ← hash(A || B, domain=0). advice_map[K] ← (A, B)."
+stack_effect = "(B, A, ...) → (B, A, ...)"
 
 [[instructions]]
 name = "adv.insert_hdword_d"
-description = "K ← hash(A || B, domain=d). advice_map[K] ← [A,B]."
-stack_effect = "(B, A, d, ...) → (B, A, d, ...)."
+description = "K ← hash(A || B, domain=d). advice_map[K] ← (A, B)."
+stack_effect = "(B, A, d, ...) → (B, A, d, ...)"
 
 [[instructions]]
 name = "adv.insert_hqword"
-description = "K ← hash(hash(hash(A || B) || C) || D), domain=0. advice_map[K] ← [A,B,C,D]."
-stack_effect = "(D, C, B, A, ...) → (D, C, B, A, ...)."
+description = "K ← hash(hash(hash(A || B) || C) || D), domain = 0. advice_map[K] ← (A, B, C, D)."
+stack_effect = "(D, C, B, A, ...) → (D, C, B, A, ...)"
 
 [[instructions]]
 name = "adv.insert_hperm"
-description = "K ← permute(C,A,B).digest. advice_map[K] ← [A,B]."
-stack_effect = "(B, A, C, ...) → (B, A, C, ...)."
+description = "K ← permute(C, A, B).digest. advice_map[K] ← (A, B)."
+stack_effect = "(B, A, C, ...) → (B, A, C, ...)"
 
 [[instructions]]
 name = "mem_load"
-description = "v ← mem[a]. Pushes element from mem[a]. If a on stack, it's popped. Fails if a >= 2^32."
-stack_effect = "(a, ...) → (v, ...)."
+description = "v ← mem[a]. Pushes element from mem[a] and pops a."
+stack_effect = "(a, ...) → (mem[a], ...)"
 
 [[instructions]]
 name = "mem_load.{n}"
-description = "v ← mem[a]. Pushes element from mem[a]. If {n} on stack, it's popped. Fails if a >= 2^32."
-stack_effect = "(a, ...) → (v, ...)."
+description = "v ← mem[{n}]. Pushes element from mem[{n}]."
+stack_effect = "(a, ...) → (mem[{n}], ...)"
 
 [[instructions]]
 name = "mem_loadw_be"
-description = "A ← mem[a..a+3] (word, big-endian). Overwrites top 4 stack elements (mem[a+3] is top). If a on stack, it's popped. Fails if a >= 2^32 or a not multiple of 4."
-stack_effect = "(a, 0,0,0,0,...) → (A, ...)."
+description = "A ← mem[a..a+3] (word, big-endian). Overwrites top 4 stack elements (mem[a+3] is top). If a on stack, it's popped."
+stack_effect = "(a, A,...) → (mem[a..a+3], ...)"
 
 [[instructions]]
 name = "mem_loadw_be.{n}"
-description = "A ← mem[a..a+3] (word, big-endian). Overwrites top 4 stack elements (mem[a+3] is top). If {n} on stack, it's popped. Fails if a >= 2^32 or {n} not multiple of 4."
-stack_effect = "(a, 0,0,0,0,...) → (A, ...)."
+description = "A ← mem[{n}..{n+3}] (word, big-endian). Overwrites top 4 stack elements (mem[a+3] is top)."
+stack_effect = "(A, ...) → (mem[{n}..{n+3}], ...)"
 
 [[instructions]]
 name = "mem_loadw_le"
-description = "A ← mem[a..a+3] (word, little-endian). Overwrites top 4 stack elements (mem[a] is top). Equivalent to mem_loadw_be reversew. If a on stack, it's popped. Fails if a >= 2^32 or a not multiple of 4."
-stack_effect = "(a, 0,0,0,0,...) → (A, ...)."
+description = "A ← mem[a..a+3] (word, little-endian). Overwrites top 4 stack elements (mem[a] is top). If a on stack, it's popped."
+stack_effect = "(a, A,...) → (mem[a..a+3], ...)"
 
 [[instructions]]
 name = "mem_loadw_le.{n}"
-description = "A ← mem[a..a+3] (word, little-endian). Overwrites top 4 stack elements (mem[a] is top). Equivalent to mem_loadw_be reversew. If {n} on stack, it's popped. Fails if a >= 2^32 or {n} not multiple of 4."
-stack_effect = "(a, 0,0,0,0,...) → (A, ...)."
+description = "A ← mem[{n}..{n+3}] (word, little-endian). Overwrites top 4 stack elements (mem[a] is top)."
+stack_effect = "(A, ...) → (mem[{n}..{n+3}], ...)"
 
 [[instructions]]
 name = "mem_store"
-description = "mem[a] ← v. Pops v to mem[a]. If a on stack, it's popped. Fails if a >= 2^32."
-stack_effect = "(a, v, ...) → (...)."
+description = "mem[a] ← v. Pops v to mem[a]. If a on stack, it's popped."
+stack_effect = "(a, v, ...) → (...)"
 
 [[instructions]]
 name = "mem_store.{n}"
-description = "mem[a] ← v. Pops v to mem[a]. If {n} on stack, it's popped. Fails if a >= 2^32."
-stack_effect = "(a, v, ...) → (...)."
+description = "mem[{n}] ← v. Pops v to mem[{n}]."
+stack_effect = "(v, ...) → (...)"
 
 [[instructions]]
 name = "mem_storew_be"
-description = "mem[a..a+3] ← A. Stores word A in big-endian order (top stack element at mem[a+3]). If a on stack, it's popped. Fails if a >= 2^32 or a not multiple of 4."
-stack_effect = "(a, A, ...) → (A, ...)."
+description = "mem[a..a+3] ← A. Stores word A in big-endian order (top stack element at mem[a+3]). If a on stack, it's popped."
+stack_effect = "(a, A, ...) → (A, ...)"
 
 [[instructions]]
 name = "mem_storew_be.{n}"
-description = "mem[a..a+3] ← A. Stores word A in big-endian order (top stack element at mem[a+3]). If {n} on stack, it's popped. Fails if a >= 2^32 or {n} not multiple of 4."
-stack_effect = "(a, A, ...) → (A, ...)."
+description = "mem[{n}..{n+3}] ← A. Stores word A in big-endian order (top stack element at mem[{n+3}])."
+stack_effect = "(A, ...) → (A, ...)"
 
 [[instructions]]
 name = "mem_storew_le"
-description = "mem[a..a+3] ← A. Stores word A in little-endian order (top stack element at mem[a]). Equivalent to reversew mem_storew_be reversew. If a on stack, it's popped. Fails if a >= 2^32 or a not multiple of 4."
-stack_effect = "(a, A, ...) → (A, ...)."
+description = "mem[a..a+3] ← A. Stores word A in little-endian order (top stack element at mem[a]). If a on stack, it's popped."
+stack_effect = "(a, A, ...) → (A, ...)"
 
 [[instructions]]
 name = "mem_storew_le.{n}"
-description = "mem[a..a+3] ← A. Stores word A in little-endian order (top stack element at mem[a]). Equivalent to reversew mem_storew_be reversew. If {n} on stack, it's popped. Fails if a >= 2^32 or {n} not multiple of 4."
-stack_effect = "(a, A, ...) → (A, ...)."
+description = "mem[{n}..{n+3}] ← A. Stores word A in little-endian order (top stack element at mem[{n}])."
+stack_effect = "(A, ...) → (A, ...)"
 
 [[instructions]]
 name = "mem_stream"
-description = "[E,D] ← [mem[a..a+3], mem[a+4..a+7]]. a' ← a+8. Reads 2 sequential words from memory to top of stack."
-stack_effect = "(C, B, A, a, ...) → (E,D,A,a',...)."
+description = "(E, D) ← (mem[a..a+3], mem[a+4..a+7]). b ← a + 8. Reads 2 sequential words from memory to top of stack."
+stack_effect = "(C, B, A, a, ...) → (E, D, A, b, ...)"
 
 [[instructions]]
 name = "loc_load.{n}"
-description = "v ← local[i]. Pushes element from local memory at index {n}."
-stack_effect = "(...) → (v, ...)."
+description = "v ← local[{n}]. Pushes element from local memory at index {n}."
+stack_effect = "(...) → (v, ...)"
 
 [[instructions]]
 name = "loc_loadw_be.{n}"
-description = "A ← local[i..i+3]. Reads word in big-endian order, local[i+3] is top of stack. Fails if {n} not multiple of 4."
-stack_effect = "(0,0,0,0, ...) → (A, ...)."
+description = "B ← local[{n}..{n+3}]. Reads word in big-endian order, local[{n+3}] is top of stack."
+stack_effect = "(A, ...) → (B, ...)"
 
 [[instructions]]
 name = "loc_loadw_le.{n}"
-description = "A ← local[i..i+3]. Reads word in little-endian order, local[i] is top of stack. Equivalent to loc_loadw_be reversew. Fails if {n} not multiple of 4."
-stack_effect = "(0,0,0,0, ...) → (A, ...)."
+description = "B ← local[{n}..{n+3}]. Reads word in little-endian order, local[{n}] is top of stack."
+stack_effect = "(A, ...) → (B, ...)"
 
 [[instructions]]
 name = "loc_store.{n}"
 description = "local[i] ← v. Pops v to local memory at index {n}."
-stack_effect = "(v, ...) → (...)."
+stack_effect = "(v, ...) → (...)"
 
 [[instructions]]
 name = "loc_storew_be.{n}"
-description = "local[i..i+3] ← A. Stores word in big-endian order, top stack element at local[i+3]."
-stack_effect = "(A, ...) → (A, ...)."
+description = "local[{n}..{n+3}] ← A. Stores word in big-endian order, top stack element at local[{n+3}]."
+stack_effect = "(A, ...) → (A, ...)"
 
 [[instructions]]
 name = "loc_storew_le.{n}"
-description = "local[i..i+3] ← A. Stores word in little-endian order, top stack element at local[i]. Equivalent to reversew loc_storew_be reversew."
-stack_effect = "(A, ...) → (A, ...)."
+description = "local[{n}..{n+3}] ← A. Stores word in little-endian order, top stack element at local[{n}]."
+stack_effect = "(A, ...) → (A, ...)"
 
 [[instructions]]
 name = "hash"
 description = "B ← hash(A). 1-to-1 Rescue Prime Optimized hash."
-stack_effect = "(A, ...) → (B, ...)."
+stack_effect = "(A, ...) → (hash(A), ...)"
 
 [[instructions]]
 name = "hperm"
-description = "D,E,F ← permute(C,A,B). Rescue Prime Optimized permutation. C=capacity, A,B=rate, E=digest."
-stack_effect = "(B, A, C, ...) → (F, E, D, ...)."
+description = "D, E, F ← permute(C, A, B). Rescue Prime Optimized permutation. C = capacity, A,B = rate, E = digest."
+stack_effect = "(B, A, C, ...) → (F, E, D, ...)"
 
 [[instructions]]
 name = "hmerge"
-description = "C ← hash(A,B). 2-to-1 Rescue Prime Optimized hash."
-stack_effect = "(B, A, ...) → (C, ...)."
+description = "C ← hash(A, B). 2-to-1 Rescue Prime Optimized hash."
+stack_effect = "(B, A, ...) → (hash(A, B), ...)"
 
 [[instructions]]
 name = "mtree_get"
 description = "Verifies Merkle path for node V at depth d, index i for tree R (from advice provider), returns V."
-stack_effect = "(d, i, R, ...) → (V, R, ...)."
+stack_effect = "(d, i, R, ...) → (V, R, ...)"
 
 [[instructions]]
 name = "mtree_set"
-description = "Updates node in tree R at d,i to V'. Returns old value V and new root R'. Both trees in advice provider."
-stack_effect = "(d, i, R, V', ...) → (V, R', ...)."
+description = "Updates node in tree R1 at depth d, index i to V2. Returns old value V1 and new root R2. Both trees in advice provider."
+stack_effect = "(d, i, R1, V2, ...) → (V1, R2, ...)"
 
 [[instructions]]
 name = "mtree_merge"
 description = "Merges Merkle trees with roots L (left) and R (right) into new tree M. Input trees retained."
-stack_effect = "(R, L, ...) → (M, ...)."
+stack_effect = "(R, L, ...) → (M, ...)"
 
 [[instructions]]
 name = "mtree_verify"
-description = "Verifies Merkle path for node V at depth d, index i for tree R (from advice provider). ; _Can be parameterized with err code (e.g., mtree_verify.err=123). Default error code is 0._"
-stack_effect = "(V, d, i, R, ...) → (V,d,i,R,...)."
+description = "Verifies Merkle path for node V at depth d, index i for tree R (from advice provider)."
+stack_effect = "(V, d, i, R, ...) → (V, d, i, R, ...)"
 
 [[instructions]]
 name = "emit.{n}"
-description = "Emits an event with the specified {n} to the host. The net effect on the operand stack is no change (internally expands to push.{n} emit drop). Immediate {n} must be defined via const.ID=event(\"...\") or inlined as emit.event(\"...\"). Events allow programs to communicate contextual information to the host for triggering appropriate actions. Example: emit.event(\"foo\") or emit.MY_EVENT"
-stack_effect = "(...) → (...)."
+description = "Emits the event {n} to the host."
+stack_effect = "(...) → (...)"
 
 [[instructions]]
 name = "emit"
-description = "Emits an event using the event_id from the top of the stack. The stack remains unchanged as the event_id is read without consuming it. This instruction reads the event ID from the stack but does not modify the stack depth. Example: with push.1230 on stack, emit reads the event ID 1230 and executes the corresponding event handler. Note that event IDs in the range 0..256 are reserved for system events."
-stack_effect = "(event_id, ...) → (event_id, ...)."
+description = "Emits an event using the event_id from the top of the stack."
+stack_effect = "(event_id, ...) → (event_id, ...)"
 
 [[instructions]]
 name = "trace.{n}"
-description = "Emits a trace with the specified {n} to the host. Does not change the state of the operand stack. The {n} can be any 32-bit value specified either directly or via a [named constant](./code_organization.md#constants). Only active when programs are run with tracing flag (-t or --trace), otherwise ignored. Example: trace.123 or trace.TRACE_ID_1"
-stack_effect = "(...) → (...)."
+description = "Emits the trace {n} to the host."
+stack_effect = "(...) → (...)"
 
 [[instructions]]
 name = "log_precompile"
-description = "Absorbs a precompile commitment into the transcript used for deferred verification. Takes a precompile commitment (TAG and COMM) from the stack and performs an RPO256 permutation to update the transcript capacity (sponge capacity). Outputs [R1, R0, CAP_NEXT]; callers normally drop all three words immediately. See “Precompile flow” for initialization details."
-stack_effect = "(COMM, TAG, PAD, ...) → (R1, R0, CAP_NEXT, ...)."
+description = "Absorbs a precompile commitment into the transcript used for deferred verification."
+stack_effect = "(COMM, TAG, PAD, ...) → (R1, R0, CAP_NEXT, ...)"
