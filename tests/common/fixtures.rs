@@ -1,13 +1,12 @@
 //! Test fixture loading and management.
 
 #![allow(dead_code)]
-use masm_lsp::decompiler::collect_decompilation_hints;
 use miden_assembly_syntax::ast::{Module, ModuleKind};
 use miden_assembly_syntax::{Parse, ParseOptions};
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
-use tower_lsp::lsp_types::{InlayHintLabel, Position, Range};
 
 /// Load a fixture file from tests/fixtures/
 pub fn load_fixture(name: &str) -> String {
@@ -24,9 +23,9 @@ pub fn load_example(path: &str) -> String {
 }
 
 /// Load and parse an example file as a module.
-pub fn load_example_module(path: &str) -> Option<(String, DefaultSourceManager, Module)> {
+pub fn load_example_module(path: &str) -> Option<(String, Arc<DefaultSourceManager>, Module)> {
     let content = load_example(path);
-    let source_manager = DefaultSourceManager::default();
+    let source_manager = Arc::new(DefaultSourceManager::default());
     let uri_str = format!("file:///test/{}", path);
     let uri = miden_debug_types::Uri::from(uri_str.as_str());
     source_manager.load(SourceLanguage::Masm, uri.clone(), content.clone());
@@ -39,71 +38,8 @@ pub fn load_example_module(path: &str) -> Option<(String, DefaultSourceManager, 
         ..Default::default()
     };
 
-    let module = source_file.parse_with_options(&source_manager, opts).ok()?;
+    let module = source_file.parse_with_options(source_manager.clone(), opts).ok()?;
     Some((content, source_manager, *module))
-}
-
-pub fn collect_labels_and_diags(source: &str) -> (Vec<String>, Vec<String>) {
-    // Prepare source manager and parse module
-    let source_manager = DefaultSourceManager::default();
-    let uri = miden_debug_types::Uri::from("file:///test.masm");
-    source_manager.load(SourceLanguage::Masm, uri.clone(), source.to_string());
-
-    let source_file = source_manager
-        .get_by_uri(&uri)
-        .expect("failed to load source");
-
-    let opts = ParseOptions {
-        kind: ModuleKind::Library,
-        path: None,
-        ..Default::default()
-    };
-
-    let module = source_file
-        .parse_with_options(&source_manager, opts)
-        .expect("failed to parse MASM");
-
-    let line_count = source.lines().count() as u32;
-    let last_line_len = source.lines().last().map(|l| l.len()).unwrap_or(0) as u32;
-    let visible_range = Range {
-        start: Position {
-            line: 0,
-            character: 0,
-        },
-        end: Position {
-            line: line_count,
-            character: last_line_len,
-        },
-    };
-
-    let url = Url::parse("file:///test.masm").unwrap();
-
-    let result = collect_decompilation_hints(
-        &module,
-        &source_manager,
-        &url,
-        &visible_range,
-        4,
-        source,
-        None,
-    );
-
-    let labels = result
-        .hints
-        .iter()
-        .filter_map(|h| match &h.label {
-            InlayHintLabel::String(s) => Some(s.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    let diags = result
-        .diagnostics
-        .into_iter()
-        .map(|d| d.message)
-        .collect::<Vec<_>>();
-
-    (labels, diags)
 }
 
 /// Get the path to the fixtures directory.

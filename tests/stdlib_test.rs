@@ -32,13 +32,11 @@ async fn test_stdlib_file(relative_path: &str) {
     match result {
         Ok(uri) => {
             // File opened successfully within timeout
-            // We don't require zero diagnostics since stdlib files may have
-            // unresolved references to other stdlib modules
             let diags = harness.client.diagnostics_for(&uri).await;
             // Just log if there are diagnostics, don't fail
             if !diags.is_empty() {
                 eprintln!(
-                    "Note: {} has {} diagnostics (may include unresolved refs)",
+                    "Note: {} has {} diagnostics (which may include unresolved refs)",
                     relative_path,
                     diags.len()
                 );
@@ -46,7 +44,7 @@ async fn test_stdlib_file(relative_path: &str) {
         }
         Err(_) => {
             panic!(
-                "TIMEOUT: Processing {} took longer than {:?}",
+                "Timeout: Processing {} took longer than {:?}",
                 relative_path, STDLIB_TIMEOUT
             );
         }

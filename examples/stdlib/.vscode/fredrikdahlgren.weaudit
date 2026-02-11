@@ -1,0 +1,54 @@
+{
+  "clientRemote": "",
+  "gitRemote": "",
+  "gitSha": "",
+  "treeEntries": [
+    {
+      "label": "Maybe false positive.",
+      "entryType": 1,
+      "author": "fredrikdahlgren",
+      "details": {
+        "severity": "",
+        "difficulty": "",
+        "type": "",
+        "description": "",
+        "exploit": "",
+        "recommendation": "Short term, \nLong term, \n"
+      },
+      "locations": [
+        {
+          "path": "collections/sorted_array.masm",
+          "startLine": 245,
+          "endLine": 245,
+          "label": "",
+          "description": ""
+        }
+      ]
+    },
+    {
+      "label": "Discuss with Claude.",
+      "entryType": 1,
+      "author": "fredrikdahlgren",
+      "details": {
+        "severity": "",
+        "difficulty": "",
+        "type": "",
+        "description": "",
+        "exploit": "",
+        "recommendation": "Short term, \nLong term, \n"
+      },
+      "locations": [
+        {
+          "path": "collections/sorted_array.masm",
+          "startLine": 34,
+          "endLine": 34,
+          "label": "",
+          "description": ""
+        }
+      ]
+    }
+  ],
+  "auditedFiles": [],
+  "partiallyAuditedFiles": [],
+  "resolvedEntries": []
+}
