@@ -162,20 +162,47 @@ mod tests {
     #[test]
     fn apply_template_numeric_ordinal() {
         let template = "Pushes the {nth} item; value {n}.";
-        assert_eq!(apply_template(template, "1"), "Pushes the 1st item; value 1.");
-        assert_eq!(apply_template(template, "2"), "Pushes the 2nd item; value 2.");
-        assert_eq!(apply_template(template, "3"), "Pushes the 3rd item; value 3.");
-        assert_eq!(apply_template(template, "4"), "Pushes the 4th item; value 4.");
-        assert_eq!(apply_template(template, "11"), "Pushes the 11th item; value 11.");
-        assert_eq!(apply_template(template, "12"), "Pushes the 12th item; value 12.");
-        assert_eq!(apply_template(template, "13"), "Pushes the 13th item; value 13.");
-        assert_eq!(apply_template(template, "21"), "Pushes the 21st item; value 21.");
+        assert_eq!(
+            apply_template(template, "1"),
+            "Pushes the 1st item; value 1."
+        );
+        assert_eq!(
+            apply_template(template, "2"),
+            "Pushes the 2nd item; value 2."
+        );
+        assert_eq!(
+            apply_template(template, "3"),
+            "Pushes the 3rd item; value 3."
+        );
+        assert_eq!(
+            apply_template(template, "4"),
+            "Pushes the 4th item; value 4."
+        );
+        assert_eq!(
+            apply_template(template, "11"),
+            "Pushes the 11th item; value 11."
+        );
+        assert_eq!(
+            apply_template(template, "12"),
+            "Pushes the 12th item; value 12."
+        );
+        assert_eq!(
+            apply_template(template, "13"),
+            "Pushes the 13th item; value 13."
+        );
+        assert_eq!(
+            apply_template(template, "21"),
+            "Pushes the 21st item; value 21."
+        );
     }
 
     #[test]
     fn apply_template_non_numeric_falls_back() {
         let template = "Uses {nth} argument and {n}.";
-        assert_eq!(apply_template(template, "CONST"), "Uses CONST argument and CONST.");
+        assert_eq!(
+            apply_template(template, "CONST"),
+            "Uses CONST argument and CONST."
+        );
     }
 
     #[test]

@@ -16,9 +16,7 @@ struct InstructionEntry {
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let input_path = manifest_dir
-        .join("data")
-        .join("instruction_reference.toml");
+    let input_path = manifest_dir.join("data").join("instruction_reference.toml");
     println!("cargo:rerun-if-changed={}", input_path.display());
 
     let data = fs::read_to_string(&input_path)
