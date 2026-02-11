@@ -14,7 +14,6 @@ mod tests;
 pub use backend::Backend;
 pub use config::{
     extract_code_lens_stack_effects, extract_inlay_hint_type, extract_library_paths,
-    extract_tab_count,
 };
 pub use helpers::{
     determine_module_kind_from_ast, extract_doc_comment, extract_procedure_signature,

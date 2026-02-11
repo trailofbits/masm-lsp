@@ -230,7 +230,7 @@ pub mod mocks {
             // Try name match
             let name = path.name();
             for (def_path, loc) in &self.definitions {
-                if def_path.name_matches(name) {
+                if def_path.name() == name {
                     return Some(loc.clone());
                 }
             }

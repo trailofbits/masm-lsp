@@ -14,26 +14,9 @@ use crate::{InlayHintType, LibraryPath};
 pub fn extract_code_lens_stack_effects(settings: &serde_json::Value) -> Option<bool> {
     settings
         .get("masm-lsp")
-        .or_else(|| settings.get("masm"))
         .and_then(|v| v.get("codeLens"))
         .and_then(|v| v.get("stackEffects"))
         .and_then(|v| v.as_bool())
-}
-
-/// Extract the inlay hint tab padding count from LSP settings.
-///
-/// Expects settings in the format:
-/// ```json
-/// { "masm": { "inlayHint": { "tabPadding": 2 } } }
-/// ```
-pub fn extract_tab_count(settings: &serde_json::Value) -> Option<usize> {
-    settings
-        .get("masm")
-        .and_then(|v| v.get("inlayHint"))
-        .and_then(|v| v.get("tabPadding"))
-        .and_then(|v| v.as_u64())
-        .and_then(|v| usize::try_from(v).ok())
-        .filter(|v| *v > 0)
 }
 
 /// Extract library paths from LSP settings.
@@ -44,11 +27,11 @@ pub fn extract_tab_count(settings: &serde_json::Value) -> Option<usize> {
 ///
 /// Expects settings in the format:
 /// ```json
-/// { "masm": { "libraryPaths": [...] } }
+/// { "masm-lsp": { "libraryPaths": [...] } }
 /// ```
 pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<LibraryPath>> {
     let arr = settings
-        .get("masm")
+        .get("masm-lsp")
         .and_then(|v| v.get("libraryPaths"))
         .and_then(|v| v.as_array())?;
 
@@ -86,17 +69,16 @@ pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<Library
 ///
 /// Expects settings in the format:
 /// ```json
-/// { "masm": { "inlayHints": { "type": "decompilation" } } }
+/// { "masm-lsp": { "inlayHints": { "type": "decompilation" } } }
 /// ```
 ///
 /// Valid values for `type`:
 /// - `"decompilation"` - Show decompiled pseudocode (default)
 /// - `"description"` - Show instruction descriptions
-/// - `"stack_effect"` - Show instruction stack effects
 /// - `"none"` - Disable inlay hints
 pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHintType> {
     let hint_type = settings
-        .get("masm")
+        .get("masm-lsp")
         .and_then(|v| v.get("inlayHints"))
         .and_then(|v| v.get("type"))
         .and_then(|v| v.as_str())?;
@@ -104,7 +86,6 @@ pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHint
     match hint_type.to_lowercase().as_str() {
         "decompilation" => Some(InlayHintType::Decompilation),
         "description" => Some(InlayHintType::Description),
-        "stack_effect" => Some(InlayHintType::StackEffect),
         "none" | "disabled" | "off" => Some(InlayHintType::None),
         _ => None,
     }
@@ -141,39 +122,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_tab_count_valid() {
-        let settings = json!({
-            "masm": {
-                "inlayHint": {
-                    "tabPadding": 4
-                }
-            }
-        });
-        assert_eq!(extract_tab_count(&settings), Some(4));
-    }
-
-    #[test]
-    fn extract_tab_count_zero_returns_none() {
-        let settings = json!({
-            "masm": {
-                "inlayHint": {
-                    "tabPadding": 0
-                }
-            }
-        });
-        assert_eq!(extract_tab_count(&settings), None);
-    }
-
-    #[test]
-    fn extract_tab_count_missing_returns_none() {
-        let settings = json!({});
-        assert_eq!(extract_tab_count(&settings), None);
-    }
-
-    #[test]
     fn extract_library_paths_string_array() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "libraryPaths": ["/path/to/lib"]
             }
         });
@@ -186,7 +137,7 @@ mod tests {
     #[test]
     fn extract_library_paths_object_array() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "libraryPaths": [
                     { "path": "/path/to/lib", "prefix": "mylib" }
                 ]
@@ -201,7 +152,7 @@ mod tests {
     #[test]
     fn extract_library_paths_mixed() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "libraryPaths": [
                     "/simple/path",
                     { "path": "/object/path", "prefix": "custom" }
@@ -217,7 +168,7 @@ mod tests {
     #[test]
     fn extract_library_paths_empty_returns_none() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "libraryPaths": []
             }
         });
@@ -227,7 +178,7 @@ mod tests {
     #[test]
     fn extract_inlay_hint_type_decompilation() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "inlayHints": {
                     "type": "decompilation"
                 }
@@ -242,7 +193,7 @@ mod tests {
     #[test]
     fn extract_inlay_hint_type_description() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "inlayHints": {
                     "type": "description"
                 }
@@ -255,24 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_inlay_hint_type_stack_effect() {
-        let settings = json!({
-            "masm": {
-                "inlayHints": {
-                    "type": "stack_effect"
-                }
-            }
-        });
-        assert_eq!(
-            extract_inlay_hint_type(&settings),
-            Some(InlayHintType::StackEffect)
-        );
-    }
-
-    #[test]
     fn extract_inlay_hint_type_none() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "inlayHints": {
                     "type": "none"
                 }
@@ -287,7 +223,7 @@ mod tests {
     #[test]
     fn extract_inlay_hint_type_disabled_alias() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "inlayHints": {
                     "type": "disabled"
                 }
@@ -302,7 +238,7 @@ mod tests {
     #[test]
     fn extract_inlay_hint_type_case_insensitive() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "inlayHints": {
                     "type": "DECOMPILATION"
                 }
@@ -323,7 +259,7 @@ mod tests {
     #[test]
     fn extract_inlay_hint_type_invalid_value_returns_none() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "inlayHints": {
                     "type": "invalid"
                 }
@@ -335,7 +271,7 @@ mod tests {
     #[test]
     fn extract_inlay_hint_type_empty_hints_returns_none() {
         let settings = json!({
-            "masm": {
+            "masm-lsp": {
                 "inlayHints": {}
             }
         });

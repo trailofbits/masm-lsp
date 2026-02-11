@@ -22,7 +22,6 @@ use tracing::{debug, info};
 use super::backend::Backend;
 use super::config::{
     extract_code_lens_stack_effects, extract_inlay_hint_type, extract_library_paths,
-    extract_tab_count,
 };
 use super::helpers::{
     extract_doc_comment, extract_procedure_attributes, extract_procedure_signature,
@@ -69,10 +68,6 @@ where
         params: tower_lsp::lsp_types::DidChangeConfigurationParams,
     ) {
         let mut cfg = self.config.write().await;
-        if let Some(tab_count) = extract_tab_count(&params.settings) {
-            cfg.inlay_hint_tabs = tab_count;
-            info!("updated inlay hint tab padding: {}", tab_count);
-        }
         if let Some(paths) = extract_library_paths(&params.settings) {
             cfg.library_paths = paths;
             info!("updated library search paths");
@@ -99,6 +94,7 @@ where
         let text = params.text_document.text;
         let _ = self.handle_open(uri, version, text).await;
     }
+
 
     async fn did_change(&self, params: tower_lsp::lsp_types::DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
@@ -359,7 +355,6 @@ where
             self.sources.clone(),
             &uri,
             &params.range,
-            config.inlay_hint_tabs,
             source.as_str(),
             &config.library_paths,
             config.inlay_hint_type,

@@ -7,6 +7,7 @@ mod common;
 
 use common::fixtures::inline;
 use common::harness::TestHarness;
+use masm_lsp::diagnostics::SOURCE_ANALYSIS;
 use tower_lsp::lsp_types::DiagnosticSeverity;
 
 #[tokio::test]
@@ -66,6 +67,27 @@ async fn diagnostics_have_error_severity() {
             diag.severity
         );
     }
+}
+
+#[tokio::test]
+async fn signature_mismatch_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc foo(a: u64) -> u64
+    nop
+end
+"#;
+    let uri = harness.open_inline("sig_mismatch.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning = diags.iter().find(|diag| {
+        diag.severity == Some(DiagnosticSeverity::WARNING)
+            && diag.source.as_deref() == Some(SOURCE_ANALYSIS)
+            && diag.message.contains("definition declares")
+            && diag.message.contains("inferred")
+    });
+    assert!(warning.is_some(), "expected signature mismatch warning, got: {:?}", diags);
 }
 
 #[tokio::test]

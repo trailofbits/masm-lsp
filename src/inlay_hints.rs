@@ -7,7 +7,7 @@ use masm_decompiler::{
     frontend::{LibraryRoot, Program, Workspace},
     lift::LiftingError,
 };
-use masm_instructions::{ToDescription, ToStackEffect};
+use masm_instructions::ToDescription;
 use miden_assembly_syntax::ast::{Block, Instruction, Module, Op};
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Span, Spanned};
 use tower_lsp::lsp_types::{
@@ -25,7 +25,6 @@ pub struct InlayHintResult {
 
 enum InstructionHintKind {
     Description,
-    StackEffect,
 }
 
 /// Collect inlay hints for a module by decompiling each procedure.
@@ -34,7 +33,6 @@ pub fn collect_inlay_hints(
     sources: Arc<DefaultSourceManager>,
     uri: &Url,
     visible_range: &Range,
-    tab_count: usize,
     source_text: &str,
     library_paths: &[LibraryPath],
     hint_type: InlayHintType,
@@ -45,7 +43,6 @@ pub fn collect_inlay_hints(
             sources,
             uri,
             visible_range,
-            tab_count,
             source_text,
             library_paths,
         ),
@@ -53,17 +50,8 @@ pub fn collect_inlay_hints(
             module,
             sources,
             visible_range,
-            tab_count,
             source_text,
             InstructionHintKind::Description,
-        ),
-        InlayHintType::StackEffect => collect_instruction_hints(
-            module,
-            sources,
-            visible_range,
-            tab_count,
-            source_text,
-            InstructionHintKind::StackEffect,
         ),
         InlayHintType::None => InlayHintResult {
             hints: Vec::new(),
@@ -77,7 +65,6 @@ fn collect_decompilation_hints(
     sources: Arc<DefaultSourceManager>,
     uri: &Url,
     visible_range: &Range,
-    tab_count: usize,
     source_text: &str,
     library_paths: &[LibraryPath],
 ) -> InlayHintResult {
@@ -105,7 +92,8 @@ fn collect_decompilation_hints(
         .lines()
         .map(|line| line.trim_end().len() as u32)
         .collect();
-    let padding = tab_count.max(1) as u32;
+    const DEFAULT_INLAY_HINT_TABS: u32 = 2;
+    let padding = DEFAULT_INLAY_HINT_TABS;
 
     let mut proc_infos: Vec<(u32, String, bool)> = Vec::new();
     for proc in module.procedures() {
@@ -205,11 +193,11 @@ fn collect_instruction_hints(
     module: &Module,
     sources: Arc<DefaultSourceManager>,
     visible_range: &Range,
-    tab_count: usize,
     source_text: &str,
     kind: InstructionHintKind,
 ) -> InlayHintResult {
-    let padding = tab_count.max(1) as u32;
+    const DEFAULT_INLAY_HINT_TABS: u32 = 2;
+    let padding = DEFAULT_INLAY_HINT_TABS;
     let line_lengths: Vec<u32> = source_text
         .lines()
         .map(|line| line.trim_end().len() as u32)
@@ -243,7 +231,6 @@ fn collect_instruction_hints(
 
         let label = match kind {
             InstructionHintKind::Description => inst.to_description(),
-            InstructionHintKind::StackEffect => inst.to_stack_effect(),
         };
         let Some(label) = label else {
             continue;

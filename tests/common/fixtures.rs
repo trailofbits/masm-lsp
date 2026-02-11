@@ -1,7 +1,7 @@
 //! Test fixture loading and management.
 
 #![allow(dead_code)]
-use miden_assembly_syntax::ast::{Module, ModuleKind};
+use miden_assembly_syntax::ast::Module;
 use miden_assembly_syntax::{Parse, ParseOptions};
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
 use std::path::PathBuf;

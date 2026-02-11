@@ -1,13 +1,14 @@
 use std::{
     collections::HashMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
+use masm_analysis::signature_mismatches;
 use masm_decompiler::{
     Decompiler,
     frontend::{LibraryRoot, Program, Workspace},
@@ -19,13 +20,15 @@ use miden_assembly_syntax::ast::Module;
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
 use miden_utils_diagnostics as diagnostics;
 use tokio::sync::RwLock;
-use tower_lsp::lsp_types::{Diagnostic, Position, TextDocumentContentChangeEvent, Url};
+use tower_lsp::lsp_types::{
+    Diagnostic, DiagnosticSeverity, Position, Range, TextDocumentContentChangeEvent, Url,
+};
 use tracing::error;
 
 use crate::{
     client::PublishDiagnostics,
     cursor_resolution::{resolve_symbol_at_position, ResolutionError, ResolvedSymbol},
-    diagnostics::{diagnostics_from_report, unresolved_to_diagnostics},
+    diagnostics::{SOURCE_ANALYSIS, diagnostics_from_report, normalize_message, span_to_range, unresolved_to_diagnostics},
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
     module_path::ModulePathResolver,
     service::DocumentService,
@@ -194,6 +197,30 @@ where
     ) -> Vec<Diagnostic> {
         let version = self.documents.get_version(&uri).await;
         let parse_result = self.parse_and_index(&uri).await;
+        let config = self.snapshot_config().await;
+
+        let analysis_diags = if let Ok(doc) = &parse_result {
+            if config.taint_analysis_enabled {
+                let source_path =
+                    uri.to_file_path().unwrap_or_else(|_| PathBuf::from("in-memory.masm"));
+                let roots: Vec<LibraryRoot> = config
+                    .library_paths
+                    .iter()
+                    .map(|lib| LibraryRoot::new(lib.prefix.clone(), lib.root.clone()))
+                    .collect();
+                let mismatches = signature_mismatches(
+                    &doc.module,
+                    self.sources.clone(),
+                    source_path,
+                    &roots,
+                );
+                signature_mismatch_diagnostics(mismatches, self.sources.as_ref())
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
 
         let fallback_doc = if parse_result.is_err() {
             self.documents.get_symbols(&uri).await
@@ -219,6 +246,10 @@ where
             }
         };
         drop(workspace);
+
+        if !analysis_diags.is_empty() {
+            diagnostics.extend(analysis_diags);
+        }
 
         if !extra.is_empty() {
             diagnostics.extend(extra);
@@ -465,6 +496,53 @@ fn format_inferred_signature(name: &str, signature: &ProcSignature) -> Option<St
             Some(format!("proc {name}({args}){ret}"))
         }
         ProcSignature::Unknown => None,
+    }
+}
+
+fn signature_mismatch_diagnostics(
+    mismatches: Vec<masm_analysis::SignatureMismatch>,
+    sources: &DefaultSourceManager,
+) -> Vec<Diagnostic> {
+    mismatches
+        .into_iter()
+        .map(|mismatch| {
+            let range = span_to_range(sources, mismatch.span).unwrap_or_else(|| {
+                Range::new(Position::new(0, 0), Position::new(0, 0))
+            });
+            let message = normalize_message(&signature_mismatch_message(&mismatch));
+            Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some(SOURCE_ANALYSIS.to_string()),
+                message,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn signature_mismatch_message(mismatch: &masm_analysis::SignatureMismatch) -> String {
+    let inputs_diff = mismatch.declared.inputs != mismatch.inferred.inputs;
+    let outputs_diff = mismatch.declared.outputs != mismatch.inferred.outputs;
+    match (inputs_diff, outputs_diff) {
+        (true, true) => format!(
+            "the definition declares {} inputs and {} outputs, but the inferred counts are {} and {} respectively",
+            mismatch.declared.inputs,
+            mismatch.declared.outputs,
+            mismatch.inferred.inputs,
+            mismatch.inferred.outputs
+        ),
+        (true, false) => format!(
+            "the definition declares {} inputs, but the inferred input count is {}",
+            mismatch.declared.inputs,
+            mismatch.inferred.inputs
+        ),
+        (false, true) => format!(
+            "the definition declares {} outputs, but the inferred output count is {}",
+            mismatch.declared.outputs,
+            mismatch.inferred.outputs
+        ),
+        (false, false) => String::new(),
     }
 }
 

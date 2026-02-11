@@ -19,8 +19,6 @@ pub use masm_decompiler::SymbolPath;
 pub enum InlayHintType {
     /// Show instruction descriptions.
     Description,
-    /// Show instruction stack effects.
-    StackEffect,
     /// Show decompiled pseudocode (default behavior).
     #[default]
     Decompilation,
@@ -31,8 +29,6 @@ pub enum InlayHintType {
 /// Configuration shared across handlers.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Number of tab characters to insert before an inlay hint label.
-    pub inlay_hint_tabs: usize,
     /// Library roots to preload and use for module path derivation.
     pub library_paths: Vec<LibraryPath>,
     /// Whether to show stack-effect code lenses.
@@ -52,8 +48,6 @@ pub struct LibraryPath {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            // Use two tabs by default to give hints breathing room.
-            inlay_hint_tabs: 2,
             library_paths: default_library_paths(),
             code_lens_stack_effects: true,
             // Taint analysis is enabled by default.
@@ -74,7 +68,6 @@ impl ServerConfig {
 /// Builder for `ServerConfig` with fluent API.
 #[derive(Default)]
 pub struct ServerConfigBuilder {
-    inlay_hint_tabs: Option<usize>,
     library_paths: Option<Vec<LibraryPath>>,
     code_lens_stack_effects: Option<bool>,
     taint_analysis_enabled: Option<bool>,
@@ -82,12 +75,6 @@ pub struct ServerConfigBuilder {
 }
 
 impl ServerConfigBuilder {
-    /// Set the number of tab characters to insert before an inlay hint label.
-    pub fn inlay_hint_tabs(mut self, tabs: usize) -> Self {
-        self.inlay_hint_tabs = Some(tabs);
-        self
-    }
-
     /// Set the library roots to preload and use for module path derivation.
     pub fn library_paths(mut self, paths: Vec<LibraryPath>) -> Self {
         self.library_paths = Some(paths);
@@ -117,7 +104,6 @@ impl ServerConfigBuilder {
     /// Uses defaults for any values not explicitly set.
     pub fn build(self) -> ServerConfig {
         ServerConfig {
-            inlay_hint_tabs: self.inlay_hint_tabs.unwrap_or(2),
             library_paths: self.library_paths.unwrap_or_else(default_library_paths),
             code_lens_stack_effects: self.code_lens_stack_effects.unwrap_or(true),
             taint_analysis_enabled: self.taint_analysis_enabled.unwrap_or(true),
