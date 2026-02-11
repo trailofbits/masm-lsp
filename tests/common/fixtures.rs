@@ -38,7 +38,9 @@ pub fn load_example_module(path: &str) -> Option<(String, Arc<DefaultSourceManag
         ..Default::default()
     };
 
-    let module = source_file.parse_with_options(source_manager.clone(), opts).ok()?;
+    let module = source_file
+        .parse_with_options(source_manager.clone(), opts)
+        .ok()?;
     Some((content, source_manager, *module))
 }
 

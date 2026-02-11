@@ -1,0 +1,9 @@
+[package]
+name = "masm-analysis"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+masm-decompiler = { path = "../../../masm-decompiler" }
+miden-assembly-syntax = { version = "0.20", default-features = true }
+miden-debug-types = { version = "0.20", default-features = true }

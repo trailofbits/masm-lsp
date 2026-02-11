@@ -2,14 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use masm_decompiler::{
-    Decompiler,
     frontend::{LibraryRoot, Program, Workspace},
     signature::ProcSignature,
-    SymbolPath,
+    Decompiler, SymbolPath,
 };
 use miden_assembly_syntax::ast::{
-    FunctionType, Module, SymbolResolutionError, TypeResolver,
-    types::Type as HirType,
+    types::Type as AstType, FunctionType, Module, SymbolResolutionError, TypeResolver,
 };
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Spanned};
 
@@ -60,7 +58,9 @@ pub fn signature_mismatches(
             continue;
         };
         let (inputs, outputs) = match inferred {
-            ProcSignature::Known { inputs, outputs, .. } => (*inputs, *outputs),
+            ProcSignature::Known {
+                inputs, outputs, ..
+            } => (*inputs, *outputs),
             ProcSignature::Unknown => continue,
         };
 
@@ -85,10 +85,7 @@ pub fn signature_mismatches(
     findings
 }
 
-fn signature_stack_signature<R>(
-    signature: &FunctionType,
-    resolver: &R,
-) -> Option<StackSignature>
+fn signature_stack_signature<R>(signature: &FunctionType, resolver: &R) -> Option<StackSignature>
 where
     R: TypeResolver<SymbolResolutionError>,
 {
@@ -109,9 +106,9 @@ where
     Some(StackSignature { inputs, outputs })
 }
 
-fn type_felts(ty: &HirType) -> Option<usize> {
+fn type_felts(ty: &AstType) -> Option<usize> {
     match ty {
-        HirType::Unknown | HirType::Never | HirType::List(_) => None,
+        AstType::Unknown | AstType::Never | AstType::List(_) => None,
         _ => Some(ty.size_in_felts()),
     }
 }

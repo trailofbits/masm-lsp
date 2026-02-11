@@ -87,7 +87,79 @@ end
             && diag.message.contains("definition declares")
             && diag.message.contains("inferred")
     });
-    assert!(warning.is_some(), "expected signature mismatch warning, got: {:?}", diags);
+    assert!(
+        warning.is_some(),
+        "expected signature mismatch warning, got: {:?}",
+        diags
+    );
+}
+
+#[tokio::test]
+async fn type_inconsistency_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc needs_bool
+    if.true
+        nop
+    else
+        nop
+    end
+end
+
+proc caller_bad_bool
+    push.2
+    exec.needs_bool
+end
+"#;
+    let uri = harness.open_inline("type_mismatch.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning = diags.iter().find(|diag| {
+        diag.severity == Some(DiagnosticSeverity::WARNING)
+            && diag.source.as_deref() == Some(SOURCE_ANALYSIS)
+            && diag.message.contains("expects Bool")
+    });
+    assert!(
+        warning.is_some(),
+        "expected type inconsistency warning, got: {:?}",
+        diags
+    );
+}
+
+#[tokio::test]
+async fn unknown_type_does_not_emit_mismatch_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc needs_bool
+    if.true
+        nop
+    else
+        nop
+    end
+end
+
+proc caller_unknown_bool
+    adv_push.1
+    exec.needs_bool
+end
+"#;
+    let uri = harness.open_inline("type_unknown.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let analysis_warnings: Vec<_> = diags
+        .iter()
+        .filter(|diag| {
+            diag.severity == Some(DiagnosticSeverity::WARNING)
+                && diag.source.as_deref() == Some(SOURCE_ANALYSIS)
+        })
+        .collect();
+    assert!(
+        analysis_warnings.is_empty(),
+        "expected no analysis warnings for unknown types, got: {:?}",
+        analysis_warnings
+    );
 }
 
 #[tokio::test]

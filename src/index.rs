@@ -212,7 +212,6 @@ impl WorkspaceIndex {
             .map(|(path, loc)| (path.to_string(), loc.clone()))
             .collect()
     }
-
 }
 
 pub fn build_document_symbols(
@@ -242,7 +241,10 @@ fn collect_definitions(module: &Module, source_manager: &DefaultSourceManager) -
     defs
 }
 
-fn collect_references(module: &Module, source_manager: Arc<DefaultSourceManager>) -> Vec<Reference> {
+fn collect_references(
+    module: &Module,
+    source_manager: Arc<DefaultSourceManager>,
+) -> Vec<Reference> {
     let mut collector = InvocationCollector {
         resolver: crate::symbol_resolution::create_resolver(module, source_manager.clone()),
         source_manager,

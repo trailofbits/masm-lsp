@@ -3,20 +3,24 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
 
 use masm_analysis::signature_mismatches;
 use masm_decompiler::{
-    Decompiler,
+    callgraph::CallGraph,
     frontend::{LibraryRoot, Program, Workspace},
-    signature::ProcSignature,
+    signature::{infer_signatures, ProcSignature, SignatureMap},
+    types::{
+        infer_type_summaries, InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary,
+        TypeSummaryMap,
+    },
 };
 
-use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
 use miden_assembly_syntax::ast::Module;
+use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
 use miden_utils_diagnostics as diagnostics;
 use tokio::sync::RwLock;
@@ -28,7 +32,10 @@ use tracing::error;
 use crate::{
     client::PublishDiagnostics,
     cursor_resolution::{resolve_symbol_at_position, ResolutionError, ResolvedSymbol},
-    diagnostics::{SOURCE_ANALYSIS, diagnostics_from_report, normalize_message, span_to_range, unresolved_to_diagnostics},
+    diagnostics::{
+        diagnostics_from_report, normalize_message, span_to_range, unresolved_to_diagnostics,
+        SOURCE_ANALYSIS,
+    },
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
     module_path::ModulePathResolver,
     service::DocumentService,
@@ -121,6 +128,7 @@ where
     C: PublishDiagnostics,
 {
     pub async fn load_configured_libraries(&self) {
+        self.invalidate_signature_cache().await;
         let cfg = self.snapshot_config().await;
         for lib in &cfg.library_paths {
             if let Err(err) = self.load_library_root(lib).await {
@@ -190,31 +198,32 @@ where
         self.publish_diagnostics_inner(uri, extra).await
     }
 
-    async fn publish_diagnostics_inner(
-        &self,
-        uri: Url,
-        extra: Vec<Diagnostic>,
-    ) -> Vec<Diagnostic> {
+    async fn publish_diagnostics_inner(&self, uri: Url, extra: Vec<Diagnostic>) -> Vec<Diagnostic> {
         let version = self.documents.get_version(&uri).await;
         let parse_result = self.parse_and_index(&uri).await;
         let config = self.snapshot_config().await;
 
         let analysis_diags = if let Ok(doc) = &parse_result {
             if config.taint_analysis_enabled {
-                let source_path =
-                    uri.to_file_path().unwrap_or_else(|_| PathBuf::from("in-memory.masm"));
-                let roots: Vec<LibraryRoot> = config
-                    .library_paths
-                    .iter()
-                    .map(|lib| LibraryRoot::new(lib.prefix.clone(), lib.root.clone()))
-                    .collect();
-                let mismatches = signature_mismatches(
+                let source_path = uri
+                    .to_file_path()
+                    .unwrap_or_else(|_| PathBuf::from("in-memory.masm"));
+                let roots = build_library_roots(&config.library_paths);
+                let mismatches =
+                    signature_mismatches(&doc.module, self.sources.clone(), source_path, &roots);
+                let mut diags = signature_mismatch_diagnostics(mismatches, self.sources.as_ref());
+                let analysis = infer_analysis_snapshot(
                     &doc.module,
                     self.sources.clone(),
-                    source_path,
-                    &roots,
+                    &uri,
+                    &config.library_paths,
                 );
-                signature_mismatch_diagnostics(mismatches, self.sources.as_ref())
+                diags.extend(type_inconsistency_diagnostics(
+                    &uri,
+                    &analysis.type_diagnostics,
+                    self.sources.as_ref(),
+                ));
+                diags
             } else {
                 Vec::new()
             }
@@ -453,13 +462,36 @@ fn infer_signature_line(
     symbol_path: &SymbolPath,
     library_paths: &[LibraryPath],
 ) -> Option<String> {
+    let analysis = infer_analysis_snapshot(module, sources, uri, library_paths);
+    let signature = analysis.signatures.get(symbol_path)?;
+    let summary = analysis.type_summaries.get(symbol_path);
+    format_inferred_signature(symbol_path.name(), signature, summary)
+}
+
+fn build_library_roots(library_paths: &[LibraryPath]) -> Vec<LibraryRoot> {
+    library_paths
+        .iter()
+        .map(|lib| LibraryRoot::new(lib.prefix.clone(), lib.root.clone()))
+        .collect()
+}
+
+#[derive(Debug)]
+struct AnalysisSnapshot {
+    signatures: SignatureMap,
+    type_summaries: TypeSummaryMap,
+    type_diagnostics: TypeDiagnosticsMap,
+}
+
+fn infer_analysis_snapshot(
+    module: &Module,
+    sources: Arc<DefaultSourceManager>,
+    uri: &Url,
+    library_paths: &[LibraryPath],
+) -> AnalysisSnapshot {
     let source_path = uri
         .to_file_path()
         .unwrap_or_else(|_| std::path::PathBuf::from("in-memory.masm"));
-    let roots: Vec<LibraryRoot> = library_paths
-        .iter()
-        .map(|lib| LibraryRoot::new(lib.prefix.clone(), lib.root.clone()))
-        .collect();
+    let roots = build_library_roots(library_paths);
 
     let mut workspace = Workspace::with_source_manager(roots, sources);
     let program = Program::from_parts(
@@ -470,24 +502,64 @@ fn infer_signature_line(
     workspace.add_program(program);
     workspace.load_dependencies();
 
-    let decompiler = Decompiler::new(&workspace);
-    let signature = decompiler.signatures().get(symbol_path)?;
-    format_inferred_signature(symbol_path.name(), signature)
+    let callgraph = CallGraph::from(&workspace);
+    let signatures = infer_signatures(&workspace, &callgraph);
+    let (type_summaries, type_diagnostics) =
+        infer_type_summaries(&workspace, &callgraph, &signatures);
+
+    AnalysisSnapshot {
+        signatures,
+        type_summaries,
+        type_diagnostics,
+    }
 }
 
-fn format_inferred_signature(name: &str, signature: &ProcSignature) -> Option<String> {
+fn format_inferred_signature(
+    name: &str,
+    signature: &ProcSignature,
+    summary: Option<&TypeSummary>,
+) -> Option<String> {
     match signature {
-        ProcSignature::Known { inputs, outputs, .. } => {
+        ProcSignature::Known {
+            inputs, outputs, ..
+        } => {
+            let input_types = summary
+                .map(|summary| normalized_input_types(&summary.inputs, *inputs))
+                .unwrap_or_else(|| vec![TypeRequirement::Unknown; *inputs]);
+
+            let output_types = summary
+                .map(|summary| normalized_output_types(&summary.outputs, *outputs))
+                .unwrap_or_else(|| vec![InferredType::Unknown; *outputs]);
+
             let args = (0..*inputs)
-                .map(|idx| format!("v_{idx}"))
+                .map(|idx| {
+                    let ty = input_types
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(TypeRequirement::Unknown);
+                    format!("v_{idx}: {}", type_requirement_for_display(ty))
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
+
             let ret = match *outputs {
                 0 => String::new(),
-                1 => " -> Felt".to_string(),
+                1 => {
+                    let ty = output_types
+                        .first()
+                        .copied()
+                        .unwrap_or(InferredType::Unknown);
+                    format!(" -> {}", inferred_type_for_display(ty))
+                }
                 n => {
                     let types = (0..n)
-                        .map(|_| "Felt")
+                        .map(|idx| {
+                            let ty = output_types
+                                .get(idx)
+                                .copied()
+                                .unwrap_or(InferredType::Unknown);
+                            inferred_type_for_display(ty)
+                        })
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!(" -> ({types})")
@@ -499,6 +571,73 @@ fn format_inferred_signature(name: &str, signature: &ProcSignature) -> Option<St
     }
 }
 
+fn normalized_input_types(types: &[TypeRequirement], expected_len: usize) -> Vec<TypeRequirement> {
+    let mut normalized = vec![TypeRequirement::Unknown; expected_len];
+    for (display_idx, slot) in normalized.iter_mut().enumerate() {
+        let summary_idx = expected_len.saturating_sub(1).saturating_sub(display_idx);
+        if let Some(ty) = types.get(summary_idx) {
+            *slot = *ty;
+        }
+    }
+    normalized
+}
+
+fn normalized_output_types(types: &[InferredType], expected_len: usize) -> Vec<InferredType> {
+    let mut normalized = vec![InferredType::Unknown; expected_len];
+    for (display_idx, slot) in normalized.iter_mut().enumerate() {
+        let summary_idx = expected_len.saturating_sub(1).saturating_sub(display_idx);
+        if let Some(ty) = types.get(summary_idx) {
+            *slot = *ty;
+        }
+    }
+    normalized
+}
+
+fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
+    match requirement {
+        TypeRequirement::Unknown | TypeRequirement::Felt => "Felt",
+        TypeRequirement::Bool => "Bool",
+        TypeRequirement::U32 => "U32",
+        TypeRequirement::Address => "Address",
+    }
+}
+
+fn inferred_type_for_display(ty: InferredType) -> &'static str {
+    match ty {
+        InferredType::Unknown | InferredType::Felt => "Felt",
+        InferredType::Bool => "Bool",
+        InferredType::U32 => "U32",
+        InferredType::Address => "Address",
+    }
+}
+
+fn type_inconsistency_diagnostics(
+    uri: &Url,
+    diagnostics: &TypeDiagnosticsMap,
+    sources: &DefaultSourceManager,
+) -> Vec<Diagnostic> {
+    let Some(source_id) = sources.find(&to_miden_uri(uri)) else {
+        return Vec::new();
+    };
+
+    diagnostics
+        .values()
+        .flat_map(|proc_diags| proc_diags.iter())
+        .filter(|diag| diag.span.source_id() == source_id)
+        .map(|diag| {
+            let range = span_to_range(sources, diag.span)
+                .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
+            Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some(SOURCE_ANALYSIS.to_string()),
+                message: normalize_message(&diag.message),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
 fn signature_mismatch_diagnostics(
     mismatches: Vec<masm_analysis::SignatureMismatch>,
     sources: &DefaultSourceManager,
@@ -506,9 +645,8 @@ fn signature_mismatch_diagnostics(
     mismatches
         .into_iter()
         .map(|mismatch| {
-            let range = span_to_range(sources, mismatch.span).unwrap_or_else(|| {
-                Range::new(Position::new(0, 0), Position::new(0, 0))
-            });
+            let range = span_to_range(sources, mismatch.span)
+                .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
             let message = normalize_message(&signature_mismatch_message(&mismatch));
             Diagnostic {
                 range,

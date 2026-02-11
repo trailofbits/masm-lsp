@@ -2,20 +2,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use masm_decompiler::{
-    DecompilationError, Decompiler,
     fmt::{CodeWriter, FormattingConfig},
     frontend::{LibraryRoot, Program, Workspace},
     lift::LiftingError,
+    DecompilationError, Decompiler,
 };
 use masm_instructions::ToDescription;
 use miden_assembly_syntax::ast::{Block, Instruction, Module, Op};
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Span, Spanned};
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, Position, Range,
-    Url,
+    Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, Position, Range, Url,
 };
 
-use crate::diagnostics::{SOURCE_DECOMPILATION, normalize_message, span_to_range};
+use crate::diagnostics::{normalize_message, span_to_range, SOURCE_DECOMPILATION};
 use crate::{InlayHintType, LibraryPath};
 
 pub struct InlayHintResult {
@@ -236,7 +235,10 @@ fn collect_instruction_hints(
             continue;
         };
 
-        let line_end = line_lengths.get(line as usize).copied().unwrap_or(range.end.character);
+        let line_end = line_lengths
+            .get(line as usize)
+            .copied()
+            .unwrap_or(range.end.character);
         let character = range.end.character.min(line_end).saturating_add(padding);
 
         hints.push(InlayHint {
@@ -262,16 +264,14 @@ fn collect_instructions(block: &Block, out: &mut Vec<Span<Instruction>>) {
         match op {
             Op::Inst(inst) => out.push(inst.clone()),
             Op::If {
-                then_blk,
-                else_blk,
-                ..
+                then_blk, else_blk, ..
             } => {
                 collect_instructions(then_blk, out);
                 collect_instructions(else_blk, out);
-            },
+            }
             Op::While { body, .. } | Op::Repeat { body, .. } => {
                 collect_instructions(body, out);
-            },
+            }
         }
     }
 }

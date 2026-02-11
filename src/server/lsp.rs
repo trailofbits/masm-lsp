@@ -95,7 +95,6 @@ where
         let _ = self.handle_open(uri, version, text).await;
     }
 
-
     async fn did_change(&self, params: tower_lsp::lsp_types::DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let version = params.text_document.version;
@@ -142,7 +141,8 @@ where
             return Ok(None);
         };
 
-        let symbol = match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos) {
+        let symbol = match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos)
+        {
             Ok(s) => s,
             Err(e) => {
                 debug!("goto_definition: {e}");
@@ -261,7 +261,8 @@ where
             return Ok(None);
         };
 
-        let symbol = match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos) {
+        let symbol = match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos)
+        {
             Ok(s) => s,
             Err(e) => {
                 debug!("references: {e}");

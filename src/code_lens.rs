@@ -39,16 +39,14 @@ fn collect_instructions(block: &Block, out: &mut Vec<Span<Instruction>>) {
         match op {
             Op::Inst(inst) => out.push(inst.clone()),
             Op::If {
-                then_blk,
-                else_blk,
-                ..
+                then_blk, else_blk, ..
             } => {
                 collect_instructions(then_blk, out);
                 collect_instructions(else_blk, out);
-            },
+            }
             Op::While { body, .. } | Op::Repeat { body, .. } => {
                 collect_instructions(body, out);
-            },
+            }
         }
     }
 }
