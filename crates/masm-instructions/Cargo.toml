@@ -4,12 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-phf = { version = "0.11", features = ["macros"] }
-miden-assembly-syntax = { git = "https://github.com/0xMiden/miden-vm", package = "miden-assembly-syntax", default-features = true }
-
-[dev-dependencies]
-miden-debug-types = { git = "https://github.com/0xMiden/miden-vm", package = "miden-debug-types", default-features = true }
+miden-assembly-syntax = { version = "0.20", default-features = true }
 
 [build-dependencies]
-phf_codegen = "0.11"
+serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"

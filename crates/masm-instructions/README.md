@@ -1,6 +1,20 @@
 # masm-instructions
 
-- Purpose: shared instruction metadata/semantics crate; build script only generates instruction info, semantics are frozen in source.
-- Upstream deps: `phf`, `phf_codegen`, `toml` (build-time), `miden-assembly-syntax` (Instruction enum).
-- Downstream users: `masm-lsp` (hovers, docs), analysis crates consuming instruction shapes.
-- Main exports: `InstructionInfo`, `INSTRUCTION_MAP`, `semantics_of`, `InstructionEffect`.
+This crate provides instruction metadata for MASM, generated from
+`data/instruction_reference.toml` at build time.
+
+## What it provides
+
+- `ToDescription` and `ToStackEffect` traits for `miden_assembly_syntax::ast::Instruction`
+- Template substitution for `{n}`, `{nth}`, and `{n+k}` placeholders
+
+## Regenerating the TOML
+
+```bash
+uv run --project crates/masm-instructions \
+  crates/masm-instructions/scripts/convert_instruction_reference.py \
+  -i crates/masm-instructions/docs/instruction_reference.md \
+  -o crates/masm-instructions/data/instruction_reference.toml
+```
+
+Edits to the TOML file automatically trigger rebuilds via `build.rs`.
