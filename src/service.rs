@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::{Location, Position, Url};
 
 use crate::cursor_resolution::{ResolutionError, ResolvedSymbol};
 use crate::index::DocumentSymbols;
-use crate::symbol_path::SymbolPath;
+use crate::SymbolPath;
 
 /// Service for document-level operations.
 ///

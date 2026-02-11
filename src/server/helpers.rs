@@ -79,6 +79,40 @@ pub fn extract_procedure_signature(source: &str, def_line: usize) -> Option<Stri
     Some(signature_lines.join("\n"))
 }
 
+/// Extract procedure attribute lines (e.g., "@locals", "@extern") above a definition.
+///
+/// Returns attributes in top-down order. Lines starting with comments or blank
+/// lines are skipped until an attribute is found.
+pub fn extract_procedure_attributes(source: &str, def_line: usize) -> Vec<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    if def_line >= lines.len() {
+        return Vec::new();
+    }
+
+    let mut attrs = Vec::new();
+    let mut line_idx = def_line.saturating_sub(1);
+    while line_idx < lines.len() {
+        let line = lines.get(line_idx).map(|l| l.trim()).unwrap_or("");
+        if line.starts_with('@') {
+            attrs.push(line.to_string());
+        } else if line.is_empty() || line.starts_with("#!") || line.starts_with('#') {
+            if !attrs.is_empty() {
+                break;
+            }
+        } else {
+            break;
+        }
+
+        if line_idx == 0 {
+            break;
+        }
+        line_idx -= 1;
+    }
+
+    attrs.reverse();
+    attrs
+}
+
 /// Extract doc comments above a definition at the given line.
 ///
 /// Doc comments are lines starting with "#!" immediately before the definition.
@@ -244,5 +278,19 @@ mod tests {
         let source = "@locals(16)\npub proc bar\nend\n";
         let sig = extract_procedure_signature(source, 1);
         assert_eq!(sig, Some("@locals(16)\npub proc bar".to_string()));
+    }
+
+    #[test]
+    fn extract_attributes_only() {
+        let source = "#! Comment\n@locals(16)\n@extern(foo)\nexport.bar\n";
+        let attrs = extract_procedure_attributes(source, 3);
+        assert_eq!(attrs, vec!["@locals(16)", "@extern(foo)"]);
+    }
+
+    #[test]
+    fn extract_attributes_none() {
+        let source = "proc foo\nend\n";
+        let attrs = extract_procedure_attributes(source, 0);
+        assert!(attrs.is_empty());
     }
 }

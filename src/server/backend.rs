@@ -1,12 +1,25 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+use masm_decompiler::{
+    Decompiler,
+    frontend::{LibraryRoot, Program, Workspace},
+    signature::ProcSignature,
+};
 
 use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
+use miden_assembly_syntax::ast::Module;
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
 use miden_utils_diagnostics as diagnostics;
 use tokio::sync::RwLock;
-use tower_lsp::lsp_types::{
-    Diagnostic, Location, Position, Range, TextDocumentContentChangeEvent, Url,
-};
+use tower_lsp::lsp_types::{Diagnostic, Position, TextDocumentContentChangeEvent, Url};
 use tracing::error;
 
 use crate::{
@@ -15,10 +28,9 @@ use crate::{
     diagnostics::{diagnostics_from_report, unresolved_to_diagnostics},
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
     module_path::ModulePathResolver,
-    service::{DocumentService, WorkspaceService},
-    symbol_path::SymbolPath,
+    service::DocumentService,
     util::{lsp_range_to_selection, to_miden_uri},
-    InlayHintType, LibraryPath, ServerConfig,
+    LibraryPath, ServerConfig, SymbolPath,
 };
 
 use super::cache::DocumentCache;
@@ -31,6 +43,7 @@ pub struct Backend<C = tower_lsp::Client> {
     pub(crate) documents: DocumentCache,
     pub(crate) workspace: Arc<RwLock<WorkspaceIndex>>,
     pub(crate) config: Arc<RwLock<ServerConfig>>,
+    pub(crate) signature_cache: Arc<SignatureCache>,
 }
 
 impl<C> Backend<C> {
@@ -41,6 +54,7 @@ impl<C> Backend<C> {
             documents: DocumentCache::new(),
             workspace: Arc::new(RwLock::new(WorkspaceIndex::default())),
             config: Arc::new(RwLock::new(ServerConfig::default())),
+            signature_cache: Arc::new(SignatureCache::new()),
         }
     }
 
@@ -69,6 +83,34 @@ impl<C> Backend<C> {
     pub async fn snapshot_config(&self) -> ServerConfig {
         self.config.read().await.clone()
     }
+
+    pub(crate) async fn invalidate_signature_cache(&self) {
+        self.signature_cache.invalidate().await;
+    }
+
+    pub(crate) async fn inferred_signature_line(
+        &self,
+        module: &Module,
+        uri: &Url,
+        symbol_path: &SymbolPath,
+        library_paths: &[LibraryPath],
+    ) -> Option<String> {
+        if let Some(value) = self.signature_cache.get(symbol_path).await {
+            return value;
+        }
+        let generation = self.signature_cache.generation();
+        let inferred = infer_signature_line(
+            module,
+            self.sources.clone(),
+            uri,
+            symbol_path,
+            library_paths,
+        );
+        self.signature_cache
+            .insert_if_fresh(symbol_path.clone(), inferred.clone(), generation)
+            .await;
+        inferred
+    }
 }
 
 impl<C> Backend<C>
@@ -90,6 +132,7 @@ where
         version: i32,
         text: String,
     ) -> std::result::Result<Vec<Diagnostic>, ()> {
+        self.invalidate_signature_cache().await;
         let miden_uri = to_miden_uri(&uri);
         self.sources.load(SourceLanguage::Masm, miden_uri, text);
         self.set_document_version(uri.clone(), version).await;
@@ -103,6 +146,7 @@ where
         version: i32,
         changes: Vec<TextDocumentContentChangeEvent>,
     ) {
+        self.invalidate_signature_cache().await;
         let miden_uri = to_miden_uri(&uri);
         let source_id = self.sources.find(&miden_uri);
 
@@ -132,6 +176,22 @@ where
     }
 
     pub async fn publish_diagnostics(&self, uri: Url) -> Vec<Diagnostic> {
+        self.publish_diagnostics_inner(uri, Vec::new()).await
+    }
+
+    pub async fn publish_diagnostics_with_extra(
+        &self,
+        uri: Url,
+        extra: Vec<Diagnostic>,
+    ) -> Vec<Diagnostic> {
+        self.publish_diagnostics_inner(uri, extra).await
+    }
+
+    async fn publish_diagnostics_inner(
+        &self,
+        uri: Url,
+        extra: Vec<Diagnostic>,
+    ) -> Vec<Diagnostic> {
         let version = self.documents.get_version(&uri).await;
         let parse_result = self.parse_and_index(&uri).await;
 
@@ -141,51 +201,11 @@ where
             None
         };
 
-        let config = self.config.read().await;
-        let taint_enabled = config.taint_analysis_enabled;
-        let decompilation_enabled = config.inlay_hint_type == InlayHintType::Decompilation;
-        drop(config);
-
         let workspace = self.workspace.read().await;
-        let diagnostics = match parse_result {
+        let mut diagnostics = match parse_result {
             Ok(doc) => {
                 let mut diags = Vec::new();
                 diags.extend(unresolved_to_diagnostics(&uri, &doc, &workspace));
-
-                if taint_enabled {
-                    let taint_diags = crate::analysis::analyze_module(
-                        &doc.module,
-                        self.sources.as_ref(),
-                        &uri,
-                        Some(workspace.contracts()),
-                    );
-                    diags.extend(taint_diags);
-                }
-
-                if decompilation_enabled {
-                    if let Some(source) = self.sources.get_by_uri(&to_miden_uri(&uri)) {
-                        let full_range = Range {
-                            start: Position {
-                                line: 0,
-                                character: 0,
-                            },
-                            end: Position {
-                                line: u32::MAX,
-                                character: 0,
-                            },
-                        };
-                        let decompilation_result = crate::decompiler::collect_decompilation_hints(
-                            &doc.module,
-                            self.sources.as_ref(),
-                            &uri,
-                            &full_range,
-                            0,
-                            source.as_str(),
-                            Some(workspace.contracts()),
-                        );
-                        diags.extend(decompilation_result.diagnostics);
-                    }
-                }
 
                 diags
             }
@@ -193,48 +213,16 @@ where
                 let mut diags = diagnostics_from_report(&self.sources, &uri, report);
                 if let Some(doc) = fallback_doc {
                     diags.extend(unresolved_to_diagnostics(&uri, &doc, &workspace));
-
-                    if taint_enabled {
-                        let taint_diags = crate::analysis::analyze_module(
-                            &doc.module,
-                            self.sources.as_ref(),
-                            &uri,
-                            Some(workspace.contracts()),
-                        );
-                        diags.extend(taint_diags);
-                    }
-
-                    if decompilation_enabled {
-                        if let Some(source) = self.sources.get_by_uri(&to_miden_uri(&uri)) {
-                            let full_range = Range {
-                                start: Position {
-                                    line: 0,
-                                    character: 0,
-                                },
-                                end: Position {
-                                    line: u32::MAX,
-                                    character: 0,
-                                },
-                            };
-                            let decompilation_result =
-                                crate::decompiler::collect_decompilation_hints(
-                                    &doc.module,
-                                    self.sources.as_ref(),
-                                    &uri,
-                                    &full_range,
-                                    0,
-                                    source.as_str(),
-                                    Some(workspace.contracts()),
-                                );
-                            diags.extend(decompilation_result.diagnostics);
-                        }
-                    }
                 }
 
                 diags
             }
         };
         drop(workspace);
+
+        if !extra.is_empty() {
+            diagnostics.extend(extra);
+        }
 
         self.client
             .publish_diagnostics(uri, diagnostics.clone(), version)
@@ -266,7 +254,7 @@ where
 
         match source_file
             .clone()
-            .parse_with_options(self.sources.as_ref(), opts)
+            .parse_with_options(self.sources.clone(), opts)
         {
             Ok(mut module) => {
                 let detected_kind = determine_module_kind_from_ast(&module);
@@ -322,7 +310,7 @@ where
         };
         source_file
             .clone()
-            .parse_with_options(self.sources.as_ref(), opts)
+            .parse_with_options(self.sources.clone(), opts)
     }
 
     async fn module_path_from_uri(&self, uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
@@ -336,7 +324,7 @@ where
         uri: &Url,
     ) -> std::result::Result<DocumentSymbols, miden_assembly_syntax::Report> {
         let module = self.parse_module(uri).await?;
-        let doc_symbols = build_document_symbols(module, self.sources.as_ref());
+        let doc_symbols = build_document_symbols(module, self.sources.clone());
 
         let version = self.documents.get_version(uri).await.unwrap_or(0);
         self.documents
@@ -350,7 +338,6 @@ where
                 &doc_symbols.definitions,
                 &doc_symbols.references,
             );
-            ws.update_contracts(&doc_symbols.module, self.sources.as_ref());
         }
 
         Ok(doc_symbols)
@@ -424,43 +411,105 @@ where
             .get_or_parse_document(uri)
             .await
             .ok_or_else(|| ResolutionError::SourceNotFound(uri.clone()))?;
-        resolve_symbol_at_position(uri, &doc.module, &self.sources, position)
+        resolve_symbol_at_position(uri, &doc.module, self.sources.clone(), position)
     }
 }
 
-impl<C> WorkspaceService for Backend<C>
-where
-    C: PublishDiagnostics,
-{
-    fn find_definition(&self, _path: &SymbolPath) -> Option<Location> {
-        None
-    }
+fn infer_signature_line(
+    module: &Module,
+    sources: Arc<DefaultSourceManager>,
+    uri: &Url,
+    symbol_path: &SymbolPath,
+    library_paths: &[LibraryPath],
+) -> Option<String> {
+    let source_path = uri
+        .to_file_path()
+        .unwrap_or_else(|_| std::path::PathBuf::from("in-memory.masm"));
+    let roots: Vec<LibraryRoot> = library_paths
+        .iter()
+        .map(|lib| LibraryRoot::new(lib.prefix.clone(), lib.root.clone()))
+        .collect();
 
-    fn find_references(&self, _path: &SymbolPath) -> Vec<Location> {
-        Vec::new()
-    }
+    let mut workspace = Workspace::with_source_manager(roots, sources);
+    let program = Program::from_parts(
+        Box::new(module.clone()),
+        source_path,
+        module.path().to_path_buf(),
+    );
+    workspace.add_program(program);
+    workspace.load_dependencies();
 
-    fn search_symbols(&self, _query: &str) -> Vec<(String, Location)> {
-        Vec::new()
+    let decompiler = Decompiler::new(&workspace);
+    let signature = decompiler.signatures().get(symbol_path)?;
+    format_inferred_signature(symbol_path.name(), signature)
+}
+
+fn format_inferred_signature(name: &str, signature: &ProcSignature) -> Option<String> {
+    match signature {
+        ProcSignature::Known { inputs, outputs, .. } => {
+            let args = (0..*inputs)
+                .map(|idx| format!("v_{idx}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ret = match *outputs {
+                0 => String::new(),
+                1 => " -> Felt".to_string(),
+                n => {
+                    let types = (0..n)
+                        .map(|_| "Felt")
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(" -> ({types})")
+                }
+            };
+            Some(format!("proc {name}({args}){ret}"))
+        }
+        ProcSignature::Unknown => None,
     }
 }
 
-/// A snapshot wrapper around WorkspaceIndex that implements WorkspaceService.
-#[allow(dead_code)]
-pub struct WorkspaceIndexWrapper(pub WorkspaceIndex);
+#[derive(Debug)]
+pub(crate) struct SignatureCache {
+    generation: AtomicU64,
+    entries: RwLock<HashMap<SymbolPath, Option<String>>>,
+}
 
-impl WorkspaceService for WorkspaceIndexWrapper {
-    fn find_definition(&self, path: &SymbolPath) -> Option<Location> {
-        self.0
-            .definition(path.as_str())
-            .or_else(|| self.0.definition_by_name(path.name()))
+impl SignatureCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            entries: RwLock::new(HashMap::new()),
+        }
     }
 
-    fn find_references(&self, path: &SymbolPath) -> Vec<Location> {
-        self.0.references(path.as_str())
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
-    fn search_symbols(&self, query: &str) -> Vec<(String, Location)> {
-        self.0.workspace_symbols(query)
+    pub(crate) async fn get(&self, path: &SymbolPath) -> Option<Option<String>> {
+        let entries = self.entries.read().await;
+        entries.get(path).cloned()
+    }
+
+    pub(crate) async fn insert_if_fresh(
+        &self,
+        path: SymbolPath,
+        value: Option<String>,
+        generation: u64,
+    ) {
+        if self.generation.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        let mut entries = self.entries.write().await;
+        if self.generation.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        entries.insert(path, value);
+    }
+
+    pub(crate) async fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        let mut entries = self.entries.write().await;
+        entries.clear();
     }
 }

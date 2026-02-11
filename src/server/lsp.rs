@@ -2,8 +2,7 @@ use crate::client::PublishDiagnostics;
 use crate::code_lens::collect_code_lenses;
 use crate::cursor_resolution::resolve_symbol_at_position;
 use crate::inlay_hints::collect_inlay_hints;
-use crate::instruction_docs::get_instruction_hover;
-use crate::util::{extract_token_at_position, extract_word_at_position, to_miden_uri};
+use crate::util::{extract_token_at_position, to_miden_uri};
 use crate::InlayHintType;
 use miden_debug_types::SourceManager;
 use tower_lsp::{
@@ -25,7 +24,10 @@ use super::config::{
     extract_code_lens_stack_effects, extract_inlay_hint_type, extract_library_paths,
     extract_tab_count,
 };
-use super::helpers::{extract_doc_comment, extract_procedure_signature, is_on_use_statement};
+use super::helpers::{
+    extract_doc_comment, extract_procedure_attributes, extract_procedure_signature,
+    is_on_use_statement,
+};
 
 #[tower_lsp::async_trait]
 impl<C> LanguageServer for Backend<C>
@@ -144,7 +146,7 @@ where
             return Ok(None);
         };
 
-        let symbol = match resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos) {
+        let symbol = match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos) {
             Ok(s) => s,
             Err(e) => {
                 debug!("goto_definition: {e}");
@@ -165,39 +167,14 @@ where
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let config = self.snapshot_config().await;
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let Some(doc) = self.get_or_parse_document(&uri).await else {
             return Ok(None);
         };
 
-        let instruction_hovers_enabled = self.config.read().await.instruction_hovers_enabled;
-
-        let source = self.sources.get_by_uri(&to_miden_uri(&uri));
-        let token = source
-            .as_ref()
-            .and_then(|s| extract_token_at_position(s, pos));
-        let word = source
-            .as_ref()
-            .and_then(|s| extract_word_at_position(s, pos));
-
-        if instruction_hovers_enabled {
-            if let Some(ref w) = word {
-                if matches!(w.as_str(), "exec" | "call" | "syscall" | "procref") {
-                    if let Some(hover_text) = get_instruction_hover(w) {
-                        return Ok(Some(Hover {
-                            contents: HoverContents::Markup(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: hover_text,
-                            }),
-                            range: None,
-                        }));
-                    }
-                }
-            }
-        }
-
-        match resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos) {
+        match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos) {
             Ok(symbol) => {
                 let workspace = self.workspace.read().await;
                 let def_loc = workspace
@@ -205,44 +182,46 @@ where
                     .or_else(|| workspace.definition_by_suffix(symbol.path.as_str()))
                     .or_else(|| workspace.definition_by_name(&symbol.name));
 
-                let contract = workspace
-                    .contracts()
-                    .get_by_path(symbol.path.as_str())
-                    .or_else(|| workspace.contracts().get_by_suffix(symbol.path.as_str()))
-                    .or_else(|| workspace.contracts().get_by_name(&symbol.name))
-                    .cloned();
                 drop(workspace);
 
                 if let Some(loc) = def_loc {
+                    let Some(def_doc) = self.get_or_parse_document(&loc.uri).await else {
+                        return Ok(None);
+                    };
                     let def_uri = to_miden_uri(&loc.uri);
                     if let Some(source) = self.sources.get_by_uri(&def_uri) {
                         let content = source.as_str();
                         let def_line = loc.range.start.line as usize;
-                        let signature = extract_procedure_signature(content, def_line);
+                        let attributes = extract_procedure_attributes(content, def_line);
+                        let inferred = self
+                            .inferred_signature_line(
+                                &def_doc.module,
+                                &loc.uri,
+                                &symbol.path,
+                                &config.library_paths,
+                            )
+                            .await;
+                        let signature = match inferred {
+                            Some(line) => {
+                                let mut lines = attributes;
+                                lines.push(line);
+                                Some(lines.join("\n"))
+                            }
+                            None => extract_procedure_signature(content, def_line).or_else(|| {
+                                if attributes.is_empty() {
+                                    None
+                                } else {
+                                    Some(attributes.join("\n"))
+                                }
+                            }),
+                        };
                         let comment = extract_doc_comment(content, def_line);
 
-                        let proc_name = signature
-                            .as_ref()
-                            .and_then(|s| s.lines().last())
-                            .map(|line| line.trim().to_string())
-                            .unwrap_or_else(|| symbol.name.clone());
-
-                        let contract_sig =
-                            contract.and_then(|c| c.format_signature_for_display(&proc_name));
-
-                        let hover_text = match (&contract_sig, comment) {
-                            (Some(csig), Some(doc)) => {
-                                format!("```masm\n{csig}\n```\n\n---\n\n{doc}")
+                        let hover_text = match (signature.as_ref(), comment) {
+                            (Some(sig), Some(doc)) => {
+                                format!("```masm\n{sig}\n```\n\n---\n\n{doc}")
                             }
-                            (Some(csig), None) => {
-                                format!("```masm\n{csig}\n```")
-                            }
-                            (None, Some(doc)) if signature.is_some() => {
-                                format!("```masm\n{}\n```\n\n---\n\n{doc}", signature.unwrap())
-                            }
-                            (None, None) if signature.is_some() => {
-                                format!("```masm\n{}\n```", signature.unwrap())
-                            }
+                            (Some(sig), None) => format!("```masm\n{sig}\n```"),
                             (None, Some(doc)) => doc,
                             (None, None) => return Ok(None),
                         };
@@ -259,20 +238,6 @@ where
             }
             Err(e) => {
                 debug!("hover: symbol resolution failed: {e}");
-            }
-        }
-
-        if instruction_hovers_enabled {
-            if let Some(t) = token {
-                if let Some(hover_text) = get_instruction_hover(&t) {
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: hover_text,
-                        }),
-                        range: None,
-                    }));
-                }
             }
         }
 
@@ -300,7 +265,7 @@ where
             return Ok(None);
         };
 
-        let symbol = match resolve_symbol_at_position(&uri, &doc.module, &self.sources, pos) {
+        let symbol = match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos) {
             Ok(s) => s,
             Err(e) => {
                 debug!("references: {e}");
@@ -364,9 +329,7 @@ where
             return Ok(None);
         };
 
-        let workspace = self.workspace.read().await;
-        let contracts = workspace.contracts();
-        let lenses = collect_code_lenses(&doc.module, self.sources.as_ref(), Some(contracts));
+        let lenses = collect_code_lenses(&doc.module, self.sources.as_ref());
         Ok(Some(lenses))
     }
 
@@ -391,31 +354,19 @@ where
             return Ok(None);
         };
 
-        let hints = match config.inlay_hint_type {
-            InlayHintType::Description => collect_inlay_hints(
-                &doc.module,
-                self.sources.as_ref(),
-                &params.range,
-                config.inlay_hint_tabs,
-                source.as_str(),
-            ),
-            InlayHintType::Decompilation => {
-                let workspace = self.workspace.read().await;
-                let contracts = workspace.contracts();
-                let result = crate::decompiler::collect_decompilation_hints(
-                    &doc.module,
-                    self.sources.as_ref(),
-                    &uri,
-                    &params.range,
-                    config.inlay_hint_tabs,
-                    source.as_str(),
-                    Some(contracts),
-                );
-                drop(workspace);
-                result.hints
-            }
-            InlayHintType::None => vec![],
-        };
-        Ok(Some(hints))
+        let result = collect_inlay_hints(
+            &doc.module,
+            self.sources.clone(),
+            &uri,
+            &params.range,
+            config.inlay_hint_tabs,
+            source.as_str(),
+            &config.library_paths,
+            config.inlay_hint_type,
+        );
+        let _ = self
+            .publish_diagnostics_with_extra(uri.clone(), result.diagnostics)
+            .await;
+        Ok(Some(result.hints))
     }
 }

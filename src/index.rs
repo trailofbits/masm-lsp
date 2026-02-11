@@ -1,12 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module};
 use miden_debug_types::{DefaultSourceManager, Spanned};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use crate::analysis::{infer_module_contracts_with_store, ContractStore, ProcContract};
 use crate::diagnostics::span_to_range;
-use crate::symbol_path::SymbolPath;
+use crate::SymbolPath;
 
 #[derive(Clone, Debug)]
 pub struct Definition {
@@ -51,8 +51,6 @@ pub struct WorkspaceIndex {
     refs_by_uri: HashMap<Url, Vec<SymbolPath>>,
     /// Index references by their short name for fast O(1) lookups.
     refs_by_name: HashMap<String, Vec<SymbolPath>>,
-    /// Procedure contracts inferred from implementations and user annotations.
-    contracts: ContractStore,
 }
 
 impl WorkspaceIndex {
@@ -154,18 +152,20 @@ impl WorkspaceIndex {
     /// Look up a definition by path suffix.
     /// Uses O(1) hash lookup on the name + O(k) suffix matching where k is candidates with that name.
     pub fn definition_by_suffix(&self, suffix: &str) -> Option<Location> {
+        let suffix = SymbolPath::new(suffix).into_inner();
         // Extract the short name from the suffix for fast index lookup
         let name = suffix.rsplit("::").next()?;
         let candidates = self.def_by_name.get(name)?;
         candidates
             .iter()
-            .find(|p| p.ends_with(suffix))
+            .find(|p| p.ends_with(&suffix))
             .and_then(|p| self.definitions.get(p).cloned())
     }
 
     /// Look up references by path suffix.
     /// Uses O(1) hash lookup on the name + O(k) suffix matching where k is candidates with that name.
     pub fn references_by_suffix(&self, suffix: &str) -> Vec<Location> {
+        let suffix = SymbolPath::new(suffix).into_inner();
         // Extract the short name from the suffix for fast index lookup
         let name = match suffix.rsplit("::").next() {
             Some(n) => n,
@@ -177,7 +177,7 @@ impl WorkspaceIndex {
         };
         candidates
             .iter()
-            .filter(|p| p.ends_with(suffix))
+            .filter(|p| p.ends_with(&suffix))
             .filter_map(|p| self.references.get(p))
             .flatten()
             .cloned()
@@ -187,6 +187,7 @@ impl WorkspaceIndex {
     /// Look up definitions by path suffix.
     /// Uses O(1) hash lookup on the name + O(k) suffix matching where k is candidates with that name.
     pub fn definitions_by_suffix(&self, suffix: &str) -> Vec<Location> {
+        let suffix = SymbolPath::new(suffix).into_inner();
         // Extract the short name from the suffix for fast index lookup
         let name = match suffix.rsplit("::").next() {
             Some(n) => n,
@@ -198,7 +199,7 @@ impl WorkspaceIndex {
         };
         candidates
             .iter()
-            .filter(|p| p.ends_with(suffix))
+            .filter(|p| p.ends_with(&suffix))
             .filter_map(|p| self.definitions.get(p).cloned())
             .collect()
     }
@@ -212,44 +213,13 @@ impl WorkspaceIndex {
             .collect()
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Contract methods
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Update contracts for a document by inferring them from procedure implementations,
-    /// seeding inference with the current workspace store for cross-file calls.
-    pub fn update_contracts(&mut self, module: &Module, source_manager: &DefaultSourceManager) {
-        let contracts =
-            infer_module_contracts_with_store(module, source_manager, Some(&self.contracts));
-        self.contracts.update_document(contracts);
-    }
-
-    /// Get a procedure contract by exact path.
-    pub fn get_contract(&self, path: &SymbolPath) -> Option<&ProcContract> {
-        self.contracts.get(path)
-    }
-
-    /// Get a procedure contract by short name.
-    pub fn get_contract_by_name(&self, name: &str) -> Option<&ProcContract> {
-        self.contracts.get_by_name(name)
-    }
-
-    /// Get a procedure contract by path suffix.
-    pub fn get_contract_by_suffix(&self, suffix: &str) -> Option<&ProcContract> {
-        self.contracts.get_by_suffix(suffix)
-    }
-
-    /// Get access to the contract store.
-    pub fn contracts(&self) -> &ContractStore {
-        &self.contracts
-    }
 }
 
 pub fn build_document_symbols(
     module: Box<Module>,
-    source_manager: &DefaultSourceManager,
+    source_manager: Arc<DefaultSourceManager>,
 ) -> DocumentSymbols {
-    let defs = collect_definitions(&module, source_manager);
+    let defs = collect_definitions(&module, source_manager.as_ref());
     let refs = collect_references(&module, source_manager);
     DocumentSymbols::new(module, defs, refs)
 }
@@ -272,9 +242,9 @@ fn collect_definitions(module: &Module, source_manager: &DefaultSourceManager) -
     defs
 }
 
-fn collect_references(module: &Module, source_manager: &DefaultSourceManager) -> Vec<Reference> {
+fn collect_references(module: &Module, source_manager: Arc<DefaultSourceManager>) -> Vec<Reference> {
     let mut collector = InvocationCollector {
-        resolver: crate::symbol_resolution::create_resolver(module),
+        resolver: crate::symbol_resolution::create_resolver(module, source_manager.clone()),
         source_manager,
         refs: Vec::new(),
     };
@@ -288,13 +258,14 @@ fn zero_range() -> Range {
 
 struct InvocationCollector<'a> {
     resolver: crate::symbol_resolution::SymbolResolver<'a>,
-    source_manager: &'a DefaultSourceManager,
+    source_manager: Arc<DefaultSourceManager>,
     refs: Vec<Reference>,
 }
 
 impl<'a> InvocationCollector<'a> {
     fn push_target(&mut self, target: &InvocationTarget) {
-        let range = span_to_range(self.source_manager, target.span()).unwrap_or_else(zero_range);
+        let range =
+            span_to_range(self.source_manager.as_ref(), target.span()).unwrap_or_else(zero_range);
 
         // Use the unified symbol resolution service to get the fully-qualified path
         if let Some(path) = self.resolver.resolve_target(target) {

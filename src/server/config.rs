@@ -92,6 +92,7 @@ pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<Library
 /// Valid values for `type`:
 /// - `"decompilation"` - Show decompiled pseudocode (default)
 /// - `"description"` - Show instruction descriptions
+/// - `"stack_effect"` - Show instruction stack effects
 /// - `"none"` - Disable inlay hints
 pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHintType> {
     let hint_type = settings
@@ -103,6 +104,7 @@ pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHint
     match hint_type.to_lowercase().as_str() {
         "decompilation" => Some(InlayHintType::Decompilation),
         "description" => Some(InlayHintType::Description),
+        "stack_effect" => Some(InlayHintType::StackEffect),
         "none" | "disabled" | "off" => Some(InlayHintType::None),
         _ => None,
     }
@@ -249,6 +251,21 @@ mod tests {
         assert_eq!(
             extract_inlay_hint_type(&settings),
             Some(InlayHintType::Description)
+        );
+    }
+
+    #[test]
+    fn extract_inlay_hint_type_stack_effect() {
+        let settings = json!({
+            "masm": {
+                "inlayHints": {
+                    "type": "stack_effect"
+                }
+            }
+        });
+        assert_eq!(
+            extract_inlay_hint_type(&settings),
+            Some(InlayHintType::StackEffect)
         );
     }
 

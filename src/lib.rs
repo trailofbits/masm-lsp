@@ -1,10 +1,5 @@
-pub use masm_analysis as analysis;
-pub use masm_analysis::descriptions;
-pub use masm_analysis::instruction_docs;
-pub use masm_analysis::stack_effect;
-pub use masm_analysis::symbol_path;
-pub use masm_analysis::symbol_resolution;
 pub use masm_decompiler as decompiler;
+pub use masm_decompiler::symbol::resolution as symbol_resolution;
 pub mod client;
 pub mod code_lens;
 pub mod cursor_resolution;
@@ -17,13 +12,15 @@ pub mod service;
 pub mod util;
 
 pub use cursor_resolution::ResolutionError;
-pub use masm_analysis::symbol_path::SymbolPath;
+pub use masm_decompiler::SymbolPath;
 
 /// The type of inlay hints to display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InlayHintType {
     /// Show instruction descriptions.
     Description,
+    /// Show instruction stack effects.
+    StackEffect,
     /// Show decompiled pseudocode (default behavior).
     #[default]
     Decompilation,
@@ -40,8 +37,6 @@ pub struct ServerConfig {
     pub library_paths: Vec<LibraryPath>,
     /// Whether to show stack-effect code lenses.
     pub code_lens_stack_effects: bool,
-    /// Whether to show hover information for built-in instructions.
-    pub instruction_hovers_enabled: bool,
     /// Whether to run taint analysis and report security warnings.
     pub taint_analysis_enabled: bool,
     /// The inlay hint type to display.
@@ -61,8 +56,6 @@ impl Default for ServerConfig {
             inlay_hint_tabs: 2,
             library_paths: default_library_paths(),
             code_lens_stack_effects: true,
-            // Instruction hovers are disabled by default.
-            instruction_hovers_enabled: false,
             // Taint analysis is enabled by default.
             taint_analysis_enabled: true,
             // Decompilation hints are shown by default.
@@ -84,7 +77,6 @@ pub struct ServerConfigBuilder {
     inlay_hint_tabs: Option<usize>,
     library_paths: Option<Vec<LibraryPath>>,
     code_lens_stack_effects: Option<bool>,
-    instruction_hovers_enabled: Option<bool>,
     taint_analysis_enabled: Option<bool>,
     inlay_hint_type: Option<InlayHintType>,
 }
@@ -99,12 +91,6 @@ impl ServerConfigBuilder {
     /// Set the library roots to preload and use for module path derivation.
     pub fn library_paths(mut self, paths: Vec<LibraryPath>) -> Self {
         self.library_paths = Some(paths);
-        self
-    }
-
-    /// Set whether to show hover information for built-in instructions.
-    pub fn instruction_hovers_enabled(mut self, enabled: bool) -> Self {
-        self.instruction_hovers_enabled = Some(enabled);
         self
     }
 
@@ -134,7 +120,6 @@ impl ServerConfigBuilder {
             inlay_hint_tabs: self.inlay_hint_tabs.unwrap_or(2),
             library_paths: self.library_paths.unwrap_or_else(default_library_paths),
             code_lens_stack_effects: self.code_lens_stack_effects.unwrap_or(true),
-            instruction_hovers_enabled: self.instruction_hovers_enabled.unwrap_or(false),
             taint_analysis_enabled: self.taint_analysis_enabled.unwrap_or(true),
             inlay_hint_type: self.inlay_hint_type.unwrap_or(InlayHintType::Decompilation),
         }

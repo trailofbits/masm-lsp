@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/masm-instructions", "crates/masm-analysis", "crates/masm-decompiler"]
+members = [".", "crates/masm-instructions"]
 resolver = "2"
 
 [package]
@@ -15,23 +15,18 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-
 tower-lsp = "0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-miden-utils-diagnostics = { git = "https://github.com/0xMiden/miden-vm", package = "miden-utils-diagnostics", default-features = true }
+miden-utils-diagnostics = { version = "0.20", default-features = true }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "5.0"
+masm-decompiler = { path = "../masm-decompiler" }
 masm-instructions = { path = "crates/masm-instructions" }
-masm-analysis = { path = "crates/masm-analysis" }
-masm-decompiler = { path = "crates/masm-decompiler" }
 
 # Miden toolchain
-miden-assembly-syntax = { git = "https://github.com/0xMiden/miden-vm", package = "miden-assembly-syntax", default-features = true }
-miden-debug-types = { git = "https://github.com/0xMiden/miden-vm", package = "miden-debug-types", default-features = true }
+miden-assembly-syntax = { version = "0.20", default-features = true }
+miden-debug-types = { version = "0.20", default-features = true }
 
 [dev-dependencies]
 proptest = "1.4"
 tokio = { version = "1", features = ["time"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
-
-[[bench]]
-name = "decompilation"
-harness = false

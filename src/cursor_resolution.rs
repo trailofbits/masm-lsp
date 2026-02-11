@@ -1,4 +1,6 @@
-use crate::symbol_path::SymbolPath;
+use crate::SymbolPath;
+use std::sync::Arc;
+
 use crate::util::to_miden_uri;
 use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module, Procedure};
 use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned};
@@ -38,7 +40,7 @@ pub struct ResolvedSymbol {
 pub fn resolve_symbol_at_position(
     uri: &Url,
     module: &Module,
-    source_manager: &DefaultSourceManager,
+    source_manager: Arc<DefaultSourceManager>,
     position: Position,
 ) -> Result<ResolvedSymbol, ResolutionError> {
     let source = source_manager.get_by_uri(&to_miden_uri(uri));
@@ -52,12 +54,12 @@ pub fn resolve_symbol_at_position(
 
     // Try to find an invocation target at this position (exec.foo, call.bar, etc.)
     if let Some(target) = find_invocation_at_offset(module, offset) {
-        return resolve_invocation_target(module, &target);
+        return resolve_invocation_target(module, source_manager.clone(), &target);
     }
 
     // Try to find a procedure definition at this position (proc foo, export bar)
     if let Some(proc_name) = find_procedure_definition_at_offset(module, offset) {
-        return resolve_procedure_definition(module, &proc_name);
+        return resolve_procedure_definition(module, source_manager.clone(), &proc_name);
     }
 
     Err(ResolutionError::NoTokenAtPosition {
@@ -172,10 +174,11 @@ impl Visit for ProcDefinitionFinder {
 /// Resolve a procedure definition to a symbol path.
 fn resolve_procedure_definition(
     module: &Module,
+    source_manager: Arc<DefaultSourceManager>,
     name: &str,
 ) -> Result<ResolvedSymbol, ResolutionError> {
     // Use the unified symbol resolution service
-    let resolver = crate::symbol_resolution::create_resolver(module);
+    let resolver = crate::symbol_resolution::create_resolver(module, source_manager);
     let path = resolver.resolve_symbol(name);
     Ok(ResolvedSymbol {
         path,
@@ -186,6 +189,7 @@ fn resolve_procedure_definition(
 /// Resolve an invocation target to a symbol path.
 pub fn resolve_invocation_target(
     module: &Module,
+    source_manager: Arc<DefaultSourceManager>,
     target: &InvocationTarget,
 ) -> Result<ResolvedSymbol, ResolutionError> {
     // Extract the original target string for the `name` field
@@ -198,7 +202,7 @@ pub fn resolve_invocation_target(
     };
 
     // Use the unified symbol resolution service
-    let resolver = crate::symbol_resolution::create_resolver(module);
+    let resolver = crate::symbol_resolution::create_resolver(module, source_manager);
     match resolver.resolve_target(target) {
         Some(path) => Ok(ResolvedSymbol {
             path,
