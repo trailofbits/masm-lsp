@@ -1,0 +1,9 @@
+[project]
+name = "masm-instructions"
+version = "0.1.0"
+description = "Instruction metadata tooling for MASM."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
