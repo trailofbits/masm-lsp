@@ -6,11 +6,19 @@ This language server can be run against any IDE that supports the language serve
 by the [VS Code extension for MASM](https://github.com/trailofbits/vscode-masm), but can also be used with other editors
 such as Neovim, Emacs, or Sublime Text.
 
-## Crate snapshot
+The server provides the following features:
 
-- Purpose: LSP server and CLI entry point for MASM (hover, diagnostics, inlay hints, decompilation, analysis).
-- Upstream deps: `miden-assembly-syntax`, `miden-debug-types`, `tower-lsp`, `tokio`, and `masm-decompiler`.
-- Downstream users: Editor clients via the LSP protocol.
+- Go-to-definition and find-references for call targets and constants
+- Hover information for call targets and constants
+- Diagnostics for syntax errors and undefined symbols
+- Inlay hints providing instruction descriptions, or decompilation
+- Code lenses for instruction stack effects
+
+It also provides diagnostics for a number of simple static analysis passes implemented in the `masm-decompiler` crate,
+such as:
+
+- Detecting potential type errors due to insufficient type validation (e.g. treating a `Felt` as an `U32` value)
+- Detecting invalid procedure signatures
 
 ## References
 
