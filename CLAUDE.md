@@ -11,5 +11,4 @@ cargo build              # Build the project
 cargo test               # Run all tests
 cargo test <test_name>   # Run a single test
 cargo check              # Fast type checking
-cargo bench              # Run benchmarks (decompilation)
 ```

@@ -1,6 +1,4 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# MASM LSP Server
 
 ## Project Overview
 
@@ -13,5 +11,4 @@ cargo build              # Build the project
 cargo test               # Run all tests
 cargo test <test_name>   # Run a single test
 cargo check              # Fast type checking
-cargo bench              # Run benchmarks (decompilation)
 ```
