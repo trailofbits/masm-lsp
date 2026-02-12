@@ -11,7 +11,8 @@ use masm_instructions::ToDescription;
 use miden_assembly_syntax::ast::{Block, Instruction, Module, Op};
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Span, Spanned};
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, Position, Range, Url,
+    Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, NumberOrString,
+    Position, Range, Url,
 };
 
 use crate::diagnostics::{normalize_message, span_to_range, SOURCE_DECOMPILATION};
@@ -95,18 +96,17 @@ fn collect_decompilation_hints(
     const DEFAULT_INLAY_HINT_TABS: u32 = 2;
     let padding = DEFAULT_INLAY_HINT_TABS;
 
-    let mut proc_infos: Vec<(u32, String, bool)> = Vec::new();
+    let mut proc_infos: Vec<(Range, String, bool)> = Vec::new();
     for proc in module.procedures() {
         let Some(range) = span_to_range(sources.as_ref(), proc.name().span()) else {
             continue;
         };
-        let line = range.start.line;
-        let in_range = line_in_range(line, visible_range);
+        let in_range = line_in_range(range.start.line, visible_range);
         let proc_name = proc.name().as_str().to_string();
-        proc_infos.push((line, proc_name, in_range));
+        proc_infos.push((range, proc_name, in_range));
     }
 
-    proc_infos.sort_by_key(|(line, _, _)| *line);
+    proc_infos.sort_by_key(|(range, _, _)| range.start.line);
     let mut hints = Vec::new();
     let mut diagnostics = Vec::new();
     if !unresolved_modules.is_empty() {
@@ -117,7 +117,8 @@ fn collect_decompilation_hints(
         ));
     }
     for idx in 0..proc_infos.len() {
-        let (line, proc_name, in_range) = proc_infos[idx].clone();
+        let (proc_range, proc_name, in_range) = proc_infos[idx].clone();
+        let line = proc_range.start.line;
 
         if !in_range {
             continue;
@@ -133,14 +134,13 @@ fn collect_decompilation_hints(
             Ok(decompiled) => decompiled,
             Err(error) => {
                 if !unresolved_modules.is_empty()
-                    && matches!(
-                        error,
-                        DecompilationError::Lifting(LiftingError::UnknownCallTarget { .. })
-                    )
+                    && should_suppress_with_unresolved_dependencies(&error)
                 {
                     continue;
                 }
-                if let Some(diag) = decompilation_error_diagnostic(sources.as_ref(), error) {
+                if let Some(diag) =
+                    decompilation_error_diagnostic(sources.as_ref(), proc_range.clone(), error)
+                {
                     diagnostics.push(diag);
                 }
                 continue;
@@ -152,8 +152,8 @@ fn collect_decompilation_hints(
         let output = writer.finish();
         let mut lines: Vec<String> = output.lines().map(|line| line.to_string()).collect();
 
-        if let Some((next_line, _, _)) = proc_infos.get(idx + 1) {
-            let allowed_lines = *next_line as i32 - line as i32 - 1;
+        if let Some((next_proc_range, _, _)) = proc_infos.get(idx + 1) {
+            let allowed_lines = next_proc_range.start.line as i32 - line as i32 - 1;
             if allowed_lines <= 0 {
                 continue;
             }
@@ -334,34 +334,158 @@ fn line_in_range(line: u32, range: &Range) -> bool {
 
 fn decompilation_error_diagnostic(
     sources: &DefaultSourceManager,
+    fallback_range: Range,
     error: DecompilationError,
 ) -> Option<Diagnostic> {
-    let (span, message) = match error {
-        DecompilationError::Lifting(err) => (lifting_error_span(&err), err.to_string()),
+    let (range, kind, message) = match error {
+        DecompilationError::Lifting(err) => {
+            let message = err.to_string();
+            let kind = classify_lifting_error(&message);
+            let message = lift_diagnostic_message(kind, &message);
+            let range = lifting_error_span(&err)
+                .and_then(|span| span_to_range(sources, span))
+                .unwrap_or(fallback_range);
+            (range, kind, message)
+        }
         DecompilationError::ProcedureNotFound(_) | DecompilationError::ModuleNotFound(_) => {
             return None;
         }
     };
 
-    let range = span_to_range(sources, span)
-        .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
-
     Some(Diagnostic {
         range,
         severity: Some(DiagnosticSeverity::ERROR),
         source: Some(SOURCE_DECOMPILATION.to_string()),
+        code: Some(NumberOrString::String(kind.code().to_string())),
         message: normalize_message(&message),
         ..Default::default()
     })
 }
 
-fn lifting_error_span(error: &LiftingError) -> SourceSpan {
+fn should_suppress_with_unresolved_dependencies(error: &DecompilationError) -> bool {
     match error {
-        LiftingError::UnsupportedInstruction { span, .. } => *span,
-        LiftingError::UnknownCallTarget { span, .. } => *span,
-        LiftingError::UnbalancedIf { span } => *span,
-        LiftingError::NonNeutralWhile { span } => *span,
-        LiftingError::IncompatibleIfMerge { span } => *span,
-        LiftingError::UnsupportedRepeatPattern { span, .. } => *span,
+        DecompilationError::Lifting(err) => {
+            classify_lifting_error(&err.to_string()).is_call_related()
+        }
+        DecompilationError::ProcedureNotFound(_) | DecompilationError::ModuleNotFound(_) => false,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LiftingDiagnosticKind {
+    CallTargetResolution,
+    MissingSignature,
+    UnknownSignature,
+    Other,
+}
+
+impl LiftingDiagnosticKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::CallTargetResolution => "call-target-resolution",
+            Self::MissingSignature => "missing-signature",
+            Self::UnknownSignature => "unknown-signature",
+            Self::Other => "lifting-error",
+        }
+    }
+
+    fn is_call_related(self) -> bool {
+        matches!(
+            self,
+            Self::CallTargetResolution | Self::MissingSignature | Self::UnknownSignature
+        )
+    }
+}
+
+fn classify_lifting_error(message: &str) -> LiftingDiagnosticKind {
+    let message = message.to_ascii_lowercase();
+
+    if message.contains("missing inferred signature") {
+        return LiftingDiagnosticKind::MissingSignature;
+    }
+    if message.contains("unknown inferred signature") {
+        return LiftingDiagnosticKind::UnknownSignature;
+    }
+    if message.contains("call target")
+        && (message.contains("resolve") || message.contains("unknown"))
+    {
+        return LiftingDiagnosticKind::CallTargetResolution;
+    }
+
+    LiftingDiagnosticKind::Other
+}
+
+fn lift_diagnostic_message(kind: LiftingDiagnosticKind, message: &str) -> String {
+    match kind {
+        LiftingDiagnosticKind::CallTargetResolution => {
+            format!("{message}. Check library paths and unresolved imports used by this module")
+        }
+        LiftingDiagnosticKind::MissingSignature => {
+            format!("{message}. The call resolved, but no inferred stack effect was found")
+        }
+        LiftingDiagnosticKind::UnknownSignature => {
+            format!("{message}. The call resolved, but its inferred stack effect is unknown")
+        }
+        LiftingDiagnosticKind::Other => message.to_string(),
+    }
+}
+
+fn lifting_error_span(error: &LiftingError) -> Option<SourceSpan> {
+    match error {
+        LiftingError::UnsupportedInstruction { span, .. } => Some(*span),
+        LiftingError::UnbalancedIf { span } => Some(*span),
+        LiftingError::NonNeutralWhile { span } => Some(*span),
+        LiftingError::IncompatibleIfMerge { span } => Some(*span),
+        LiftingError::UnsupportedRepeatPattern { span, .. } => Some(*span),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_lifting_error, lift_diagnostic_message, LiftingDiagnosticKind};
+
+    #[test]
+    fn classify_old_unknown_call_target_message() {
+        let message = "unknown call target `foo::bar` found";
+        assert!(matches!(
+            classify_lifting_error(message),
+            LiftingDiagnosticKind::CallTargetResolution
+        ));
+    }
+
+    #[test]
+    fn classify_new_unresolved_call_target_message() {
+        let message = "failed to resolve call target `foo::bar`: module not loaded";
+        assert!(matches!(
+            classify_lifting_error(message),
+            LiftingDiagnosticKind::CallTargetResolution
+        ));
+    }
+
+    #[test]
+    fn classify_new_missing_signature_message() {
+        let message = "missing inferred signature for call target `foo::bar`";
+        assert!(matches!(
+            classify_lifting_error(message),
+            LiftingDiagnosticKind::MissingSignature
+        ));
+    }
+
+    #[test]
+    fn classify_new_unknown_signature_message() {
+        let message = "call target `foo::bar` has unknown inferred signature";
+        assert!(matches!(
+            classify_lifting_error(message),
+            LiftingDiagnosticKind::UnknownSignature
+        ));
+    }
+
+    #[test]
+    fn call_target_messages_include_actionable_hint() {
+        let message = "failed to resolve call target `foo::bar`";
+        let rendered =
+            lift_diagnostic_message(LiftingDiagnosticKind::CallTargetResolution, message);
+        assert!(rendered.contains("Check library paths and unresolved imports"));
     }
 }
