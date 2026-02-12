@@ -1,6 +1,7 @@
 use super::*;
 use crate::client::PublishDiagnostics;
 use crate::LibraryPath;
+use serde_json::json;
 use std::sync::Arc;
 use tower_lsp::lsp_types;
 use tower_lsp::lsp_types::{
@@ -226,6 +227,165 @@ async fn execute_command_set_stdlib_root_requires_argument() {
 }
 
 #[tokio::test]
+async fn execute_command_decompile_procedure_at_cursor_returns_output() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/decompile_success.masm").expect("valid URI");
+
+    backend
+        .handle_open(
+            uri.clone(),
+            1,
+            "proc foo\n  push.1\n  push.2\n  add\nend\n".to_string(),
+        )
+        .await
+        .expect("open");
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.decompileProcedureAtCursor".to_string(),
+        arguments: vec![json!({
+            "uri": uri.as_str(),
+            "position": {
+                "line": 2,
+                "character": 2,
+            }
+        })],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend
+        .execute_command(params)
+        .await
+        .expect("execute command")
+        .expect("decompilation payload");
+
+    let procedure = result
+        .get("procedure")
+        .and_then(serde_json::Value::as_object)
+        .expect("procedure object");
+    assert_eq!(
+        procedure.get("name").and_then(serde_json::Value::as_str),
+        Some("foo"),
+    );
+    let decompiled = result
+        .get("decompiled")
+        .and_then(serde_json::Value::as_str)
+        .expect("decompiled text");
+    assert!(
+        !decompiled.trim().is_empty(),
+        "expected non-empty decompiled output"
+    );
+}
+
+#[tokio::test]
+async fn execute_command_decompile_procedure_at_cursor_errors_when_outside_procedure() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/decompile_outside_proc.masm").expect("valid URI");
+
+    backend
+        .handle_open(
+            uri.clone(),
+            1,
+            "const FOO = 42\n\nproc foo\n  push.FOO\nend\n".to_string(),
+        )
+        .await
+        .expect("open");
+
+    let _ = client.take_published().await;
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.decompileProcedureAtCursor".to_string(),
+        arguments: vec![json!({
+            "uri": uri.as_str(),
+            "position": {
+                "line": 0,
+                "character": 1,
+            }
+        })],
+        work_done_progress_params: Default::default(),
+    };
+
+    let err = backend
+        .execute_command(params)
+        .await
+        .expect_err("expected error outside procedure");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidRequest);
+
+    let diagnostic = command_error_diagnostic(&err).expect("diagnostic in error data");
+    assert_eq!(
+        diagnostic.source.as_deref(),
+        Some("masm-lsp/decompilation"),
+        "unexpected diagnostic source: {:?}",
+        diagnostic.source
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("Cursor is not inside a procedure"),
+        "unexpected diagnostic message: {}",
+        diagnostic.message
+    );
+
+    let published = client.take_published().await;
+    assert!(
+        published.iter().any(|(_, diags, _)| diags
+            .iter()
+            .any(|diag| diag.source.as_deref() == Some("masm-lsp/decompilation"))),
+        "expected decompilation diagnostic to be published, got: {:?}",
+        published
+    );
+}
+
+#[tokio::test]
+async fn execute_command_decompile_procedure_at_cursor_returns_decompilation_error() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/decompile_failure.masm").expect("valid URI");
+
+    backend
+        .handle_open(uri.clone(), 1, "proc foo\n  dynexec\nend\n".to_string())
+        .await
+        .expect("open");
+
+    let _ = client.take_published().await;
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.decompileProcedureAtCursor".to_string(),
+        arguments: vec![json!({
+            "uri": uri.as_str(),
+            "position": {
+                "line": 1,
+                "character": 3,
+            }
+        })],
+        work_done_progress_params: Default::default(),
+    };
+
+    let err = backend
+        .execute_command(params)
+        .await
+        .expect_err("expected decompilation failure");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InternalError);
+
+    let diagnostic = command_error_diagnostic(&err).expect("diagnostic in error data");
+    assert_eq!(diagnostic.source.as_deref(), Some("masm-lsp/decompilation"));
+    assert_eq!(
+        diagnostic.severity,
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+    );
+
+    let published = client.take_published().await;
+    assert!(
+        published.iter().any(|(_, diags, _)| diags
+            .iter()
+            .any(|diag| diag.source.as_deref() == Some("masm-lsp/decompilation"))),
+        "expected decompilation diagnostic to be published, got: {:?}",
+        published
+    );
+}
+
+#[tokio::test]
 async fn reloading_libraries_removes_old_stdlib_entries() {
     let client = RecordingClient::default();
     let backend = Backend::new(client.clone());
@@ -275,6 +435,11 @@ async fn reloading_libraries_removes_old_stdlib_entries() {
     assert!(ws.definition("::std::new::new_proc").is_some());
 
     let _ = std::fs::remove_dir_all(base);
+}
+
+fn command_error_diagnostic(error: &tower_lsp::jsonrpc::Error) -> Option<Diagnostic> {
+    let diagnostic = error.data.as_ref()?.get("diagnostic")?;
+    serde_json::from_value(diagnostic.clone()).ok()
 }
 
 #[derive(Clone, Default)]

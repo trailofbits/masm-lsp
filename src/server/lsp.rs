@@ -11,21 +11,21 @@ use std::{
     path::{Path, PathBuf},
 };
 use tower_lsp::{
-    jsonrpc::Result,
+    jsonrpc::{ErrorCode, Result},
     lsp_types::{
         request::{GotoImplementationParams, GotoImplementationResponse},
         CodeLens, CodeLensOptions, CodeLensParams, ExecuteCommandOptions, ExecuteCommandParams,
         GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
         InitializeParams, InitializeResult, InitializedParams, InlayHint, InlayHintParams,
-        Location, MarkupContent, MarkupKind, ReferenceParams, ServerCapabilities,
-        SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
+        Location, MarkupContent, MarkupKind, Position, ReferenceParams, ServerCapabilities,
+        SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
         WorkspaceSymbolParams,
     },
     LanguageServer,
 };
 use tracing::{debug, info};
 
-use super::backend::Backend;
+use super::backend::{Backend, ProcedureDecompilationError};
 use super::config::{
     extract_code_lens_stack_effects, extract_inlay_hint_type, extract_library_paths,
 };
@@ -35,6 +35,7 @@ use super::helpers::{
 };
 
 const CMD_SET_STDLIB_ROOT: &str = "masm-lsp.setStdlibRoot";
+const CMD_DECOMPILE_PROCEDURE_AT_CURSOR: &str = "masm-lsp.decompileProcedureAtCursor";
 
 #[tower_lsp::async_trait]
 impl<C> LanguageServer for Backend<C>
@@ -61,7 +62,10 @@ where
                 resolve_provider: Some(false),
             }),
             execute_command_provider: Some(ExecuteCommandOptions {
-                commands: vec![CMD_SET_STDLIB_ROOT.to_string()],
+                commands: vec![
+                    CMD_SET_STDLIB_ROOT.to_string(),
+                    CMD_DECOMPILE_PROCEDURE_AT_CURSOR.to_string(),
+                ],
                 work_done_progress_options: Default::default(),
             }),
             ..Default::default()
@@ -105,6 +109,9 @@ where
                     "root": root.to_string_lossy().to_string(),
                     "prefix": "std",
                 })))
+            }
+            CMD_DECOMPILE_PROCEDURE_AT_CURSOR => {
+                self.execute_decompile_procedure_at_cursor(&params).await
             }
             _ => Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
                 "unknown command: {}",
@@ -475,6 +482,50 @@ where
     }
 }
 
+impl<C> Backend<C>
+where
+    C: PublishDiagnostics,
+{
+    async fn execute_decompile_procedure_at_cursor(
+        &self,
+        params: &ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        let Some((uri, position)) = parse_decompile_cursor_argument(&params.arguments) else {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "masm-lsp.decompileProcedureAtCursor expects a single argument object: {\"uri\": \"file:///...\", \"position\": {\"line\": number, \"character\": number}}",
+            ));
+        };
+
+        let config = self.snapshot_config().await;
+        let effective_library_paths = self
+            .effective_library_paths_from(&config.library_paths)
+            .await;
+
+        match self
+            .decompile_procedure_at_position(&uri, position, &effective_library_paths)
+            .await
+        {
+            Ok(result) => Ok(Some(serde_json::json!({
+                "uri": uri,
+                "procedure": {
+                    "name": result.name,
+                    "path": result.path,
+                    "range": result.range,
+                },
+                "decompiled": result.decompiled,
+            }))),
+            Err(err) => {
+                if let Some(diagnostic) = decompilation_error_diagnostic_for_publish(&err) {
+                    let _ = self
+                        .publish_diagnostics_with_extra(uri.clone(), vec![diagnostic])
+                        .await;
+                }
+                Err(decompile_command_error(err))
+            }
+        }
+    }
+}
+
 fn workspace_library_paths_from_initialize(params: &InitializeParams) -> Vec<LibraryPath> {
     let mut roots = Vec::new();
 
@@ -525,6 +576,75 @@ fn parse_stdlib_root_argument(arguments: &[serde_json::Value]) -> Option<PathBuf
         .and_then(|obj| obj.get("path"))
         .and_then(|value| value.as_str())
         .map(PathBuf::from)
+}
+
+fn parse_decompile_cursor_argument(arguments: &[serde_json::Value]) -> Option<(Url, Position)> {
+    if arguments.len() != 1 {
+        return None;
+    }
+    let value = arguments.first()?;
+    let uri = value.get("uri").and_then(parse_uri_value)?;
+    let position = value.get("position").and_then(parse_position_value)?;
+    Some((uri, position))
+}
+
+fn parse_uri_value(value: &serde_json::Value) -> Option<Url> {
+    value.as_str().and_then(|raw| Url::parse(raw).ok())
+}
+
+fn parse_position_value(value: &serde_json::Value) -> Option<Position> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn decompilation_error_diagnostic_for_publish(
+    err: &ProcedureDecompilationError,
+) -> Option<tower_lsp::lsp_types::Diagnostic> {
+    match err {
+        ProcedureDecompilationError::CursorOutsideProcedure { diagnostic }
+        | ProcedureDecompilationError::DecompilationFailed { diagnostic, .. } => {
+            Some(diagnostic.clone())
+        }
+        ProcedureDecompilationError::DocumentUnavailable(_)
+        | ProcedureDecompilationError::InvalidCursorPosition { .. } => None,
+    }
+}
+
+fn decompile_command_error(err: ProcedureDecompilationError) -> tower_lsp::jsonrpc::Error {
+    match err {
+        ProcedureDecompilationError::DocumentUnavailable(message) => {
+            tower_lsp::jsonrpc::Error::invalid_params(message)
+        }
+        ProcedureDecompilationError::InvalidCursorPosition { line, character } => {
+            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "invalid cursor position {line}:{character}"
+            ))
+        }
+        ProcedureDecompilationError::CursorOutsideProcedure { diagnostic } => {
+            jsonrpc_error_with_diagnostic(
+                ErrorCode::InvalidRequest,
+                "cursor is not inside a procedure",
+                diagnostic,
+            )
+        }
+        ProcedureDecompilationError::DecompilationFailed {
+            message,
+            diagnostic,
+        } => jsonrpc_error_with_diagnostic(ErrorCode::InternalError, message, diagnostic),
+    }
+}
+
+fn jsonrpc_error_with_diagnostic(
+    code: ErrorCode,
+    message: impl Into<String>,
+    diagnostic: tower_lsp::lsp_types::Diagnostic,
+) -> tower_lsp::jsonrpc::Error {
+    tower_lsp::jsonrpc::Error {
+        code,
+        message: message.into().into(),
+        data: Some(serde_json::json!({
+            "diagnostic": diagnostic,
+        })),
+    }
 }
 
 fn normalize_stdlib_root(path: &Path) -> PathBuf {

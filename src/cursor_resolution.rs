@@ -259,7 +259,10 @@ pub fn resolve_invocation_target(
 }
 
 /// Convert an LSP position to a byte offset in the source file.
-fn position_to_offset(source: &miden_debug_types::SourceFile, pos: Position) -> Option<u32> {
+pub(crate) fn position_to_offset(
+    source: &miden_debug_types::SourceFile,
+    pos: Position,
+) -> Option<u32> {
     let mut offset = 0usize;
     for (i, line) in source.as_str().split_inclusive('\n').enumerate() {
         if i as u32 == pos.line {

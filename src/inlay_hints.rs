@@ -332,7 +332,7 @@ fn line_in_range(line: u32, range: &Range) -> bool {
     line >= range.start.line && line <= range.end.line
 }
 
-fn decompilation_error_diagnostic(
+pub(crate) fn decompilation_error_diagnostic(
     sources: &DefaultSourceManager,
     fallback_range: Range,
     error: DecompilationError,

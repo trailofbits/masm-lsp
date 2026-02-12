@@ -11,6 +11,7 @@ use std::{
 use masm_analysis::signature_mismatches;
 use masm_decompiler::{
     callgraph::CallGraph,
+    fmt::{CodeWriter, FormattingConfig},
     frontend::{LibraryRoot, Program, Workspace},
     signature::{infer_signatures, ProcSignature, SignatureMap},
     symbol::resolution::{resolve_constant_path, resolve_constant_symbol},
@@ -18,29 +19,32 @@ use masm_decompiler::{
         infer_type_summaries, InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary,
         TypeSummaryMap,
     },
+    Decompiler,
 };
 
-use miden_assembly_syntax::ast::Module;
+use miden_assembly_syntax::ast::{Module, Procedure};
 use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
 use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager, Spanned};
 use miden_utils_diagnostics as diagnostics;
 use tokio::sync::RwLock;
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, Position, Range, TextDocumentContentChangeEvent, Url,
+    Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range,
+    TextDocumentContentChangeEvent, Url,
 };
 use tracing::error;
 
 use crate::{
     client::PublishDiagnostics,
     cursor_resolution::{
-        find_constant_candidate_at_position, resolve_symbol_at_position, ResolutionError,
-        ResolvedSymbol,
+        find_constant_candidate_at_position, position_to_offset, resolve_symbol_at_position,
+        ResolutionError, ResolvedSymbol,
     },
     diagnostics::{
         diagnostics_from_report, normalize_message, span_to_range, unresolved_to_diagnostics,
-        SOURCE_ANALYSIS,
+        SOURCE_ANALYSIS, SOURCE_DECOMPILATION,
     },
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
+    inlay_hints::decompilation_error_diagnostic,
     module_path::ModulePathResolver,
     service::DocumentService,
     util::{lsp_range_to_selection, to_miden_uri},
@@ -60,6 +64,30 @@ pub struct Backend<C = tower_lsp::Client> {
     pub(crate) workspace_library_paths: Arc<RwLock<Vec<LibraryPath>>>,
     pub(crate) signature_cache: Arc<SignatureCache>,
     pub(crate) loaded_library_documents: Arc<RwLock<HashSet<Url>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProcedureDecompilation {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) range: Range,
+    pub(crate) decompiled: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ProcedureDecompilationError {
+    DocumentUnavailable(String),
+    InvalidCursorPosition {
+        line: u32,
+        character: u32,
+    },
+    CursorOutsideProcedure {
+        diagnostic: Diagnostic,
+    },
+    DecompilationFailed {
+        message: String,
+        diagnostic: Diagnostic,
+    },
 }
 
 impl<C> Backend<C> {
@@ -229,6 +257,103 @@ where
                 error!("failed to load library root {}: {err}", lib.root.display());
             }
         }
+    }
+
+    pub(crate) async fn decompile_procedure_at_position(
+        &self,
+        uri: &Url,
+        position: Position,
+        library_paths: &[LibraryPath],
+    ) -> Result<ProcedureDecompilation, ProcedureDecompilationError> {
+        let Some(doc) = self.get_or_parse_document(uri).await else {
+            return Err(ProcedureDecompilationError::DocumentUnavailable(format!(
+                "document not loaded or failed to parse: {uri}"
+            )));
+        };
+
+        let Some(source) = self.sources.get_by_uri(&to_miden_uri(uri)) else {
+            return Err(ProcedureDecompilationError::DocumentUnavailable(format!(
+                "source file not found for URI: {uri}"
+            )));
+        };
+
+        let Some(offset) = position_to_offset(source.as_ref(), position) else {
+            return Err(ProcedureDecompilationError::InvalidCursorPosition {
+                line: position.line,
+                character: position.character,
+            });
+        };
+
+        let (proc_name, proc_range) = {
+            let Some(procedure) = find_procedure_containing_offset(&doc.module, offset) else {
+                return Err(ProcedureDecompilationError::CursorOutsideProcedure {
+                    diagnostic: cursor_outside_procedure_diagnostic(position),
+                });
+            };
+
+            let name = procedure.name().as_str().to_string();
+            let range = span_to_range(self.sources.as_ref(), procedure.span())
+                .or_else(|| span_to_range(self.sources.as_ref(), procedure.name().span()))
+                .unwrap_or_else(|| Range::new(position, position));
+
+            (name, range)
+        };
+
+        let module = doc.module.as_ref().clone();
+        let module_path = module.path().to_string();
+        let source_path = uri
+            .to_file_path()
+            .unwrap_or_else(|_| PathBuf::from("in-memory.masm"));
+        let roots = build_library_roots(library_paths);
+        let mut workspace = Workspace::with_source_manager(roots, self.sources.clone());
+        let program = Program::from_parts(
+            Box::new(module.clone()),
+            source_path,
+            module.path().to_path_buf(),
+        );
+        workspace.add_program(program);
+        workspace.load_dependencies();
+
+        let fq_name = if module_path.is_empty() {
+            proc_name.clone()
+        } else {
+            format!("{module_path}::{proc_name}")
+        };
+
+        let decompiler = Decompiler::new(&workspace);
+        let decompiled = match decompiler.decompile_proc(&fq_name) {
+            Ok(value) => value,
+            Err(error) => {
+                let fallback_msg = normalize_message(&error.to_string());
+                let diagnostic = decompilation_error_diagnostic(
+                    self.sources.as_ref(),
+                    proc_range.clone(),
+                    error,
+                )
+                .unwrap_or_else(|| Diagnostic {
+                    range: proc_range.clone(),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    source: Some(SOURCE_DECOMPILATION.to_string()),
+                    code: Some(NumberOrString::String("decompilation-failed".to_string())),
+                    message: fallback_msg.clone(),
+                    ..Default::default()
+                });
+                return Err(ProcedureDecompilationError::DecompilationFailed {
+                    message: format!("failed to decompile procedure `{fq_name}`"),
+                    diagnostic,
+                });
+            }
+        };
+
+        let mut writer = CodeWriter::with_config(FormattingConfig::default().with_color(false));
+        writer.write(&decompiled);
+
+        Ok(ProcedureDecompilation {
+            name: proc_name,
+            path: fq_name,
+            range: proc_range,
+            decompiled: writer.finish(),
+        })
     }
 
     pub async fn handle_open(
@@ -739,6 +864,26 @@ fn deduplicate_library_paths(paths: Vec<LibraryPath>) -> Vec<LibraryPath> {
         }
     }
     out
+}
+
+fn find_procedure_containing_offset(module: &Module, offset: u32) -> Option<&Procedure> {
+    module.procedures().find(|proc| {
+        let range = proc.span().into_range();
+        offset >= range.start && offset < range.end
+    })
+}
+
+fn cursor_outside_procedure_diagnostic(position: Position) -> Diagnostic {
+    Diagnostic {
+        range: Range::new(position, position),
+        severity: Some(DiagnosticSeverity::ERROR),
+        source: Some(SOURCE_DECOMPILATION.to_string()),
+        code: Some(NumberOrString::String(
+            "cursor-outside-procedure".to_string(),
+        )),
+        message: normalize_message("cursor is not inside a procedure"),
+        ..Default::default()
+    }
 }
 
 fn unresolved_dependency_diagnostic(
