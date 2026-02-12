@@ -2,6 +2,9 @@
 members = [".", "crates/masm-instructions", "crates/masm-analysis"]
 resolver = "2"
 
+[workspace.dependencies]
+masm-decompiler = { git = "https://github.com/trailofbits/masm-decompiler", branch = "main" }
+
 [package]
 name = "masm-lsp"
 version = "0.1.0"
@@ -19,7 +22,7 @@ miden-utils-diagnostics = { version = "0.20", default-features = true }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "5.0"
-masm-decompiler = { path = "../masm-decompiler" }
+masm-decompiler = { workspace = true }
 masm-analysis = { path = "crates/masm-analysis" }
 masm-instructions = { path = "crates/masm-instructions" }
 
