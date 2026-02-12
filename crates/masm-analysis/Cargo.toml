@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-masm-decompiler = { path = "../../../masm-decompiler" }
+masm-decompiler = { workspace = true }
 miden-assembly-syntax = { version = "0.20", default-features = true }
 miden-debug-types = { version = "0.20", default-features = true }
