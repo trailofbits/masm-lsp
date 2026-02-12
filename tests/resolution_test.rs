@@ -423,6 +423,79 @@ end
 }
 
 #[tokio::test]
+async fn goto_definition_and_references_for_local_constant() {
+    let harness = TestHarness::new().await;
+
+    let content = r#"const FOO = 42
+
+proc main
+    push.FOO
+    push.FOO
+end
+"#;
+
+    let uri = harness.open_inline("const_local.masm", content).await;
+    tokio::task::yield_now().await;
+
+    let mut pos = find_position(content, "push.FOO");
+    pos.character += "push.".len() as u32;
+    let def = harness.goto_definition(&uri, pos).await;
+    assert!(def.is_some(), "expected constant definition");
+
+    let loc = def.unwrap();
+    assert_eq!(loc.uri, uri);
+    assert_eq!(loc.range.start.line, 0, "const should be on line 0");
+
+    let refs = harness.find_references(&uri, pos, true).await;
+    assert!(
+        refs.len() >= 3,
+        "expected definition + two uses, got {}",
+        refs.len()
+    );
+}
+
+#[tokio::test]
+async fn goto_definition_for_imported_constant() {
+    let harness = TestHarness::new().await;
+
+    let defs_text = r#"const FOO = 7
+"#;
+    let caller_text = r#"use defs::FOO
+
+proc main
+    push.FOO
+end
+"#;
+
+    let defs_uri = harness.open_inline("defs.masm", defs_text).await;
+    let caller_uri = harness.open_inline("caller_const.masm", caller_text).await;
+    tokio::task::yield_now().await;
+
+    let mut use_pos = find_position(caller_text, "push.FOO");
+    use_pos.character += "push.".len() as u32;
+    let def = harness.goto_definition(&caller_uri, use_pos).await;
+
+    assert!(def.is_some(), "expected imported constant definition");
+    let loc = def.unwrap();
+    assert_eq!(
+        loc.uri, defs_uri,
+        "imported constant should resolve to definition module"
+    );
+
+    let def_pos = find_position(defs_text, "FOO");
+    let refs = harness.find_references(&defs_uri, def_pos, true).await;
+    assert!(
+        refs.len() >= 2,
+        "expected definition + imported use, got {}",
+        refs.len()
+    );
+    assert!(
+        refs.iter().any(|loc| loc.uri == caller_uri),
+        "expected imported call-site reference"
+    );
+}
+
+#[tokio::test]
 async fn goto_definition_on_use_statement_navigates_to_module() {
     let harness = TestHarness::new().await;
 

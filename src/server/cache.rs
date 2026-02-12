@@ -46,6 +46,11 @@ impl DocumentCache {
         state.remove(uri);
     }
 
+    pub async fn remove_symbols(&self, uri: &Url) {
+        let mut symbols = self.symbols.write().await;
+        symbols.remove(uri);
+    }
+
     pub async fn get_symbols_if_current(&self, uri: &Url) -> Option<DocumentSymbols> {
         let current_version = self.get_version(uri).await?;
         let symbols = self.symbols.read().await;

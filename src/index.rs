@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module};
-use miden_debug_types::{DefaultSourceManager, Spanned};
+use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Spanned};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 use crate::diagnostics::span_to_range;
@@ -245,9 +245,15 @@ fn collect_references(
     module: &Module,
     source_manager: Arc<DefaultSourceManager>,
 ) -> Vec<Reference> {
+    let source_text = source_manager
+        .source(module.span().source_id())
+        .ok()
+        .map(str::to_string);
+
     let mut collector = InvocationCollector {
         resolver: crate::symbol_resolution::create_resolver(module, source_manager.clone()),
         source_manager,
+        source_text,
         refs: Vec::new(),
     };
     let _ = miden_assembly_syntax::ast::visit::visit_module(&mut collector, module);
@@ -261,6 +267,7 @@ fn zero_range() -> Range {
 struct InvocationCollector<'a> {
     resolver: crate::symbol_resolution::SymbolResolver<'a>,
     source_manager: Arc<DefaultSourceManager>,
+    source_text: Option<String>,
     refs: Vec<Reference>,
 }
 
@@ -270,10 +277,53 @@ impl<'a> InvocationCollector<'a> {
             span_to_range(self.source_manager.as_ref(), target.span()).unwrap_or_else(zero_range);
 
         // Use the unified symbol resolution service to get the fully-qualified path
-        if let Some(path) = self.resolver.resolve_target(target) {
+        if let Ok(Some(path)) = self.resolver.resolve_target(target) {
             self.refs.push(Reference { path, range });
         }
         // MAST roots return None from resolve_target, which is correct - we skip them
+    }
+
+    fn push_constant_reference(&mut self, token: &str, span: SourceSpan) {
+        let resolved = if token.contains("::") {
+            self.resolver.resolve_path(token)
+        } else {
+            self.resolver.resolve_symbol(token)
+        };
+        let Ok(path) = resolved else {
+            return;
+        };
+        let range = span_to_range(self.source_manager.as_ref(), span).unwrap_or_else(zero_range);
+        self.refs.push(Reference { path, range });
+    }
+
+    fn push_constant_reference_from_immediate<T>(
+        &mut self,
+        immediate: &miden_assembly_syntax::ast::Immediate<T>,
+    ) {
+        let span = immediate.span();
+
+        if let miden_assembly_syntax::ast::Immediate::Constant(name) = immediate {
+            self.push_constant_reference(name.as_str(), span);
+            return;
+        }
+
+        let Some(source_text) = self.source_text.as_deref() else {
+            return;
+        };
+
+        let byte_range = span.into_range();
+        let start = byte_range.start as usize;
+        let end = byte_range.end as usize;
+        let Some(text) = source_text.get(start..end) else {
+            return;
+        };
+
+        for (token_start, token_end, token) in constant_like_tokens(text) {
+            let abs_start = byte_range.start + token_start as u32;
+            let abs_end = byte_range.start + token_end as u32;
+            let token_span = SourceSpan::new(span.source_id(), abs_start..abs_end);
+            self.push_constant_reference(token.as_str(), token_span);
+        }
     }
 }
 
@@ -297,6 +347,112 @@ impl<'a> Visit for InvocationCollector<'a> {
         self.push_target(target);
         core::ops::ControlFlow::Continue(())
     }
+
+    fn visit_constant_ref(
+        &mut self,
+        path: &miden_debug_types::Span<std::sync::Arc<miden_assembly_syntax::ast::Path>>,
+    ) -> core::ops::ControlFlow<()> {
+        self.push_constant_reference(path.inner().as_str(), path.span());
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_immediate_u8(
+        &mut self,
+        immediate: &miden_assembly_syntax::ast::Immediate<u8>,
+    ) -> core::ops::ControlFlow<()> {
+        self.push_constant_reference_from_immediate(immediate);
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_immediate_u16(
+        &mut self,
+        immediate: &miden_assembly_syntax::ast::Immediate<u16>,
+    ) -> core::ops::ControlFlow<()> {
+        self.push_constant_reference_from_immediate(immediate);
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_immediate_u32(
+        &mut self,
+        immediate: &miden_assembly_syntax::ast::Immediate<u32>,
+    ) -> core::ops::ControlFlow<()> {
+        self.push_constant_reference_from_immediate(immediate);
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_immediate_felt(
+        &mut self,
+        immediate: &miden_assembly_syntax::ast::Immediate<miden_assembly_syntax::Felt>,
+    ) -> core::ops::ControlFlow<()> {
+        self.push_constant_reference_from_immediate(immediate);
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_immediate_push_value(
+        &mut self,
+        immediate: &miden_assembly_syntax::ast::Immediate<miden_assembly_syntax::parser::PushValue>,
+    ) -> core::ops::ControlFlow<()> {
+        self.push_constant_reference_from_immediate(immediate);
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_immediate_word_value(
+        &mut self,
+        immediate: &miden_assembly_syntax::ast::Immediate<miden_assembly_syntax::parser::WordValue>,
+    ) -> core::ops::ControlFlow<()> {
+        self.push_constant_reference_from_immediate(immediate);
+        core::ops::ControlFlow::Continue(())
+    }
+
+    fn visit_immediate_error_message(
+        &mut self,
+        immediate: &miden_assembly_syntax::ast::Immediate<std::sync::Arc<str>>,
+    ) -> core::ops::ControlFlow<()> {
+        self.push_constant_reference_from_immediate(immediate);
+        core::ops::ControlFlow::Continue(())
+    }
+}
+
+fn constant_like_tokens(text: &str) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        while i < bytes.len() && !is_constant_token_char(bytes[i] as char) {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let start = i;
+        while i < bytes.len() && is_constant_token_char(bytes[i] as char) {
+            i += 1;
+        }
+        let end = i;
+        if let Some(token) = text.get(start..end) {
+            if is_constant_identifier_candidate(token) {
+                out.push((start, end, token.to_string()));
+            }
+        }
+    }
+
+    out
+}
+
+fn is_constant_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '$')
+}
+
+fn is_constant_identifier_candidate(token: &str) -> bool {
+    let normalized = token.trim_start_matches(':');
+    let Some(first) = normalized.chars().next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && !matches!(first, '_' | '$') {
+        return false;
+    }
+    normalized.chars().any(|c| c.is_ascii_uppercase()) || normalized.contains("::")
 }
 
 #[cfg(test)]

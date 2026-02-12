@@ -45,6 +45,7 @@ pub fn extract_procedure_signature(source: &str, def_line: usize) -> Option<Stri
         && !def.starts_with("export.")
         && !def.starts_with("begin")
         && !def.starts_with("const.")
+        && !def.starts_with("const ")
     {
         return None;
     }
@@ -278,6 +279,13 @@ mod tests {
         let source = "@locals(16)\npub proc bar\nend\n";
         let sig = extract_procedure_signature(source, 1);
         assert_eq!(sig, Some("@locals(16)\npub proc bar".to_string()));
+    }
+
+    #[test]
+    fn extract_signature_constant_definition() {
+        let source = "const FOO = 42\nproc foo\nend\n";
+        let sig = extract_procedure_signature(source, 0);
+        assert_eq!(sig, Some("const FOO = 42".to_string()));
     }
 
     #[test]

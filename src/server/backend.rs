@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -13,6 +13,7 @@ use masm_decompiler::{
     callgraph::CallGraph,
     frontend::{LibraryRoot, Program, Workspace},
     signature::{infer_signatures, ProcSignature, SignatureMap},
+    symbol::resolution::{resolve_constant_path, resolve_constant_symbol},
     types::{
         infer_type_summaries, InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary,
         TypeSummaryMap,
@@ -21,7 +22,7 @@ use masm_decompiler::{
 
 use miden_assembly_syntax::ast::Module;
 use miden_assembly_syntax::{Parse, ParseOptions, SemanticAnalysisError};
-use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager};
+use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager, Spanned};
 use miden_utils_diagnostics as diagnostics;
 use tokio::sync::RwLock;
 use tower_lsp::lsp_types::{
@@ -31,7 +32,10 @@ use tracing::error;
 
 use crate::{
     client::PublishDiagnostics,
-    cursor_resolution::{resolve_symbol_at_position, ResolutionError, ResolvedSymbol},
+    cursor_resolution::{
+        find_constant_candidate_at_position, resolve_symbol_at_position, ResolutionError,
+        ResolvedSymbol,
+    },
     diagnostics::{
         diagnostics_from_report, normalize_message, span_to_range, unresolved_to_diagnostics,
         SOURCE_ANALYSIS,
@@ -53,7 +57,9 @@ pub struct Backend<C = tower_lsp::Client> {
     pub(crate) documents: DocumentCache,
     pub(crate) workspace: Arc<RwLock<WorkspaceIndex>>,
     pub(crate) config: Arc<RwLock<ServerConfig>>,
+    pub(crate) workspace_library_paths: Arc<RwLock<Vec<LibraryPath>>>,
     pub(crate) signature_cache: Arc<SignatureCache>,
+    pub(crate) loaded_library_documents: Arc<RwLock<HashSet<Url>>>,
 }
 
 impl<C> Backend<C> {
@@ -64,7 +70,9 @@ impl<C> Backend<C> {
             documents: DocumentCache::new(),
             workspace: Arc::new(RwLock::new(WorkspaceIndex::default())),
             config: Arc::new(RwLock::new(ServerConfig::default())),
+            workspace_library_paths: Arc::new(RwLock::new(Vec::new())),
             signature_cache: Arc::new(SignatureCache::new()),
+            loaded_library_documents: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -94,6 +102,26 @@ impl<C> Backend<C> {
         self.config.read().await.clone()
     }
 
+    pub(crate) async fn set_workspace_library_paths(&self, paths: Vec<LibraryPath>) {
+        let mut guard = self.workspace_library_paths.write().await;
+        *guard = deduplicate_library_paths(paths);
+    }
+
+    pub(crate) async fn effective_library_paths(&self) -> Vec<LibraryPath> {
+        let cfg = self.snapshot_config().await;
+        self.effective_library_paths_from(&cfg.library_paths).await
+    }
+
+    pub(crate) async fn effective_library_paths_from(
+        &self,
+        configured: &[LibraryPath],
+    ) -> Vec<LibraryPath> {
+        let workspace_paths = self.workspace_library_paths.read().await.clone();
+        let mut combined = configured.to_vec();
+        combined.extend(workspace_paths);
+        deduplicate_library_paths(combined)
+    }
+
     pub(crate) async fn invalidate_signature_cache(&self) {
         self.signature_cache.invalidate().await;
     }
@@ -121,6 +149,71 @@ impl<C> Backend<C> {
             .await;
         inferred
     }
+
+    pub(crate) async fn resolve_constant_symbol_at_position(
+        &self,
+        uri: &Url,
+        module: &Module,
+        position: Position,
+        library_paths: &[LibraryPath],
+    ) -> Result<ResolvedSymbol, ResolutionError> {
+        let candidate =
+            find_constant_candidate_at_position(uri, module, self.sources.clone(), position)?;
+        let display_name = candidate
+            .rsplit("::")
+            .next()
+            .unwrap_or(candidate.as_str())
+            .to_string();
+
+        let roots = build_library_roots(library_paths);
+        let source_path = uri
+            .to_file_path()
+            .unwrap_or_else(|_| std::path::PathBuf::from("in-memory.masm"));
+        let mut workspace = Workspace::with_source_manager(roots, self.sources.clone());
+        let program = Program::from_parts(
+            Box::new(module.clone()),
+            source_path,
+            module.path().to_path_buf(),
+        );
+        workspace.add_program(program);
+        workspace.load_dependencies();
+
+        let module_path = SymbolPath::new(module.path().to_string());
+        let resolved = if candidate.contains("::") {
+            resolve_constant_path(&workspace, &module_path, candidate.as_str())
+        } else {
+            resolve_constant_symbol(&workspace, &module_path, candidate.as_str())
+        };
+
+        if let Ok(path) = resolved {
+            // Mirror masm-decompiler's constant lookup flow:
+            // 1) resolve constant symbol/path
+            // 2) fetch constant definition entry from the workspace
+            if workspace.lookup_constant_entry(&path).is_none() {
+                return Err(ResolutionError::SymbolNotFound(candidate));
+            }
+            return Ok(ResolvedSymbol {
+                path,
+                name: display_name,
+            });
+        }
+
+        // Fallback for module contexts that are not loaded in the temporary decompiler workspace.
+        // We still resolve via the module-local resolver so open in-memory files remain navigable.
+        let resolver = crate::symbol_resolution::create_resolver(module, self.sources.clone());
+        let fallback = if candidate.contains("::") {
+            resolver.resolve_path(candidate.as_str())
+        } else {
+            resolver.resolve_symbol(candidate.as_str())
+        };
+        match fallback {
+            Ok(path) => Ok(ResolvedSymbol {
+                path,
+                name: display_name,
+            }),
+            Err(_) => Err(ResolutionError::SymbolNotFound(candidate)),
+        }
+    }
 }
 
 impl<C> Backend<C>
@@ -129,8 +222,9 @@ where
 {
     pub async fn load_configured_libraries(&self) {
         self.invalidate_signature_cache().await;
-        let cfg = self.snapshot_config().await;
-        for lib in &cfg.library_paths {
+        self.clear_loaded_libraries().await;
+        let libraries = self.effective_library_paths().await;
+        for lib in &libraries {
             if let Err(err) = self.load_library_root(lib).await {
                 error!("failed to load library root {}: {err}", lib.root.display());
             }
@@ -202,27 +296,46 @@ where
         let version = self.documents.get_version(&uri).await;
         let parse_result = self.parse_and_index(&uri).await;
         let config = self.snapshot_config().await;
+        let effective_library_paths = self
+            .effective_library_paths_from(&config.library_paths)
+            .await;
 
         let analysis_diags = if let Ok(doc) = &parse_result {
             if config.taint_analysis_enabled {
-                let source_path = uri
-                    .to_file_path()
-                    .unwrap_or_else(|_| PathBuf::from("in-memory.masm"));
-                let roots = build_library_roots(&config.library_paths);
-                let mismatches =
-                    signature_mismatches(&doc.module, self.sources.clone(), source_path, &roots);
-                let mut diags = signature_mismatch_diagnostics(mismatches, self.sources.as_ref());
                 let analysis = infer_analysis_snapshot(
                     &doc.module,
                     self.sources.clone(),
                     &uri,
-                    &config.library_paths,
+                    &effective_library_paths,
                 );
-                diags.extend(type_inconsistency_diagnostics(
-                    &uri,
-                    &analysis.type_diagnostics,
-                    self.sources.as_ref(),
-                ));
+                let mut diags = Vec::new();
+                if analysis.unresolved_modules.is_empty() {
+                    let source_path = uri
+                        .to_file_path()
+                        .unwrap_or_else(|_| PathBuf::from("in-memory.masm"));
+                    let roots = build_library_roots(&effective_library_paths);
+                    let mismatches = signature_mismatches(
+                        &doc.module,
+                        self.sources.clone(),
+                        source_path,
+                        &roots,
+                    );
+                    diags.extend(signature_mismatch_diagnostics(
+                        mismatches,
+                        self.sources.as_ref(),
+                    ));
+                    diags.extend(type_inconsistency_diagnostics(
+                        &uri,
+                        &analysis.type_diagnostics,
+                        self.sources.as_ref(),
+                    ));
+                } else {
+                    diags.push(unresolved_dependency_diagnostic(
+                        &doc.module,
+                        self.sources.as_ref(),
+                        &analysis.unresolved_modules,
+                    ));
+                }
                 diags
             } else {
                 Vec::new()
@@ -354,8 +467,8 @@ where
     }
 
     async fn module_path_from_uri(&self, uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
-        let cfg = self.config.read().await;
-        let resolver = ModulePathResolver::new(&cfg.library_paths);
+        let paths = self.effective_library_paths().await;
+        let resolver = ModulePathResolver::new(&paths);
         resolver.resolve(uri)
     }
 
@@ -425,7 +538,42 @@ where
         let miden_uri = to_miden_uri(&url);
         self.sources.load(SourceLanguage::Masm, miden_uri, text);
         let _ = self.parse_and_index(&url).await;
+        self.loaded_library_documents.write().await.insert(url);
         Ok(())
+    }
+
+    async fn clear_loaded_libraries(&self) {
+        let uris: Vec<Url> = {
+            let mut guard = self.loaded_library_documents.write().await;
+            guard.drain().collect()
+        };
+        if uris.is_empty() {
+            return;
+        }
+
+        let mut removable = Vec::new();
+        for uri in uris {
+            if self.documents.get_version(&uri).await.is_some() {
+                // Keep currently-open documents in the workspace cache.
+                continue;
+            }
+            removable.push(uri);
+        }
+        if removable.is_empty() {
+            return;
+        }
+
+        {
+            let mut ws = self.workspace.write().await;
+            for uri in &removable {
+                ws.update_document(uri.clone(), &[], &[]);
+            }
+        }
+
+        for uri in removable {
+            self.documents.remove_symbols(&uri).await;
+            self.documents.remove(&uri).await;
+        }
     }
 }
 
@@ -463,6 +611,9 @@ fn infer_signature_line(
     library_paths: &[LibraryPath],
 ) -> Option<String> {
     let analysis = infer_analysis_snapshot(module, sources, uri, library_paths);
+    if !analysis.unresolved_modules.is_empty() {
+        return None;
+    }
     let signature = analysis.signatures.get(symbol_path)?;
     let summary = analysis.type_summaries.get(symbol_path);
     format_inferred_signature(symbol_path.name(), signature, summary)
@@ -480,6 +631,7 @@ struct AnalysisSnapshot {
     signatures: SignatureMap,
     type_summaries: TypeSummaryMap,
     type_diagnostics: TypeDiagnosticsMap,
+    unresolved_modules: Vec<SymbolPath>,
 }
 
 fn infer_analysis_snapshot(
@@ -501,6 +653,7 @@ fn infer_analysis_snapshot(
     );
     workspace.add_program(program);
     workspace.load_dependencies();
+    let unresolved_modules = workspace.unresolved_module_paths();
 
     let callgraph = CallGraph::from(&workspace);
     let signatures = infer_signatures(&workspace, &callgraph);
@@ -511,6 +664,7 @@ fn infer_analysis_snapshot(
         signatures,
         type_summaries,
         type_diagnostics,
+        unresolved_modules,
     }
 }
 
@@ -569,6 +723,58 @@ fn format_inferred_signature(
         }
         ProcSignature::Unknown => None,
     }
+}
+
+fn deduplicate_library_paths(paths: Vec<LibraryPath>) -> Vec<LibraryPath> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for path in paths {
+        let canonical_root = path
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| path.root.clone());
+        let key = (path.prefix.clone(), canonical_root);
+        if seen.insert(key) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn unresolved_dependency_diagnostic(
+    module: &Module,
+    sources: &DefaultSourceManager,
+    unresolved: &[SymbolPath],
+) -> Diagnostic {
+    let summary = unresolved_dependencies_summary(unresolved);
+    let range = span_to_range(sources, module.span())
+        .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
+    Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::WARNING),
+        source: Some(SOURCE_ANALYSIS.to_string()),
+        message: normalize_message(&format!(
+            "analysis incomplete: unresolved transitive module dependencies ({summary})"
+        )),
+        ..Default::default()
+    }
+}
+
+fn unresolved_dependencies_summary(unresolved: &[SymbolPath]) -> String {
+    const MAX_ITEMS: usize = 5;
+    let mut modules: Vec<String> = unresolved.iter().map(ToString::to_string).collect();
+    modules.sort();
+    modules.dedup();
+    if modules.len() <= MAX_ITEMS {
+        return modules.join(", ");
+    }
+    let remaining = modules.len() - MAX_ITEMS;
+    let shown = modules
+        .into_iter()
+        .take(MAX_ITEMS)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{shown}, and {remaining} more")
 }
 
 fn normalized_input_types(types: &[TypeRequirement], expected_len: usize) -> Vec<TypeRequirement> {

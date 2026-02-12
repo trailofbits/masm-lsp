@@ -85,6 +85,7 @@ fn collect_decompilation_hints(
     );
     workspace.add_program(program);
     workspace.load_dependencies();
+    let unresolved_modules = workspace.unresolved_module_paths();
 
     let decompiler = Decompiler::new(&workspace);
     let line_lengths: Vec<u32> = source_text
@@ -108,6 +109,13 @@ fn collect_decompilation_hints(
     proc_infos.sort_by_key(|(line, _, _)| *line);
     let mut hints = Vec::new();
     let mut diagnostics = Vec::new();
+    if !unresolved_modules.is_empty() {
+        diagnostics.push(unresolved_dependency_diagnostic(
+            module,
+            sources.as_ref(),
+            &unresolved_modules,
+        ));
+    }
     for idx in 0..proc_infos.len() {
         let (line, proc_name, in_range) = proc_infos[idx].clone();
 
@@ -124,6 +132,14 @@ fn collect_decompilation_hints(
         let decompiled = match decompiler.decompile_proc(&fq_name) {
             Ok(decompiled) => decompiled,
             Err(error) => {
+                if !unresolved_modules.is_empty()
+                    && matches!(
+                        error,
+                        DecompilationError::Lifting(LiftingError::UnknownCallTarget { .. })
+                    )
+                {
+                    continue;
+                }
                 if let Some(diag) = decompilation_error_diagnostic(sources.as_ref(), error) {
                     diagnostics.push(diag);
                 }
@@ -186,6 +202,42 @@ fn collect_decompilation_hints(
     }
 
     InlayHintResult { hints, diagnostics }
+}
+
+fn unresolved_dependency_diagnostic(
+    module: &Module,
+    sources: &DefaultSourceManager,
+    unresolved: &[masm_decompiler::SymbolPath],
+) -> Diagnostic {
+    let summary = unresolved_dependencies_summary(unresolved);
+    let range = span_to_range(sources, module.span())
+        .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
+    Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::WARNING),
+        source: Some(SOURCE_DECOMPILATION.to_string()),
+        message: normalize_message(&format!(
+            "decompilation is incomplete: unresolved transitive module dependencies ({summary})"
+        )),
+        ..Default::default()
+    }
+}
+
+fn unresolved_dependencies_summary(unresolved: &[masm_decompiler::SymbolPath]) -> String {
+    const MAX_ITEMS: usize = 5;
+    let mut modules: Vec<String> = unresolved.iter().map(ToString::to_string).collect();
+    modules.sort();
+    modules.dedup();
+    if modules.len() <= MAX_ITEMS {
+        return modules.join(", ");
+    }
+    let remaining = modules.len() - MAX_ITEMS;
+    let shown = modules
+        .into_iter()
+        .take(MAX_ITEMS)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{shown}, and {remaining} more")
 }
 
 fn collect_instruction_hints(

@@ -1,9 +1,11 @@
 use super::*;
 use crate::client::PublishDiagnostics;
+use crate::LibraryPath;
 use std::sync::Arc;
 use tower_lsp::lsp_types;
 use tower_lsp::lsp_types::{
-    Diagnostic, Position, TextDocumentContentChangeEvent, Url, VersionedTextDocumentIdentifier,
+    Diagnostic, ExecuteCommandParams, Position, TextDocumentContentChangeEvent, Url,
+    VersionedTextDocumentIdentifier,
 };
 use tower_lsp::LanguageServer;
 
@@ -167,6 +169,112 @@ async fn determine_module_kind_detects_executable_from_entrypoint() {
         helpers::determine_module_kind_from_ast(&lib_doc.module),
         ModuleKind::Library,
     );
+}
+
+#[tokio::test]
+async fn execute_command_sets_stdlib_root() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+
+    let base = std::env::temp_dir().join(format!(
+        "masm-lsp-set-stdlib-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos()
+    ));
+    let repo = base.join("miden-vm");
+    let asm = repo.join("stdlib").join("asm");
+    std::fs::create_dir_all(&asm).expect("create stdlib/asm");
+    let expected = asm
+        .canonicalize()
+        .expect("canonicalize expected stdlib/asm path");
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.setStdlibRoot".to_string(),
+        arguments: vec![serde_json::Value::String(
+            repo.to_string_lossy().to_string(),
+        )],
+        work_done_progress_params: Default::default(),
+    };
+
+    let _ = backend
+        .execute_command(params)
+        .await
+        .expect("execute command");
+    let cfg = backend.snapshot_config().await;
+    assert_eq!(cfg.library_paths.len(), 1);
+    assert_eq!(cfg.library_paths[0].prefix, "std");
+    assert_eq!(cfg.library_paths[0].root, expected);
+
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn execute_command_set_stdlib_root_requires_argument() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.setStdlibRoot".to_string(),
+        arguments: vec![],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend.execute_command(params).await;
+    assert!(result.is_err(), "expected invalid params error");
+}
+
+#[tokio::test]
+async fn reloading_libraries_removes_old_stdlib_entries() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+
+    let base = std::env::temp_dir().join(format!(
+        "masm-lsp-reload-stdlib-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos()
+    ));
+    let old_root = base.join("old").join("stdlib").join("asm");
+    let new_root = base.join("new").join("stdlib").join("asm");
+    std::fs::create_dir_all(&old_root).expect("create old stdlib root");
+    std::fs::create_dir_all(&new_root).expect("create new stdlib root");
+    std::fs::write(old_root.join("old.masm"), "proc old_proc\n  nop\nend\n")
+        .expect("write old stdlib file");
+    std::fs::write(new_root.join("new.masm"), "proc new_proc\n  nop\nend\n")
+        .expect("write new stdlib file");
+
+    let mut cfg = backend.snapshot_config().await;
+    cfg.library_paths = vec![LibraryPath {
+        root: old_root.clone(),
+        prefix: "std".to_string(),
+    }];
+    backend.update_config(cfg).await;
+    backend.load_configured_libraries().await;
+
+    let ws = backend.snapshot_workspace().await;
+    assert!(ws.definition("::std::old::old_proc").is_some());
+    drop(ws);
+
+    let mut cfg = backend.snapshot_config().await;
+    cfg.library_paths = vec![LibraryPath {
+        root: new_root.clone(),
+        prefix: "std".to_string(),
+    }];
+    backend.update_config(cfg).await;
+    backend.load_configured_libraries().await;
+
+    let ws = backend.snapshot_workspace().await;
+    assert!(
+        ws.definition("::std::old::old_proc").is_none(),
+        "old stdlib definition should be cleared after root switch"
+    );
+    assert!(ws.definition("::std::new::new_proc").is_some());
+
+    let _ = std::fs::remove_dir_all(base);
 }
 
 #[derive(Clone, Default)]

@@ -3,17 +3,23 @@ use crate::code_lens::collect_code_lenses;
 use crate::cursor_resolution::resolve_symbol_at_position;
 use crate::inlay_hints::collect_inlay_hints;
 use crate::util::{extract_token_at_position, to_miden_uri};
-use crate::InlayHintType;
+use crate::{InlayHintType, LibraryPath};
 use miden_debug_types::SourceManager;
+use std::{
+    collections::HashSet,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
         request::{GotoImplementationParams, GotoImplementationResponse},
-        CodeLens, CodeLensOptions, CodeLensParams, GotoDefinitionParams, GotoDefinitionResponse,
-        Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
-        InlayHint, InlayHintParams, Location, MarkupContent, MarkupKind, ReferenceParams,
-        ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
-        TextDocumentSyncKind, WorkspaceSymbolParams,
+        CodeLens, CodeLensOptions, CodeLensParams, ExecuteCommandOptions, ExecuteCommandParams,
+        GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+        InitializeParams, InitializeResult, InitializedParams, InlayHint, InlayHintParams,
+        Location, MarkupContent, MarkupKind, ReferenceParams, ServerCapabilities,
+        SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
+        WorkspaceSymbolParams,
     },
     LanguageServer,
 };
@@ -28,12 +34,17 @@ use super::helpers::{
     is_on_use_statement,
 };
 
+const CMD_SET_STDLIB_ROOT: &str = "masm-lsp.setStdlibRoot";
+
 #[tower_lsp::async_trait]
 impl<C> LanguageServer for Backend<C>
 where
     C: PublishDiagnostics,
 {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let workspace_paths = workspace_library_paths_from_initialize(&params);
+        self.set_workspace_library_paths(workspace_paths).await;
+
         let capabilities = ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncCapability::Kind(
                 TextDocumentSyncKind::INCREMENTAL,
@@ -49,6 +60,10 @@ where
             code_lens_provider: Some(CodeLensOptions {
                 resolve_provider: Some(false),
             }),
+            execute_command_provider: Some(ExecuteCommandOptions {
+                commands: vec![CMD_SET_STDLIB_ROOT.to_string()],
+                work_done_progress_options: Default::default(),
+            }),
             ..Default::default()
         };
 
@@ -61,6 +76,41 @@ where
     async fn initialized(&self, _: InitializedParams) {
         info!("MASM LSP initialized");
         self.load_configured_libraries().await;
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        match params.command.as_str() {
+            CMD_SET_STDLIB_ROOT => {
+                let Some(raw_path) = parse_stdlib_root_argument(&params.arguments) else {
+                    return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                        "masm-lsp.setStdlibRoot expects path as first argument",
+                    ));
+                };
+                let root = normalize_stdlib_root(&raw_path);
+
+                let mut cfg = self.config.write().await;
+                cfg.library_paths = vec![LibraryPath {
+                    root: root.clone(),
+                    prefix: "std".to_string(),
+                }];
+                drop(cfg);
+
+                info!("updated stdlib root via command: {}", root.display());
+                self.load_configured_libraries().await;
+
+                Ok(Some(serde_json::json!({
+                    "root": root.to_string_lossy().to_string(),
+                    "prefix": "std",
+                })))
+            }
+            _ => Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "unknown command: {}",
+                params.command
+            ))),
+        }
     }
 
     async fn did_change_configuration(
@@ -111,6 +161,10 @@ where
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        let config = self.snapshot_config().await;
+        let effective_library_paths = self
+            .effective_library_paths_from(&config.library_paths)
+            .await;
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let miden_uri = to_miden_uri(&uri);
@@ -146,7 +200,21 @@ where
             Ok(s) => s,
             Err(e) => {
                 debug!("goto_definition: {e}");
-                return Ok(None);
+                match self
+                    .resolve_constant_symbol_at_position(
+                        &uri,
+                        &doc.module,
+                        pos,
+                        &effective_library_paths,
+                    )
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(err) => {
+                        debug!("goto_definition (constant): {err}");
+                        return Ok(None);
+                    }
+                }
             }
         };
 
@@ -164,76 +232,95 @@ where
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let config = self.snapshot_config().await;
+        let effective_library_paths = self
+            .effective_library_paths_from(&config.library_paths)
+            .await;
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let Some(doc) = self.get_or_parse_document(&uri).await else {
             return Ok(None);
         };
 
-        match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos) {
-            Ok(symbol) => {
-                let workspace = self.workspace.read().await;
-                let def_loc = workspace
-                    .definition(symbol.path.as_str())
-                    .or_else(|| workspace.definition_by_suffix(symbol.path.as_str()))
-                    .or_else(|| workspace.definition_by_name(&symbol.name));
-
-                drop(workspace);
-
-                if let Some(loc) = def_loc {
-                    let Some(def_doc) = self.get_or_parse_document(&loc.uri).await else {
+        let symbol = match resolve_symbol_at_position(&uri, &doc.module, self.sources.clone(), pos)
+        {
+            Ok(symbol) => symbol,
+            Err(e) => {
+                debug!("hover: symbol resolution failed: {e}");
+                match self
+                    .resolve_constant_symbol_at_position(
+                        &uri,
+                        &doc.module,
+                        pos,
+                        &effective_library_paths,
+                    )
+                    .await
+                {
+                    Ok(symbol) => symbol,
+                    Err(err) => {
+                        debug!("hover (constant): symbol resolution failed: {err}");
                         return Ok(None);
-                    };
-                    let def_uri = to_miden_uri(&loc.uri);
-                    if let Some(source) = self.sources.get_by_uri(&def_uri) {
-                        let content = source.as_str();
-                        let def_line = loc.range.start.line as usize;
-                        let attributes = extract_procedure_attributes(content, def_line);
-                        let inferred = self
-                            .inferred_signature_line(
-                                &def_doc.module,
-                                &loc.uri,
-                                &symbol.path,
-                                &config.library_paths,
-                            )
-                            .await;
-                        let signature = match inferred {
-                            Some(line) => {
-                                let mut lines = attributes;
-                                lines.push(line);
-                                Some(lines.join("\n"))
-                            }
-                            None => extract_procedure_signature(content, def_line).or_else(|| {
-                                if attributes.is_empty() {
-                                    None
-                                } else {
-                                    Some(attributes.join("\n"))
-                                }
-                            }),
-                        };
-                        let comment = extract_doc_comment(content, def_line);
-
-                        let hover_text = match (signature.as_ref(), comment) {
-                            (Some(sig), Some(doc)) => {
-                                format!("```masm\n{sig}\n```\n\n---\n\n{doc}")
-                            }
-                            (Some(sig), None) => format!("```masm\n{sig}\n```"),
-                            (None, Some(doc)) => doc,
-                            (None, None) => return Ok(None),
-                        };
-
-                        return Ok(Some(Hover {
-                            contents: HoverContents::Markup(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: hover_text,
-                            }),
-                            range: None,
-                        }));
                     }
                 }
             }
-            Err(e) => {
-                debug!("hover: symbol resolution failed: {e}");
+        };
+
+        let workspace = self.workspace.read().await;
+        let def_loc = workspace
+            .definition(symbol.path.as_str())
+            .or_else(|| workspace.definition_by_suffix(symbol.path.as_str()))
+            .or_else(|| workspace.definition_by_name(&symbol.name));
+
+        drop(workspace);
+
+        if let Some(loc) = def_loc {
+            let Some(def_doc) = self.get_or_parse_document(&loc.uri).await else {
+                return Ok(None);
+            };
+            let def_uri = to_miden_uri(&loc.uri);
+            if let Some(source) = self.sources.get_by_uri(&def_uri) {
+                let content = source.as_str();
+                let def_line = loc.range.start.line as usize;
+                let attributes = extract_procedure_attributes(content, def_line);
+                let inferred = self
+                    .inferred_signature_line(
+                        &def_doc.module,
+                        &loc.uri,
+                        &symbol.path,
+                        &effective_library_paths,
+                    )
+                    .await;
+                let signature = match inferred {
+                    Some(line) => {
+                        let mut lines = attributes;
+                        lines.push(line);
+                        Some(lines.join("\n"))
+                    }
+                    None => extract_procedure_signature(content, def_line).or_else(|| {
+                        if attributes.is_empty() {
+                            None
+                        } else {
+                            Some(attributes.join("\n"))
+                        }
+                    }),
+                };
+                let comment = extract_doc_comment(content, def_line);
+
+                let hover_text = match (signature.as_ref(), comment) {
+                    (Some(sig), Some(doc)) => {
+                        format!("```masm\n{sig}\n```\n\n---\n\n{doc}")
+                    }
+                    (Some(sig), None) => format!("```masm\n{sig}\n```"),
+                    (None, Some(doc)) => doc,
+                    (None, None) => return Ok(None),
+                };
+
+                return Ok(Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: hover_text,
+                    }),
+                    range: None,
+                }));
             }
         }
 
@@ -255,6 +342,10 @@ where
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let config = self.snapshot_config().await;
+        let effective_library_paths = self
+            .effective_library_paths_from(&config.library_paths)
+            .await;
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let Some(doc) = self.get_or_parse_document(&uri).await else {
@@ -266,7 +357,21 @@ where
             Ok(s) => s,
             Err(e) => {
                 debug!("references: {e}");
-                return Ok(None);
+                match self
+                    .resolve_constant_symbol_at_position(
+                        &uri,
+                        &doc.module,
+                        pos,
+                        &effective_library_paths,
+                    )
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(err) => {
+                        debug!("references (constant): {err}");
+                        return Ok(None);
+                    }
+                }
             }
         };
 
@@ -336,6 +441,9 @@ where
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let config = self.snapshot_config().await;
+        let effective_library_paths = self
+            .effective_library_paths_from(&config.library_paths)
+            .await;
 
         if config.inlay_hint_type == InlayHintType::None {
             return Ok(Some(vec![]));
@@ -357,12 +465,149 @@ where
             &uri,
             &params.range,
             source.as_str(),
-            &config.library_paths,
+            &effective_library_paths,
             config.inlay_hint_type,
         );
         let _ = self
             .publish_diagnostics_with_extra(uri.clone(), result.diagnostics)
             .await;
         Ok(Some(result.hints))
+    }
+}
+
+fn workspace_library_paths_from_initialize(params: &InitializeParams) -> Vec<LibraryPath> {
+    let mut roots = Vec::new();
+
+    if let Some(folders) = &params.workspace_folders {
+        for folder in folders {
+            if let Ok(path) = folder.uri.to_file_path() {
+                roots.push(path);
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        if let Some(root_uri) = &params.root_uri {
+            if let Ok(path) = root_uri.to_file_path() {
+                roots.push(path);
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        #[allow(deprecated)]
+        if let Some(root_path) = &params.root_path {
+            roots.push(PathBuf::from(root_path));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        let canonical = root.canonicalize().unwrap_or(root.clone());
+        if seen.insert(canonical) {
+            out.push(LibraryPath {
+                root,
+                prefix: String::new(),
+            });
+        }
+    }
+    out
+}
+
+fn parse_stdlib_root_argument(arguments: &[serde_json::Value]) -> Option<PathBuf> {
+    let first = arguments.first()?;
+    if let Some(path) = first.as_str() {
+        return Some(PathBuf::from(path));
+    }
+    first
+        .as_object()
+        .and_then(|obj| obj.get("path"))
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+}
+
+fn normalize_stdlib_root(path: &Path) -> PathBuf {
+    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if is_stdlib_asm_path(&normalized) {
+        return normalized;
+    }
+    if is_stdlib_path(&normalized) {
+        return normalized.join("asm");
+    }
+    normalized.join("stdlib").join("asm")
+}
+
+fn is_stdlib_path(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("stdlib"))
+}
+
+fn is_stdlib_asm_path(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("asm"))
+        && path.parent().and_then(|p| p.file_name()) == Some(OsStr::new("stdlib"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_lsp::lsp_types::{Url, WorkspaceFolder};
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "masm-lsp-lsp-{name}-{}-{stamp}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn workspace_paths_use_workspace_folders_when_present() {
+        let base = unique_temp_dir("workspace-folders");
+        let first = base.join("first");
+        let second = base.join("second");
+        std::fs::create_dir_all(&first).expect("create first workspace");
+        std::fs::create_dir_all(&second).expect("create second workspace");
+
+        let params = InitializeParams {
+            workspace_folders: Some(vec![
+                WorkspaceFolder {
+                    uri: Url::from_file_path(&first).expect("first URI"),
+                    name: "first".to_string(),
+                },
+                WorkspaceFolder {
+                    uri: Url::from_file_path(&second).expect("second URI"),
+                    name: "second".to_string(),
+                },
+            ]),
+            root_uri: Some(Url::from_file_path(base.join("fallback")).expect("fallback URI")),
+            ..Default::default()
+        };
+
+        let paths = workspace_library_paths_from_initialize(&params);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|p| p.prefix.is_empty()));
+        assert!(paths.iter().any(|p| p.root == first));
+        assert!(paths.iter().any(|p| p.root == second));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn workspace_paths_fall_back_to_root_uri() {
+        let base = unique_temp_dir("root-uri");
+        std::fs::create_dir_all(&base).expect("create workspace");
+
+        let params = InitializeParams {
+            root_uri: Some(Url::from_file_path(&base).expect("workspace URI")),
+            ..Default::default()
+        };
+
+        let paths = workspace_library_paths_from_initialize(&params);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].root, base);
+        assert!(paths[0].prefix.is_empty());
     }
 }
