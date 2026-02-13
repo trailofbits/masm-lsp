@@ -75,6 +75,23 @@ pub(crate) struct ProcedureDecompilation {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct FileDecompilation {
+    pub(crate) module_path: String,
+    pub(crate) use_statements: Vec<String>,
+    pub(crate) procedures: Vec<ProcedureDecompilation>,
+    pub(crate) failures: Vec<ProcedureDecompilationFailure>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProcedureDecompilationFailure {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) range: Range,
+    pub(crate) code: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum ProcedureDecompilationError {
     DocumentUnavailable(String),
     InvalidCursorPosition {
@@ -88,6 +105,11 @@ pub(crate) enum ProcedureDecompilationError {
         message: String,
         diagnostic: Diagnostic,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum FileDecompilationError {
+    DocumentUnavailable(String),
 }
 
 impl<C> Backend<C> {
@@ -324,18 +346,20 @@ where
         let decompiled = match decompiler.decompile_proc(&fq_name) {
             Ok(value) => value,
             Err(error) => {
-                let fallback_msg = normalize_message(&error.to_string());
                 let diagnostic = decompilation_error_diagnostic(
                     self.sources.as_ref(),
                     proc_range.clone(),
+                    &proc_name,
                     error,
                 )
                 .unwrap_or_else(|| Diagnostic {
                     range: proc_range.clone(),
-                    severity: Some(DiagnosticSeverity::ERROR),
+                    severity: Some(DiagnosticSeverity::WARNING),
                     source: Some(SOURCE_DECOMPILATION.to_string()),
                     code: Some(NumberOrString::String("decompilation-failed".to_string())),
-                    message: fallback_msg.clone(),
+                    message: normalize_message(&format!(
+                        "could not decompile procedure `{proc_name}`"
+                    )),
                     ..Default::default()
                 });
                 return Err(ProcedureDecompilationError::DecompilationFailed {
@@ -353,6 +377,99 @@ where
             path: fq_name,
             range: proc_range,
             decompiled: writer.finish(),
+        })
+    }
+
+    pub(crate) async fn decompile_file(
+        &self,
+        uri: &Url,
+        library_paths: &[LibraryPath],
+    ) -> Result<FileDecompilation, FileDecompilationError> {
+        let Some(doc) = self.get_or_parse_document(uri).await else {
+            return Err(FileDecompilationError::DocumentUnavailable(format!(
+                "document not loaded or failed to parse: {uri}"
+            )));
+        };
+
+        let module = doc.module.as_ref().clone();
+        let module_path = module.path().to_string();
+        let use_statements = self
+            .sources
+            .get_by_uri(&to_miden_uri(uri))
+            .map(|source| collect_use_statements(source.as_str()))
+            .unwrap_or_default();
+        let source_path = uri
+            .to_file_path()
+            .unwrap_or_else(|_| PathBuf::from("in-memory.masm"));
+        let roots = build_library_roots(library_paths);
+        let mut workspace = Workspace::with_source_manager(roots, self.sources.clone());
+        let program = Program::from_parts(
+            Box::new(module.clone()),
+            source_path,
+            module.path().to_path_buf(),
+        );
+        workspace.add_program(program);
+        workspace.load_dependencies();
+        let decompiler = Decompiler::new(&workspace);
+
+        let mut procedures = Vec::new();
+        let mut failures = Vec::new();
+        for proc in module.procedures() {
+            let proc_name = proc.name().as_str().to_string();
+            let proc_range = span_to_range(self.sources.as_ref(), proc.span())
+                .or_else(|| span_to_range(self.sources.as_ref(), proc.name().span()))
+                .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
+            let fq_name = if module_path.is_empty() {
+                proc_name.clone()
+            } else {
+                format!("{module_path}::{proc_name}")
+            };
+
+            let decompiled = match decompiler.decompile_proc(&fq_name) {
+                Ok(value) => value,
+                Err(error) => {
+                    let diagnostic = decompilation_error_diagnostic(
+                        self.sources.as_ref(),
+                        proc_range.clone(),
+                        &proc_name,
+                        error,
+                    )
+                    .unwrap_or_else(|| Diagnostic {
+                        range: proc_range,
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        source: Some(SOURCE_DECOMPILATION.to_string()),
+                        code: Some(NumberOrString::String("decompilation-failed".to_string())),
+                        message: normalize_message(&format!(
+                            "could not decompile procedure `{proc_name}`"
+                        )),
+                        ..Default::default()
+                    });
+                    failures.push(ProcedureDecompilationFailure {
+                        name: proc_name,
+                        path: fq_name,
+                        range: diagnostic.range,
+                        code: diagnostic_code(&diagnostic),
+                        message: diagnostic.message,
+                    });
+                    continue;
+                }
+            };
+
+            let mut writer = CodeWriter::with_config(FormattingConfig::default().with_color(false));
+            writer.write(&decompiled);
+            procedures.push(ProcedureDecompilation {
+                name: proc_name,
+                path: fq_name,
+                range: proc_range,
+                decompiled: writer.finish(),
+            });
+        }
+
+        Ok(FileDecompilation {
+            module_path,
+            use_statements,
+            procedures,
+            failures,
         })
     }
 
@@ -866,11 +983,28 @@ fn deduplicate_library_paths(paths: Vec<LibraryPath>) -> Vec<LibraryPath> {
     out
 }
 
+fn diagnostic_code(diag: &Diagnostic) -> String {
+    match &diag.code {
+        Some(NumberOrString::String(code)) => code.clone(),
+        Some(NumberOrString::Number(code)) => code.to_string(),
+        None => "decompilation-failed".to_string(),
+    }
+}
+
 fn find_procedure_containing_offset(module: &Module, offset: u32) -> Option<&Procedure> {
     module.procedures().find(|proc| {
         let range = proc.span().into_range();
         offset >= range.start && offset < range.end
     })
+}
+
+fn collect_use_statements(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("use "))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn cursor_outside_procedure_diagnostic(position: Position) -> Diagnostic {

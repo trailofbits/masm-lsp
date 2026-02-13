@@ -4,12 +4,11 @@ use std::sync::Arc;
 use masm_decompiler::{
     fmt::{CodeWriter, FormattingConfig},
     frontend::{LibraryRoot, Program, Workspace},
-    lift::LiftingError,
     DecompilationError, Decompiler,
 };
 use masm_instructions::ToDescription;
 use miden_assembly_syntax::ast::{Block, Instruction, Module, Op};
-use miden_debug_types::{DefaultSourceManager, SourceSpan, Span, Spanned};
+use miden_debug_types::{DefaultSourceManager, Span, Spanned};
 use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, NumberOrString,
     Position, Range, Url,
@@ -138,9 +137,12 @@ fn collect_decompilation_hints(
                 {
                     continue;
                 }
-                if let Some(diag) =
-                    decompilation_error_diagnostic(sources.as_ref(), proc_range.clone(), error)
-                {
+                if let Some(diag) = decompilation_error_diagnostic(
+                    sources.as_ref(),
+                    proc_range.clone(),
+                    &proc_name,
+                    error,
+                ) {
                     diagnostics.push(diag);
                 }
                 continue;
@@ -333,31 +335,27 @@ fn line_in_range(line: u32, range: &Range) -> bool {
 }
 
 pub(crate) fn decompilation_error_diagnostic(
-    sources: &DefaultSourceManager,
+    _sources: &DefaultSourceManager,
     fallback_range: Range,
+    procedure_name: &str,
     error: DecompilationError,
 ) -> Option<Diagnostic> {
-    let (range, kind, message) = match error {
+    let kind = match error {
         DecompilationError::Lifting(err) => {
             let message = err.to_string();
-            let kind = classify_lifting_error(&message);
-            let message = lift_diagnostic_message(kind, &message);
-            let range = lifting_error_span(&err)
-                .and_then(|span| span_to_range(sources, span))
-                .unwrap_or(fallback_range);
-            (range, kind, message)
+            classify_lifting_error(&message)
         }
         DecompilationError::ProcedureNotFound(_) | DecompilationError::ModuleNotFound(_) => {
-            return None;
+            LiftingDiagnosticKind::Other
         }
     };
 
     Some(Diagnostic {
-        range,
-        severity: Some(DiagnosticSeverity::ERROR),
+        range: fallback_range,
+        severity: Some(DiagnosticSeverity::WARNING),
         source: Some(SOURCE_DECOMPILATION.to_string()),
         code: Some(NumberOrString::String(kind.code().to_string())),
-        message: normalize_message(&message),
+        message: normalize_message(&format!("could not decompile procedure `{procedure_name}`")),
         ..Default::default()
     })
 }
@@ -415,6 +413,7 @@ fn classify_lifting_error(message: &str) -> LiftingDiagnosticKind {
     LiftingDiagnosticKind::Other
 }
 
+#[cfg(test)]
 fn lift_diagnostic_message(kind: LiftingDiagnosticKind, message: &str) -> String {
     match kind {
         LiftingDiagnosticKind::CallTargetResolution => {
@@ -427,17 +426,6 @@ fn lift_diagnostic_message(kind: LiftingDiagnosticKind, message: &str) -> String
             format!("{message}. The call resolved, but its inferred stack effect is unknown")
         }
         LiftingDiagnosticKind::Other => message.to_string(),
-    }
-}
-
-fn lifting_error_span(error: &LiftingError) -> Option<SourceSpan> {
-    match error {
-        LiftingError::UnsupportedInstruction { span, .. } => Some(*span),
-        LiftingError::UnbalancedIf { span } => Some(*span),
-        LiftingError::NonNeutralWhile { span } => Some(*span),
-        LiftingError::IncompatibleIfMerge { span } => Some(*span),
-        LiftingError::UnsupportedRepeatPattern { span, .. } => Some(*span),
-        _ => None,
     }
 }
 

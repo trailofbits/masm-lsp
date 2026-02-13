@@ -278,6 +278,275 @@ async fn execute_command_decompile_procedure_at_cursor_returns_output() {
 }
 
 #[tokio::test]
+async fn execute_command_decompile_file_returns_output() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/decompile_file_success.masm").expect("valid URI");
+
+    backend
+        .handle_open(
+            uri.clone(),
+            1,
+            "use std::math::u64\nuse std::crypto::hashes\n\nproc foo\n  push.1\nend\n\nproc bar\n  push.2\nend\n".to_string(),
+        )
+        .await
+        .expect("open");
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.decompileFile".to_string(),
+        arguments: vec![json!({
+            "uri": uri.as_str(),
+        })],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend
+        .execute_command(params)
+        .await
+        .expect("execute command")
+        .expect("decompilation payload");
+
+    let procedures = result
+        .get("procedures")
+        .and_then(serde_json::Value::as_array)
+        .expect("procedures array");
+    assert_eq!(
+        procedures.len(),
+        2,
+        "expected both procedures to be decompiled"
+    );
+
+    let first = procedures[0].as_object().expect("first procedure object");
+    assert_eq!(
+        first.get("name").and_then(serde_json::Value::as_str),
+        Some("foo"),
+    );
+    assert!(
+        first
+            .get("decompiled")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty()),
+        "expected non-empty decompiled procedure output"
+    );
+    let uses = result
+        .get("useStatements")
+        .and_then(serde_json::Value::as_array)
+        .expect("use statements array");
+    assert_eq!(
+        uses,
+        &vec![
+            json!("use std::math::u64"),
+            json!("use std::crypto::hashes"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn execute_command_decompile_file_requires_uri_argument() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.decompileFile".to_string(),
+        arguments: vec![],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend.execute_command(params).await;
+    assert!(result.is_err(), "expected invalid params error");
+}
+
+#[tokio::test]
+async fn execute_command_decompile_file_returns_failure_payload() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/decompile_file_failure.masm").expect("valid URI");
+
+    backend
+        .handle_open(uri.clone(), 1, "proc foo\n  dynexec\nend\n".to_string())
+        .await
+        .expect("open");
+
+    let _ = client.take_published().await;
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.decompileFile".to_string(),
+        arguments: vec![json!({
+            "uri": uri.as_str(),
+        })],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend
+        .execute_command(params)
+        .await
+        .expect("execute command")
+        .expect("decompilation payload");
+
+    assert_eq!(
+        result.get("status").and_then(serde_json::Value::as_str),
+        Some("failure")
+    );
+    let summary = result
+        .get("summary")
+        .and_then(serde_json::Value::as_object)
+        .expect("summary object");
+    assert_eq!(
+        summary
+            .get("totalProcedures")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert!(
+        result
+            .get("failures")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|failures| failures.len() == 1),
+        "expected single failed procedure, got: {result:?}"
+    );
+    let failure = result
+        .get("failures")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(serde_json::Value::as_object)
+        .expect("first failure object");
+    assert!(
+        failure
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|msg| msg.contains("Could not decompile procedure `foo`")),
+        "unexpected failure payload: {failure:?}"
+    );
+
+    let published = client.take_published().await;
+    assert!(
+        published.is_empty(),
+        "decompileFile should not publish diagnostics, got: {:?}",
+        published
+    );
+}
+
+#[tokio::test]
+async fn execute_command_decompile_file_returns_partial_payload() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/decompile_file_partial.masm").expect("valid URI");
+
+    backend
+        .handle_open(
+            uri.clone(),
+            1,
+            "proc ok\n  push.1\nend\n\nproc broken\n  dynexec\nend\n".to_string(),
+        )
+        .await
+        .expect("open");
+
+    let _ = client.take_published().await;
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.decompileFile".to_string(),
+        arguments: vec![json!({
+            "uri": uri.as_str(),
+        })],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend
+        .execute_command(params)
+        .await
+        .expect("execute command")
+        .expect("decompilation payload");
+
+    assert_eq!(
+        result.get("status").and_then(serde_json::Value::as_str),
+        Some("partial")
+    );
+    let summary = result
+        .get("summary")
+        .and_then(serde_json::Value::as_object)
+        .expect("summary object");
+    assert_eq!(
+        summary
+            .get("decompiledProcedures")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        summary
+            .get("failedProcedures")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+
+    let published = client.take_published().await;
+    assert!(
+        published.is_empty(),
+        "decompileFile should not publish diagnostics, got: {:?}",
+        published
+    );
+}
+
+#[tokio::test]
+async fn execute_command_decompile_file_includes_all_failures_in_payload() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/decompile_file_multi_failure.masm").expect("valid URI");
+
+    backend
+        .handle_open(
+            uri.clone(),
+            1,
+            "proc foo\n  dynexec\nend\n\nproc bar\n  dynexec\nend\n".to_string(),
+        )
+        .await
+        .expect("open");
+
+    let _ = client.take_published().await;
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.decompileFile".to_string(),
+        arguments: vec![json!({
+            "uri": uri.as_str(),
+        })],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend
+        .execute_command(params)
+        .await
+        .expect("execute command")
+        .expect("decompilation payload");
+
+    assert_eq!(
+        result.get("status").and_then(serde_json::Value::as_str),
+        Some("failure")
+    );
+    let failures = result
+        .get("failures")
+        .and_then(serde_json::Value::as_array)
+        .expect("failures array");
+    assert_eq!(
+        failures.len(),
+        2,
+        "expected one failure entry per failed procedure"
+    );
+    assert!(failures.iter().any(|entry| entry
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|msg| msg.contains("Could not decompile procedure `foo`"))));
+    assert!(failures.iter().any(|entry| entry
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|msg| msg.contains("Could not decompile procedure `bar`"))));
+
+    let published = client.take_published().await;
+    assert!(
+        published.is_empty(),
+        "decompileFile should not publish diagnostics, got: {:?}",
+        published
+    );
+}
+
+#[tokio::test]
 async fn execute_command_decompile_procedure_at_cursor_errors_when_outside_procedure() {
     let client = RecordingClient::default();
     let backend = Backend::new(client.clone());
@@ -372,7 +641,14 @@ async fn execute_command_decompile_procedure_at_cursor_returns_decompilation_err
     assert_eq!(diagnostic.source.as_deref(), Some("masm-lsp/decompilation"));
     assert_eq!(
         diagnostic.severity,
-        Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("Could not decompile procedure `foo`"),
+        "unexpected diagnostic message: {}",
+        diagnostic.message
     );
 
     let published = client.take_published().await;

@@ -25,7 +25,7 @@ use tower_lsp::{
 };
 use tracing::{debug, info};
 
-use super::backend::{Backend, ProcedureDecompilationError};
+use super::backend::{Backend, FileDecompilationError, ProcedureDecompilationError};
 use super::config::{
     extract_code_lens_stack_effects, extract_inlay_hint_type, extract_library_paths,
 };
@@ -36,6 +36,7 @@ use super::helpers::{
 
 const CMD_SET_STDLIB_ROOT: &str = "masm-lsp.setStdlibRoot";
 const CMD_DECOMPILE_PROCEDURE_AT_CURSOR: &str = "masm-lsp.decompileProcedureAtCursor";
+const CMD_DECOMPILE_FILE: &str = "masm-lsp.decompileFile";
 
 #[tower_lsp::async_trait]
 impl<C> LanguageServer for Backend<C>
@@ -65,6 +66,7 @@ where
                 commands: vec![
                     CMD_SET_STDLIB_ROOT.to_string(),
                     CMD_DECOMPILE_PROCEDURE_AT_CURSOR.to_string(),
+                    CMD_DECOMPILE_FILE.to_string(),
                 ],
                 work_done_progress_options: Default::default(),
             }),
@@ -113,6 +115,7 @@ where
             CMD_DECOMPILE_PROCEDURE_AT_CURSOR => {
                 self.execute_decompile_procedure_at_cursor(&params).await
             }
+            CMD_DECOMPILE_FILE => self.execute_decompile_file(&params).await,
             _ => Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
                 "unknown command: {}",
                 params.command
@@ -486,6 +489,76 @@ impl<C> Backend<C>
 where
     C: PublishDiagnostics,
 {
+    async fn execute_decompile_file(
+        &self,
+        params: &ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        let Some(uri) = parse_decompile_file_argument(&params.arguments) else {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "masm-lsp.decompileFile expects a single argument object: {\"uri\": \"file:///...\"}",
+            ));
+        };
+
+        let config = self.snapshot_config().await;
+        let effective_library_paths = self
+            .effective_library_paths_from(&config.library_paths)
+            .await;
+
+        let result = self
+            .decompile_file(&uri, &effective_library_paths)
+            .await
+            .map_err(decompile_file_command_error)?;
+        let procedures = result
+            .procedures
+            .into_iter()
+            .map(|proc| {
+                serde_json::json!({
+                    "name": proc.name,
+                    "path": proc.path,
+                    "range": proc.range,
+                    "decompiled": proc.decompiled,
+                })
+            })
+            .collect::<Vec<_>>();
+        let failures = result
+            .failures
+            .into_iter()
+            .map(|failure| {
+                serde_json::json!({
+                    "name": failure.name,
+                    "path": failure.path,
+                    "range": failure.range,
+                    "code": failure.code,
+                    "message": failure.message,
+                })
+            })
+            .collect::<Vec<_>>();
+        let decompiled_count = procedures.len();
+        let failed_count = failures.len();
+        let total_count = decompiled_count + failed_count;
+        let status = if failed_count == 0 {
+            "success"
+        } else if decompiled_count == 0 {
+            "failure"
+        } else {
+            "partial"
+        };
+
+        Ok(Some(serde_json::json!({
+            "uri": uri,
+            "modulePath": result.module_path,
+            "useStatements": result.use_statements,
+            "status": status,
+            "summary": {
+                "totalProcedures": total_count,
+                "decompiledProcedures": decompiled_count,
+                "failedProcedures": failed_count,
+            },
+            "procedures": procedures,
+            "failures": failures,
+        })))
+    }
+
     async fn execute_decompile_procedure_at_cursor(
         &self,
         params: &ExecuteCommandParams,
@@ -588,6 +661,14 @@ fn parse_decompile_cursor_argument(arguments: &[serde_json::Value]) -> Option<(U
     Some((uri, position))
 }
 
+fn parse_decompile_file_argument(arguments: &[serde_json::Value]) -> Option<Url> {
+    if arguments.len() != 1 {
+        return None;
+    }
+    let value = arguments.first()?;
+    value.get("uri").and_then(parse_uri_value)
+}
+
 fn parse_uri_value(value: &serde_json::Value) -> Option<Url> {
     value.as_str().and_then(|raw| Url::parse(raw).ok())
 }
@@ -630,6 +711,14 @@ fn decompile_command_error(err: ProcedureDecompilationError) -> tower_lsp::jsonr
             message,
             diagnostic,
         } => jsonrpc_error_with_diagnostic(ErrorCode::InternalError, message, diagnostic),
+    }
+}
+
+fn decompile_file_command_error(err: FileDecompilationError) -> tower_lsp::jsonrpc::Error {
+    match err {
+        FileDecompilationError::DocumentUnavailable(message) => {
+            tower_lsp::jsonrpc::Error::invalid_params(message)
+        }
     }
 }
 
