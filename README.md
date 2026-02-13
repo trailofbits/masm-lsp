@@ -10,9 +10,20 @@ The server provides the following features:
 
 - Go-to-definition and find-references for call targets and constants
 - Hover information for call targets and constants
+  <div style="margin:1em">
+    <img src="assets/signatures.png" alt="Hover documentation example" width="200"/>
+  </div>
 - Diagnostics for syntax errors and undefined symbols
 - Inlay hints providing instruction descriptions, or decompilation
+  <div style="margin:1em">
+    <img src="assets/descriptions.png" alt="Inlay hints example" width="400"/>
+  </div>
+- Decompilation of individual procedures or entire files
+  <div style="margin:1em">
+    <img src="assets/decompilation.png" alt="Inline decompilation example" width="400"/>
+  </div>
 - Code lenses for instruction stack effects
+- Goto symbol definitions and find references.
 
 It also provides diagnostics for a number of simple static analysis passes implemented in the `masm-decompiler` crate,
 such as:
