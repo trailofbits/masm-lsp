@@ -602,7 +602,7 @@ stack_effect = "(c, B, A, ...) → (c ? B : A, ...)"
 
 [[instructions]]
 name = "push.{n}"
-description = "Pushes a field element onto the stack."
+description = "Pushes {n} onto the stack."
 stack_effect = "(...) → ({n}, ...)"
 
 [[instructions]]
