@@ -462,42 +462,42 @@ stack_effect = "(a, ...) → (cto(a), ...)"
 
 [[instructions]]
 name = "u32lt"
-description = "c = 1, if a < b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+description = "c = 1, if a < b, and 0 otherwise. Undefined if max(a, b) ≥ 2^32."
 stack_effect = "(b, a, ...) → (a < b, ...)"
 
 [[instructions]]
 name = "u32lt.{n}"
-description = "c = 1, if a < {n}, and 0 otherwise. . Undefined if max(a, {n}) ≥ 2^32."
+description = "c = 1, if a < {n}, and 0 otherwise. Undefined if max(a, {n}) ≥ 2^32."
 stack_effect = "(a, ...) → (a < {n}, ...)"
 
 [[instructions]]
 name = "u32lte"
-description = "c = 1, if a ≤ b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+description = "c = 1, if a ≤ b, and 0 otherwise. Undefined if max(a, b) ≥ 2^32."
 stack_effect = "(b, a, ...) → (a ≤ b, ...)"
 
 [[instructions]]
 name = "u32lte.{n}"
-description = "c = 1, if a ≤ {n}, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+description = "c = 1, if a ≤ {n}, and 0 otherwise. Undefined if max(a, b) ≥ 2^32."
 stack_effect = "(a, ...) → (a ≤ {n}, ...)"
 
 [[instructions]]
 name = "u32gt"
-description = "c = 1, if a > b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+description = "c = 1, if a > b, and 0 otherwise. Undefined if max(a, b) ≥ 2^32."
 stack_effect = "(b, a, ...) → (a > b, ...)"
 
 [[instructions]]
 name = "u32gt.{n}"
-description = "c = 1, if a > {n}, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+description = "c = 1, if a > {n}, and 0 otherwise. Undefined if max(a, b) ≥ 2^32."
 stack_effect = "(a, ...) → (a > {n}, ...)"
 
 [[instructions]]
 name = "u32gte"
-description = "c = 1, if a ≥ b, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+description = "c = 1, if a ≥ b, and 0 otherwise. Undefined if max(a, b) ≥ 2^32."
 stack_effect = "(b, a, ...) → (a ≥ b, ...)"
 
 [[instructions]]
 name = "u32gte.{n}"
-description = "c = 1, if a ≥ {n}, and 0 otherwise. . Undefined if max(a, b) ≥ 2^32."
+description = "c = 1, if a ≥ {n}, and 0 otherwise. Undefined if max(a, b) ≥ 2^32."
 stack_effect = "(a, ...) → (a ≥ {n}, ...)"
 
 [[instructions]]
