@@ -11,16 +11,16 @@ The server provides the following features:
 - Go-to-definition and find-references for call targets and constants
 - Hover information for call targets and constants
   <div style="margin:1em">
-    <img src="assets/signatures.png" alt="Hover documentation example" width="200"/>
+    <img src="assets/signatures.png" alt="Hover documentation example" width="400"/>
   </div>
 - Diagnostics for syntax errors and undefined symbols
 - Inlay hints providing instruction descriptions, or decompilation
   <div style="margin:1em">
-    <img src="assets/descriptions.png" alt="Inlay hints example" width="400"/>
+    <img src="assets/descriptions.png" alt="Inlay hints example" width="800"/>
   </div>
 - Decompilation of individual procedures or entire files
   <div style="margin:1em">
-    <img src="assets/decompilation.png" alt="Inline decompilation example" width="400"/>
+    <img src="assets/decompilation.png" alt="Inline decompilation example" width="800"/>
   </div>
 - Code lenses for instruction stack effects
 - Goto symbol definitions and find references.
