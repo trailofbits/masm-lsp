@@ -1,9 +1,8 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use masm_decompiler::{
     fmt::{CodeWriter, FormattingConfig},
-    frontend::{LibraryRoot, Program, Workspace},
+    frontend::Workspace,
     DecompilationError, Decompiler,
 };
 use masm_instructions::ToDescription;
@@ -11,11 +10,11 @@ use miden_assembly_syntax::ast::{Block, Instruction, Module, Op};
 use miden_debug_types::{DefaultSourceManager, Span, Spanned};
 use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, NumberOrString,
-    Position, Range, Url,
+    Position, Range,
 };
 
 use crate::diagnostics::{normalize_message, span_to_range, SOURCE_DECOMPILATION};
-use crate::{InlayHintType, LibraryPath};
+use crate::InlayHintType;
 
 pub struct InlayHintResult {
     pub hints: Vec<InlayHint>,
@@ -30,21 +29,20 @@ enum InstructionHintKind {
 pub fn collect_inlay_hints(
     module: &Module,
     sources: Arc<DefaultSourceManager>,
-    uri: &Url,
     visible_range: &Range,
     source_text: &str,
-    library_paths: &[LibraryPath],
     hint_type: InlayHintType,
+    decompilation_workspace: Option<&Workspace>,
 ) -> InlayHintResult {
     match hint_type {
-        InlayHintType::Decompilation => collect_decompilation_hints(
-            module,
-            sources,
-            uri,
-            visible_range,
-            source_text,
-            library_paths,
-        ),
+        InlayHintType::Decompilation => decompilation_workspace
+            .map(|workspace| {
+                collect_decompilation_hints(module, sources, visible_range, source_text, workspace)
+            })
+            .unwrap_or(InlayHintResult {
+                hints: Vec::new(),
+                diagnostics: Vec::new(),
+            }),
         InlayHintType::Description => collect_instruction_hints(
             module,
             sources,
@@ -62,32 +60,14 @@ pub fn collect_inlay_hints(
 fn collect_decompilation_hints(
     module: &Module,
     sources: Arc<DefaultSourceManager>,
-    uri: &Url,
     visible_range: &Range,
     source_text: &str,
-    library_paths: &[LibraryPath],
+    workspace: &Workspace,
 ) -> InlayHintResult {
     let module_path = module.path().to_string();
-    let source_path = uri
-        .to_file_path()
-        .unwrap_or_else(|_| PathBuf::from("in-memory.masm"));
-
-    let roots: Vec<LibraryRoot> = library_paths
-        .iter()
-        .map(|lib| LibraryRoot::new(lib.prefix.clone(), lib.root.clone()))
-        .collect();
-
-    let mut workspace = Workspace::with_source_manager(roots, sources.clone());
-    let program = Program::from_parts(
-        Box::new(module.clone()),
-        source_path,
-        module.path().to_path_buf(),
-    );
-    workspace.add_program(program);
-    workspace.load_dependencies();
     let unresolved_modules = workspace.unresolved_module_paths();
 
-    let decompiler = Decompiler::new(&workspace);
+    let decompiler = Decompiler::new(workspace);
     let line_lengths: Vec<u32> = source_text
         .lines()
         .map(|line| line.trim_end().len() as u32)
@@ -108,13 +88,6 @@ fn collect_decompilation_hints(
     proc_infos.sort_by_key(|(range, _, _)| range.start.line);
     let mut hints = Vec::new();
     let mut diagnostics = Vec::new();
-    if !unresolved_modules.is_empty() {
-        diagnostics.push(unresolved_dependency_diagnostic(
-            module,
-            sources.as_ref(),
-            &unresolved_modules,
-        ));
-    }
     for idx in 0..proc_infos.len() {
         let (proc_range, proc_name, in_range) = proc_infos[idx].clone();
         let line = proc_range.start.line;
@@ -204,42 +177,6 @@ fn collect_decompilation_hints(
     }
 
     InlayHintResult { hints, diagnostics }
-}
-
-fn unresolved_dependency_diagnostic(
-    module: &Module,
-    sources: &DefaultSourceManager,
-    unresolved: &[masm_decompiler::SymbolPath],
-) -> Diagnostic {
-    let summary = unresolved_dependencies_summary(unresolved);
-    let range = span_to_range(sources, module.span())
-        .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
-    Diagnostic {
-        range,
-        severity: Some(DiagnosticSeverity::WARNING),
-        source: Some(SOURCE_DECOMPILATION.to_string()),
-        message: normalize_message(&format!(
-            "decompilation is incomplete: unresolved transitive module dependencies ({summary})"
-        )),
-        ..Default::default()
-    }
-}
-
-fn unresolved_dependencies_summary(unresolved: &[masm_decompiler::SymbolPath]) -> String {
-    const MAX_ITEMS: usize = 5;
-    let mut modules: Vec<String> = unresolved.iter().map(ToString::to_string).collect();
-    modules.sort();
-    modules.dedup();
-    if modules.len() <= MAX_ITEMS {
-        return modules.join(", ");
-    }
-    let remaining = modules.len() - MAX_ITEMS;
-    let shown = modules
-        .into_iter()
-        .take(MAX_ITEMS)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{shown}, and {remaining} more")
 }
 
 fn collect_instruction_hints(

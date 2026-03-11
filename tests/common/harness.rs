@@ -2,10 +2,12 @@
 
 #![allow(dead_code)]
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use masm_lsp::client::PublishDiagnostics;
+use masm_lsp::index::DocumentSymbols;
 use masm_lsp::server::Backend;
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::{
@@ -99,6 +101,34 @@ impl TestHarness {
         let uri = Url::parse(&format!("file:///tmp/test/{}", name)).expect("valid URL");
         self.open_doc(uri.clone(), content.to_string()).await;
         uri
+    }
+
+    /// Open content at a real filesystem path.
+    pub async fn open_path(&self, path: &Path, content: &str) -> Url {
+        let uri = Url::from_file_path(path).expect("valid path URL");
+        self.open_doc(uri.clone(), content.to_string()).await;
+        uri
+    }
+
+    /// Close a document via the LSP path.
+    pub async fn close_doc(&self, uri: &Url) {
+        use tower_lsp::lsp_types::{DidCloseTextDocumentParams, TextDocumentIdentifier};
+
+        self.backend
+            .did_close(DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            })
+            .await;
+    }
+
+    /// Snapshot the current workspace index.
+    pub async fn snapshot_workspace(&self) -> masm_lsp::index::WorkspaceIndex {
+        self.backend.snapshot_workspace().await
+    }
+
+    /// Snapshot cached document symbols by URI.
+    pub async fn snapshot_document_symbols(&self, uri: &Url) -> Option<DocumentSymbols> {
+        self.backend.snapshot_document_symbols(uri).await
     }
 
     /// Assert that no diagnostics were published for a URI.

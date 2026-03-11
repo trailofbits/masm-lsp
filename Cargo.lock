@@ -1459,7 +1459,7 @@ dependencies = [
 [[package]]
 name = "masm-decompiler"
 version = "0.1.0"
-source = "git+https://github.com/trailofbits/masm-decompiler?branch=main#c50f53a2121605b6241eeeaac05a382771a0c752"
+source = "git+https://github.com/trailofbits/masm-decompiler?branch=main#dfdef8ad01b64173bc818224f68573a1f19a3b57"
 dependencies = [
  "clap",
  "log",

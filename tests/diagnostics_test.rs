@@ -293,3 +293,36 @@ end
             .collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn analysis_resolves_calls_into_other_open_documents() {
+    let harness = TestHarness::new().await;
+
+    let _callee_uri = harness
+        .open_inline("utils.masm", "proc target_proc\n    push.1\nend\n")
+        .await;
+    let caller_uri = harness
+        .open_inline(
+            "caller.masm",
+            "proc caller\n    exec.utils::target_proc\nend\n",
+        )
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&caller_uri).await;
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.source.as_deref() != Some(SOURCE_ANALYSIS)),
+        "expected no analysis diagnostics for cross-open-document call, got: {:?}",
+        diags
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|diag| !diag.message.contains("Unresolved invocation target")),
+        "expected no unresolved invocation diagnostics, got: {:?}",
+        diags
+    );
+}

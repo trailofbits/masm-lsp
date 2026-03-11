@@ -7,6 +7,7 @@ mod cache;
 mod config;
 mod helpers;
 mod lsp;
+mod tracked_workspace;
 
 #[cfg(test)]
 mod tests;

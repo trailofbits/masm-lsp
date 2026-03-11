@@ -40,6 +40,14 @@ pub fn signature_mismatches(
     workspace.add_program(program);
     workspace.load_dependencies();
 
+    signature_mismatches_in_workspace(module, sources, &workspace)
+}
+
+pub fn signature_mismatches_in_workspace(
+    module: &Module,
+    sources: Arc<DefaultSourceManager>,
+    workspace: &Workspace,
+) -> Vec<SignatureMismatch> {
     let decompiler = Decompiler::new(&workspace);
     let signatures = decompiler.signatures();
     let resolver = module.type_resolver(sources.clone());

@@ -1,7 +1,10 @@
 use super::*;
 use crate::client::PublishDiagnostics;
+use crate::util::to_miden_uri;
 use crate::LibraryPath;
+use miden_debug_types::SourceManager;
 use serde_json::json;
+use std::path::Path;
 use std::sync::Arc;
 use tower_lsp::lsp_types;
 use tower_lsp::lsp_types::{
@@ -9,6 +12,39 @@ use tower_lsp::lsp_types::{
     VersionedTextDocumentIdentifier,
 };
 use tower_lsp::LanguageServer;
+
+fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time should move forward")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "masm-lsp-server-{name}-{}-{stamp}",
+        std::process::id()
+    ))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create destination directory");
+    let entries = std::fs::read_dir(src).expect("read source directory");
+    for entry in entries {
+        let entry = entry.expect("read directory entry");
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if entry
+            .file_type()
+            .expect("read directory entry type")
+            .is_dir()
+        {
+            copy_dir_recursive(&path, &target);
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).expect("create destination parent");
+            }
+            std::fs::copy(&path, &target).expect("copy fixture file");
+        }
+    }
+}
 
 #[tokio::test]
 async fn publish_diagnostics_sends_updated_version() {
@@ -711,6 +747,356 @@ async fn reloading_libraries_removes_old_stdlib_entries() {
     assert!(ws.definition("::std::new::new_proc").is_some());
 
     let _ = std::fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn handle_close_restores_disk_backed_symbols() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client);
+
+    let root = unique_temp_dir("close-restores-disk");
+    std::fs::create_dir_all(&root).expect("create root");
+    let path = root.join("utils.masm");
+    std::fs::write(&path, "proc old_proc\n  nop\nend\n").expect("write disk file");
+    let uri = Url::from_file_path(&path).expect("path URI");
+
+    let mut cfg = backend.snapshot_config().await;
+    cfg.library_paths = vec![LibraryPath {
+        root: root.clone(),
+        prefix: String::new(),
+    }];
+    backend.update_config(cfg).await;
+    backend.load_configured_libraries().await;
+
+    let ws = backend.snapshot_workspace().await;
+    assert!(ws.definition_by_name("old_proc").is_some());
+    drop(ws);
+
+    backend
+        .handle_open(uri.clone(), 1, "proc new_proc\n  nop\nend\n".to_string())
+        .await
+        .expect("open override");
+
+    let ws = backend.snapshot_workspace().await;
+    assert!(ws.definition_by_name("new_proc").is_some());
+    assert!(ws.definition_by_name("old_proc").is_none());
+    drop(ws);
+
+    backend.handle_close(uri.clone()).await;
+
+    let ws = backend.snapshot_workspace().await;
+    assert!(ws.definition_by_name("old_proc").is_some());
+    assert!(ws.definition_by_name("new_proc").is_none());
+
+    let symbols = backend
+        .snapshot_document_symbols(&uri)
+        .await
+        .expect("restored symbols");
+    let proc_name = symbols
+        .module
+        .procedures()
+        .next()
+        .expect("procedure")
+        .name()
+        .as_str()
+        .to_string();
+    assert_eq!(proc_name, "old_proc");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn library_reload_does_not_clobber_open_buffer_same_uri() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client);
+
+    let root = unique_temp_dir("reload-open-buffer");
+    std::fs::create_dir_all(&root).expect("create root");
+    let path = root.join("utils.masm");
+    std::fs::write(&path, "proc old_proc\n  nop\nend\n").expect("write disk file");
+    let uri = Url::from_file_path(&path).expect("path URI");
+
+    let mut cfg = backend.snapshot_config().await;
+    cfg.library_paths = vec![LibraryPath {
+        root: root.clone(),
+        prefix: String::new(),
+    }];
+    backend.update_config(cfg).await;
+    backend.load_configured_libraries().await;
+
+    backend
+        .handle_open(uri.clone(), 1, "proc new_proc\n  nop\nend\n".to_string())
+        .await
+        .expect("open override");
+
+    backend.load_configured_libraries().await;
+
+    let source = backend
+        .sources
+        .get_by_uri(&to_miden_uri(&uri))
+        .expect("source present");
+    assert!(source.as_str().contains("new_proc"));
+    assert!(!source.as_str().contains("old_proc"));
+
+    let ws = backend.snapshot_workspace().await;
+    assert!(ws.definition_by_name("new_proc").is_some());
+    assert!(ws.definition_by_name("old_proc").is_none());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn parse_error_preserves_last_known_good_open_state() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/parse_error_preserves_state.masm").expect("valid URI");
+
+    backend
+        .handle_open(uri.clone(), 1, "proc foo\n  nop\nend\n".to_string())
+        .await
+        .expect("open");
+    let _ = client.take_published().await;
+
+    backend
+        .handle_change(
+            uri.clone(),
+            2,
+            vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "proc foo\n  nop\n".to_string(),
+            }],
+        )
+        .await;
+
+    let published = client.take_published().await;
+    assert!(
+        published.iter().any(|(_, diags, _)| !diags.is_empty()),
+        "expected parse diagnostics after invalid edit"
+    );
+
+    let ws = backend.snapshot_workspace().await;
+    assert!(ws.definition_by_name("foo").is_some());
+
+    let symbols = backend
+        .snapshot_document_symbols(&uri)
+        .await
+        .expect("cached symbols");
+    let proc_name = symbols
+        .module
+        .procedures()
+        .next()
+        .expect("procedure")
+        .name()
+        .as_str()
+        .to_string();
+    assert_eq!(proc_name, "foo");
+
+    let active = backend
+        .tracked_workspace
+        .read()
+        .await
+        .active_program_for_uri(&uri)
+        .expect("active tracked program");
+    assert_eq!(
+        active.origin,
+        super::tracked_workspace::ProgramOrigin::OpenDocument
+    );
+}
+
+#[tokio::test]
+async fn parse_error_without_last_known_good_removes_active_open_state() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/parse_error_without_last_good.masm").expect("valid URI");
+
+    backend
+        .handle_open(uri.clone(), 1, "proc\n".to_string())
+        .await
+        .expect("open invalid");
+
+    let published = client.take_published().await;
+    assert!(
+        published.iter().any(|(_, diags, _)| !diags.is_empty()),
+        "expected diagnostics for invalid initial open"
+    );
+
+    let ws = backend.snapshot_workspace().await;
+    assert!(ws.definition_by_name("proc").is_none());
+    assert!(backend.snapshot_document_symbols(&uri).await.is_none());
+    assert!(backend
+        .tracked_workspace
+        .read()
+        .await
+        .active_program_for_uri(&uri)
+        .is_none());
+}
+
+#[tokio::test]
+async fn workspace_folder_noise_does_not_publish_analysis_warning_for_stdlib_inlay_hints() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = unique_temp_dir("workspace-folder-noise");
+    let stdlib_root = workspace_root.join("stdlib").join("asm");
+    let mem_fixture = repo_root.join("examples").join("stdlib").join("mem.masm");
+    let rpo_fixture = repo_root
+        .join("examples")
+        .join("stdlib")
+        .join("crypto")
+        .join("hashes")
+        .join("rpo.masm");
+
+    std::fs::create_dir_all(stdlib_root.join("crypto").join("hashes"))
+        .expect("create stdlib fixture directories");
+    std::fs::copy(&mem_fixture, stdlib_root.join("mem.masm")).expect("copy mem fixture");
+    std::fs::copy(
+        &rpo_fixture,
+        stdlib_root.join("crypto").join("hashes").join("rpo.masm"),
+    )
+    .expect("copy rpo fixture");
+    copy_dir_recursive(
+        &repo_root
+            .join("tests")
+            .join("fixtures")
+            .join("workspace_noise"),
+        &workspace_root,
+    );
+
+    let mut cfg = backend.snapshot_config().await;
+    cfg.library_paths = vec![LibraryPath {
+        root: stdlib_root.clone(),
+        prefix: "std".to_string(),
+    }];
+    cfg.inlay_hint_type = crate::InlayHintType::Decompilation;
+    backend.update_config(cfg).await;
+
+    backend
+        .initialize(lsp_types::InitializeParams {
+            workspace_folders: Some(vec![lsp_types::WorkspaceFolder {
+                uri: Url::from_file_path(&workspace_root).expect("workspace URI"),
+                name: "miden-vm".to_string(),
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("initialize");
+    backend.initialized(lsp_types::InitializedParams {}).await;
+
+    let mem_path = stdlib_root.join("mem.masm");
+    let mem_uri = Url::from_file_path(&mem_path).expect("mem URI");
+    let mem_text = std::fs::read_to_string(&mem_path).expect("read stdlib mem.masm");
+
+    backend
+        .did_open(lsp_types::DidOpenTextDocumentParams {
+            text_document: lsp_types::TextDocumentItem {
+                uri: mem_uri.clone(),
+                language_id: "masm".to_string(),
+                version: 1,
+                text: mem_text.clone(),
+            },
+        })
+        .await;
+
+    let open_published = client.take_published().await;
+    let open_mem_diags: Vec<_> = open_published
+        .iter()
+        .filter(|(uri, _, _)| uri == &mem_uri)
+        .flat_map(|(_, diags, _)| diags.iter())
+        .collect();
+    assert!(
+        open_mem_diags.iter().all(|diag| {
+            diag.source.as_deref() != Some(crate::diagnostics::SOURCE_ANALYSIS)
+                && !diag
+                    .message
+                    .contains("unresolved transitive module dependencies")
+        }),
+        "expected stdlib mem.masm open diagnostics to be free of cross-workspace analysis warnings, got: {:?}",
+        open_mem_diags
+            .iter()
+            .map(|diag| (diag.source.clone(), diag.message.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    let doc = backend
+        .snapshot_document_symbols(&mem_uri)
+        .await
+        .expect("mem symbols");
+    assert!(
+        doc.module.path().to_string().ends_with("std::mem"),
+        "expected stdlib module path, got {}",
+        doc.module.path()
+    );
+
+    let last_line_index = mem_text.lines().count().saturating_sub(1) as u32;
+    let last_line_len = mem_text.lines().last().map(|line| line.len()).unwrap_or(0) as u32;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        backend.inlay_hint(lsp_types::InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: mem_uri.clone(),
+            },
+            range: lsp_types::Range::new(
+                Position::new(0, 0),
+                Position::new(last_line_index, last_line_len),
+            ),
+            work_done_progress_params: Default::default(),
+        }),
+    )
+    .await
+    .expect("inlay hint request timed out")
+    .expect("inlay hints request");
+
+    let published = client.take_published().await;
+    assert!(
+        published.is_empty(),
+        "inlayHint should not publish diagnostics, got: {:?}",
+        published
+    );
+
+    let _ = std::fs::remove_dir_all(workspace_root);
+}
+
+#[tokio::test]
+async fn inlay_hint_request_does_not_publish_diagnostics() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/inlay_hint_no_publish.masm").expect("valid URI");
+    let text = "proc foo\n  push.1\nend\n".to_string();
+
+    let mut cfg = backend.snapshot_config().await;
+    cfg.inlay_hint_type = crate::InlayHintType::Decompilation;
+    cfg.taint_analysis_enabled = false;
+    backend.update_config(cfg).await;
+
+    backend
+        .did_open(lsp_types::DidOpenTextDocumentParams {
+            text_document: lsp_types::TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "masm".to_string(),
+                version: 1,
+                text,
+            },
+        })
+        .await;
+    let _ = client.take_published().await;
+
+    let _ = backend
+        .inlay_hint(lsp_types::InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+            range: lsp_types::Range::new(Position::new(0, 0), Position::new(2, 3)),
+            work_done_progress_params: Default::default(),
+        })
+        .await
+        .expect("inlay hint request");
+
+    let published = client.take_published().await;
+    assert!(
+        published.is_empty(),
+        "inlayHint should not publish diagnostics, got: {:?}",
+        published
+    );
 }
 
 fn command_error_diagnostic(error: &tower_lsp::jsonrpc::Error) -> Option<Diagnostic> {

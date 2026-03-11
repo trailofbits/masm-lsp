@@ -1,0 +1,5 @@
+use miden::core::collections::sorted_array
+
+proc lookup
+    nop
+end

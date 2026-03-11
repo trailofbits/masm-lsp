@@ -44,8 +44,8 @@ where
     C: PublishDiagnostics,
 {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        let workspace_paths = workspace_library_paths_from_initialize(&params);
-        self.set_workspace_library_paths(workspace_paths).await;
+        let workspace_paths = workspace_parse_paths_from_initialize(&params);
+        self.set_workspace_parse_paths(workspace_paths).await;
 
         let capabilities = ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -469,18 +469,28 @@ where
             return Ok(None);
         };
 
-        let result = collect_inlay_hints(
-            &doc.module,
-            self.sources.clone(),
-            &uri,
-            &params.range,
-            source.as_str(),
-            &effective_library_paths,
-            config.inlay_hint_type,
-        );
-        let _ = self
-            .publish_diagnostics_with_extra(uri.clone(), result.diagnostics)
-            .await;
+        let result = if config.inlay_hint_type == InlayHintType::Decompilation {
+            let workspace = self
+                .build_analysis_workspace(Some(&uri), &effective_library_paths)
+                .await;
+            collect_inlay_hints(
+                &doc.module,
+                self.sources.clone(),
+                &params.range,
+                source.as_str(),
+                config.inlay_hint_type,
+                Some(&workspace),
+            )
+        } else {
+            collect_inlay_hints(
+                &doc.module,
+                self.sources.clone(),
+                &params.range,
+                source.as_str(),
+                config.inlay_hint_type,
+                None,
+            )
+        };
         Ok(Some(result.hints))
     }
 }
@@ -599,7 +609,7 @@ where
     }
 }
 
-fn workspace_library_paths_from_initialize(params: &InitializeParams) -> Vec<LibraryPath> {
+fn workspace_parse_paths_from_initialize(params: &InitializeParams) -> Vec<LibraryPath> {
     let mut roots = Vec::new();
 
     if let Some(folders) = &params.workspace_folders {
@@ -795,7 +805,7 @@ mod tests {
             ..Default::default()
         };
 
-        let paths = workspace_library_paths_from_initialize(&params);
+        let paths = workspace_parse_paths_from_initialize(&params);
         assert_eq!(paths.len(), 2);
         assert!(paths.iter().all(|p| p.prefix.is_empty()));
         assert!(paths.iter().any(|p| p.root == first));
@@ -814,7 +824,7 @@ mod tests {
             ..Default::default()
         };
 
-        let paths = workspace_library_paths_from_initialize(&params);
+        let paths = workspace_parse_paths_from_initialize(&params);
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].root, base);
         assert!(paths[0].prefix.is_empty());
