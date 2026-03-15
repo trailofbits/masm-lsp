@@ -425,8 +425,14 @@ mod tests {
     #[test]
     fn test_workspace_symbols_filters_by_query() {
         let workspace_service = MockWorkspaceService::new()
-            .with_definition(SymbolPath::new("::std::crypto::hash"), test_location(1))
-            .with_definition(SymbolPath::new("::std::math::add"), test_location(2))
+            .with_definition(
+                SymbolPath::new("::miden::core::crypto::hash"),
+                test_location(1),
+            )
+            .with_definition(
+                SymbolPath::new("::miden::core::math::add"),
+                test_location(2),
+            )
             .with_definition(SymbolPath::new("::app::crypto_utils"), test_location(3));
 
         let results = handle_workspace_symbols(&workspace_service, "crypto");
@@ -438,7 +444,7 @@ mod tests {
     #[test]
     fn test_mock_workspace_finds_by_suffix() {
         let workspace_service = MockWorkspaceService::new().with_definition(
-            SymbolPath::new("::std::crypto::sha256::hash"),
+            SymbolPath::new("::miden::core::crypto::sha256::hash"),
             test_location(1),
         );
 

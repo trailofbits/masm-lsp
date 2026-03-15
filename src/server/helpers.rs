@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn is_on_use_statement_true() {
-        let source = "use std::crypto\nproc foo\nend\n";
+        let source = "use miden::core::crypto\nproc foo\nend\n";
         let pos = tower_lsp::lsp_types::Position::new(0, 5);
         assert!(is_on_use_statement(source, pos));
     }

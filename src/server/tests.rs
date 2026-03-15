@@ -1,5 +1,9 @@
 use super::*;
 use crate::client::PublishDiagnostics;
+use crate::core_lib::{
+    core_library_root_from_repo_root, default_core_library_path, default_core_library_symbol_path,
+    DEFAULT_CORE_LIBRARY_PREFIX,
+};
 use crate::util::to_miden_uri;
 use crate::LibraryPath;
 use miden_debug_types::SourceManager;
@@ -209,12 +213,12 @@ async fn determine_module_kind_detects_executable_from_entrypoint() {
 }
 
 #[tokio::test]
-async fn execute_command_sets_stdlib_root() {
+async fn execute_command_sets_core_library_root() {
     let client = RecordingClient::default();
     let backend = Backend::new(client.clone());
 
     let base = std::env::temp_dir().join(format!(
-        "masm-lsp-set-stdlib-{}-{}",
+        "masm-lsp-set-core-lib-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -222,14 +226,14 @@ async fn execute_command_sets_stdlib_root() {
             .as_nanos()
     ));
     let repo = base.join("miden-vm");
-    let asm = repo.join("stdlib").join("asm");
-    std::fs::create_dir_all(&asm).expect("create stdlib/asm");
+    let asm = core_library_root_from_repo_root(&repo);
+    std::fs::create_dir_all(&asm).expect("create core library asm");
     let expected = asm
         .canonicalize()
-        .expect("canonicalize expected stdlib/asm path");
+        .expect("canonicalize expected core library path");
 
     let params = ExecuteCommandParams {
-        command: "masm-lsp.setStdlibRoot".to_string(),
+        command: "masm-lsp.setCorePath".to_string(),
         arguments: vec![serde_json::Value::String(
             repo.to_string_lossy().to_string(),
         )],
@@ -242,18 +246,18 @@ async fn execute_command_sets_stdlib_root() {
         .expect("execute command");
     let cfg = backend.snapshot_config().await;
     assert_eq!(cfg.library_paths.len(), 1);
-    assert_eq!(cfg.library_paths[0].prefix, "std");
+    assert_eq!(cfg.library_paths[0].prefix, DEFAULT_CORE_LIBRARY_PREFIX);
     assert_eq!(cfg.library_paths[0].root, expected);
 
     let _ = std::fs::remove_dir_all(base);
 }
 
 #[tokio::test]
-async fn execute_command_set_stdlib_root_requires_argument() {
+async fn execute_command_set_core_library_root_requires_argument() {
     let client = RecordingClient::default();
     let backend = Backend::new(client.clone());
     let params = ExecuteCommandParams {
-        command: "masm-lsp.setStdlibRoot".to_string(),
+        command: "masm-lsp.setCorePath".to_string(),
         arguments: vec![],
         work_done_progress_params: Default::default(),
     };
@@ -323,7 +327,7 @@ async fn execute_command_decompile_file_returns_output() {
         .handle_open(
             uri.clone(),
             1,
-            "use std::math::u64\nuse std::crypto::hashes\n\nproc foo\n  push.1\nend\n\nproc bar\n  push.2\nend\n".to_string(),
+            "use miden::core::math::u64\nuse miden::core::crypto::hashes\n\nproc foo\n  push.1\nend\n\nproc bar\n  push.2\nend\n".to_string(),
         )
         .await
         .expect("open");
@@ -371,8 +375,8 @@ async fn execute_command_decompile_file_returns_output() {
     assert_eq!(
         uses,
         &vec![
-            json!("use std::math::u64"),
-            json!("use std::crypto::hashes"),
+            json!("use miden::core::math::u64"),
+            json!("use miden::core::crypto::hashes"),
         ]
     );
 }
@@ -449,7 +453,7 @@ async fn execute_command_decompile_file_returns_failure_payload() {
         failure
             .get("message")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|msg| msg.contains("Could not decompile procedure `foo`")),
+            .is_some_and(|msg| msg.contains("could not decompile procedure `foo`")),
         "unexpected failure payload: {failure:?}"
     );
 
@@ -568,11 +572,11 @@ async fn execute_command_decompile_file_includes_all_failures_in_payload() {
     assert!(failures.iter().any(|entry| entry
         .get("message")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|msg| msg.contains("Could not decompile procedure `foo`"))));
+        .is_some_and(|msg| msg.contains("could not decompile procedure `foo`"))));
     assert!(failures.iter().any(|entry| entry
         .get("message")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|msg| msg.contains("Could not decompile procedure `bar`"))));
+        .is_some_and(|msg| msg.contains("could not decompile procedure `bar`"))));
 
     let published = client.take_published().await;
     assert!(
@@ -682,8 +686,16 @@ async fn execute_command_decompile_procedure_at_cursor_returns_decompilation_err
     assert!(
         diagnostic
             .message
-            .contains("Could not decompile procedure `foo`"),
+            .contains("could not decompile procedure `foo`"),
         "unexpected diagnostic message: {}",
+        diagnostic.message
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("unsupported instruction `dynexec` found")
+            || diagnostic.message.contains("unknown inferred signature"),
+        "expected underlying decompilation error in diagnostic message, got: {}",
         diagnostic.message
     );
 
@@ -698,53 +710,144 @@ async fn execute_command_decompile_procedure_at_cursor_returns_decompilation_err
 }
 
 #[tokio::test]
-async fn reloading_libraries_removes_old_stdlib_entries() {
+async fn publish_diagnostics_includes_decompilation_failures_when_hints_are_enabled() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let core_root = repo_root.join("examples").join("core");
+    let mem_path = core_root.join("mem.masm");
+    let mem_uri = Url::from_file_path(&mem_path).expect("mem URI");
+    let mem_text = std::fs::read_to_string(&mem_path).expect("read core library mem.masm");
+
+    let mut cfg = backend.snapshot_config().await;
+    cfg.library_paths = vec![default_core_library_path(core_root)];
+    cfg.inlay_hint_type = crate::InlayHintType::Decompilation;
+    cfg.taint_analysis_enabled = false;
+    backend.update_config(cfg).await;
+
+    backend
+        .handle_open(mem_uri.clone(), 1, mem_text)
+        .await
+        .expect("open core library mem.masm");
+
+    let published = client.take_published().await;
+    let mem_diags: Vec<_> = published
+        .iter()
+        .filter(|(uri, _, _)| uri == &mem_uri)
+        .flat_map(|(_, diags, _)| diags.iter())
+        .collect();
+
+    assert!(
+        mem_diags.iter().any(|diag| {
+            diag.source.as_deref() == Some(crate::diagnostics::SOURCE_DECOMPILATION)
+                && diag.message.contains("pipe_words_to_memory")
+                && diag.message.contains("incompatible subscripts")
+        }),
+        "expected detailed decompilation diagnostic for pipe_words_to_memory, got: {:?}",
+        mem_diags
+            .iter()
+            .map(|diag| (diag.source.clone(), diag.message.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn pipe_words_to_memory_still_has_an_inferred_signature() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client);
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let core_root = repo_root.join("examples").join("core");
+    let mem_path = core_root.join("mem.masm");
+    let mem_uri = Url::from_file_path(&mem_path).expect("mem URI");
+    let mem_text = std::fs::read_to_string(&mem_path).expect("read core library mem.masm");
+
+    let mut cfg = backend.snapshot_config().await;
+    cfg.library_paths = vec![default_core_library_path(core_root)];
+    cfg.taint_analysis_enabled = true;
+    backend.update_config(cfg).await;
+
+    backend
+        .handle_open(mem_uri.clone(), 1, mem_text)
+        .await
+        .expect("open core library mem.masm");
+
+    let signature = backend
+        .inferred_signature_line(
+            backend
+                .snapshot_document_symbols(&mem_uri)
+                .await
+                .expect("mem symbols")
+                .module
+                .as_ref(),
+            &mem_uri,
+            &default_core_library_symbol_path("mem::pipe_words_to_memory"),
+            &[default_core_library_path(
+                mem_path
+                    .parent()
+                    .expect("core library module parent")
+                    .to_path_buf(),
+            )],
+        )
+        .await;
+
+    assert!(
+        signature.is_some(),
+        "expected inferred signature for pipe_words_to_memory"
+    );
+}
+
+#[tokio::test]
+async fn reloading_libraries_removes_old_core_library_entries() {
     let client = RecordingClient::default();
     let backend = Backend::new(client.clone());
 
     let base = std::env::temp_dir().join(format!(
-        "masm-lsp-reload-stdlib-{}-{}",
+        "masm-lsp-reload-core-lib-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time should move forward")
             .as_nanos()
     ));
-    let old_root = base.join("old").join("stdlib").join("asm");
-    let new_root = base.join("new").join("stdlib").join("asm");
-    std::fs::create_dir_all(&old_root).expect("create old stdlib root");
-    std::fs::create_dir_all(&new_root).expect("create new stdlib root");
+    let old_root = base
+        .join("old")
+        .join("crates")
+        .join("lib")
+        .join("core")
+        .join("asm");
+    let new_root = base
+        .join("new")
+        .join("crates")
+        .join("lib")
+        .join("core")
+        .join("asm");
+    std::fs::create_dir_all(&old_root).expect("create old core library root");
+    std::fs::create_dir_all(&new_root).expect("create new core library root");
     std::fs::write(old_root.join("old.masm"), "proc old_proc\n  nop\nend\n")
-        .expect("write old stdlib file");
+        .expect("write old core library file");
     std::fs::write(new_root.join("new.masm"), "proc new_proc\n  nop\nend\n")
-        .expect("write new stdlib file");
+        .expect("write new core library file");
 
     let mut cfg = backend.snapshot_config().await;
-    cfg.library_paths = vec![LibraryPath {
-        root: old_root.clone(),
-        prefix: "std".to_string(),
-    }];
+    cfg.library_paths = vec![default_core_library_path(old_root.clone())];
     backend.update_config(cfg).await;
     backend.load_configured_libraries().await;
 
     let ws = backend.snapshot_workspace().await;
-    assert!(ws.definition("::std::old::old_proc").is_some());
+    assert!(ws.definition("::miden::core::old::old_proc").is_some());
     drop(ws);
 
     let mut cfg = backend.snapshot_config().await;
-    cfg.library_paths = vec![LibraryPath {
-        root: new_root.clone(),
-        prefix: "std".to_string(),
-    }];
+    cfg.library_paths = vec![default_core_library_path(new_root.clone())];
     backend.update_config(cfg).await;
     backend.load_configured_libraries().await;
 
     let ws = backend.snapshot_workspace().await;
     assert!(
-        ws.definition("::std::old::old_proc").is_none(),
-        "old stdlib definition should be cleared after root switch"
+        ws.definition("::miden::core::old::old_proc").is_none(),
+        "old core library definition should be cleared after root switch"
     );
-    assert!(ws.definition("::std::new::new_proc").is_some());
+    assert!(ws.definition("::miden::core::new::new_proc").is_some());
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -933,29 +1036,36 @@ async fn parse_error_without_last_known_good_removes_active_open_state() {
 }
 
 #[tokio::test]
-async fn workspace_folder_noise_does_not_publish_analysis_warning_for_stdlib_inlay_hints() {
+async fn workspace_folder_noise_does_not_publish_analysis_warning_for_core_library_inlay_hints() {
     let client = RecordingClient::default();
     let backend = Backend::new(client.clone());
 
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = unique_temp_dir("workspace-folder-noise");
-    let stdlib_root = workspace_root.join("stdlib").join("asm");
-    let mem_fixture = repo_root.join("examples").join("stdlib").join("mem.masm");
-    let rpo_fixture = repo_root
+    let core_root = workspace_root
+        .join("crates")
+        .join("lib")
+        .join("core")
+        .join("asm");
+    let mem_fixture = repo_root.join("examples").join("core").join("mem.masm");
+    let poseidon2_fixture = repo_root
         .join("examples")
-        .join("stdlib")
+        .join("core")
         .join("crypto")
         .join("hashes")
-        .join("rpo.masm");
+        .join("poseidon2.masm");
 
-    std::fs::create_dir_all(stdlib_root.join("crypto").join("hashes"))
-        .expect("create stdlib fixture directories");
-    std::fs::copy(&mem_fixture, stdlib_root.join("mem.masm")).expect("copy mem fixture");
+    std::fs::create_dir_all(core_root.join("crypto").join("hashes"))
+        .expect("create core library fixture directories");
+    std::fs::copy(&mem_fixture, core_root.join("mem.masm")).expect("copy mem fixture");
     std::fs::copy(
-        &rpo_fixture,
-        stdlib_root.join("crypto").join("hashes").join("rpo.masm"),
+        &poseidon2_fixture,
+        core_root
+            .join("crypto")
+            .join("hashes")
+            .join("poseidon2.masm"),
     )
-    .expect("copy rpo fixture");
+    .expect("copy poseidon2 fixture");
     copy_dir_recursive(
         &repo_root
             .join("tests")
@@ -965,10 +1075,7 @@ async fn workspace_folder_noise_does_not_publish_analysis_warning_for_stdlib_inl
     );
 
     let mut cfg = backend.snapshot_config().await;
-    cfg.library_paths = vec![LibraryPath {
-        root: stdlib_root.clone(),
-        prefix: "std".to_string(),
-    }];
+    cfg.library_paths = vec![default_core_library_path(core_root.clone())];
     cfg.inlay_hint_type = crate::InlayHintType::Decompilation;
     backend.update_config(cfg).await;
 
@@ -984,9 +1091,9 @@ async fn workspace_folder_noise_does_not_publish_analysis_warning_for_stdlib_inl
         .expect("initialize");
     backend.initialized(lsp_types::InitializedParams {}).await;
 
-    let mem_path = stdlib_root.join("mem.masm");
+    let mem_path = core_root.join("mem.masm");
     let mem_uri = Url::from_file_path(&mem_path).expect("mem URI");
-    let mem_text = std::fs::read_to_string(&mem_path).expect("read stdlib mem.masm");
+    let mem_text = std::fs::read_to_string(&mem_path).expect("read core library mem.masm");
 
     backend
         .did_open(lsp_types::DidOpenTextDocumentParams {
@@ -1012,7 +1119,7 @@ async fn workspace_folder_noise_does_not_publish_analysis_warning_for_stdlib_inl
                     .message
                     .contains("unresolved transitive module dependencies")
         }),
-        "expected stdlib mem.masm open diagnostics to be free of cross-workspace analysis warnings, got: {:?}",
+        "expected core library mem.masm open diagnostics to be free of cross-workspace analysis warnings, got: {:?}",
         open_mem_diags
             .iter()
             .map(|diag| (diag.source.clone(), diag.message.clone()))
@@ -1024,8 +1131,8 @@ async fn workspace_folder_noise_does_not_publish_analysis_warning_for_stdlib_inl
         .await
         .expect("mem symbols");
     assert!(
-        doc.module.path().to_string().ends_with("std::mem"),
-        "expected stdlib module path, got {}",
+        doc.module.path().to_string().ends_with("miden::core::mem"),
+        "expected core library module path, got {}",
         doc.module.path()
     );
 

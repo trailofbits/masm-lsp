@@ -44,7 +44,7 @@ use crate::{
         SOURCE_ANALYSIS, SOURCE_DECOMPILATION,
     },
     index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
-    inlay_hints::decompilation_error_diagnostic,
+    inlay_hints::{collect_decompilation_diagnostics, decompilation_error_diagnostic},
     module_path::ModulePathResolver,
     service::DocumentService,
     util::{lsp_range_to_selection, to_miden_uri},
@@ -445,7 +445,8 @@ where
                     code: Some(NumberOrString::String("decompilation-failed".to_string())),
                     message: normalize_message(&format!(
                         "could not decompile procedure `{proc_name}`"
-                    )),
+                    ))
+                    .replacen("Could", "could", 1),
                     ..Default::default()
                 });
                 return Err(ProcedureDecompilationError::DecompilationFailed {
@@ -518,7 +519,8 @@ where
                         code: Some(NumberOrString::String("decompilation-failed".to_string())),
                         message: normalize_message(&format!(
                             "could not decompile procedure `{proc_name}`"
-                        )),
+                        ))
+                        .replacen("Could", "could", 1),
                         ..Default::default()
                     });
                     failures.push(ProcedureDecompilationFailure {
@@ -638,42 +640,66 @@ where
         let effective_library_paths = self
             .effective_library_paths_from(&config.library_paths)
             .await;
-
-        let analysis_diags = if let Ok(doc) = &parse_result {
-            if config.taint_analysis_enabled {
-                let workspace = self
-                    .build_analysis_workspace(Some(&uri), &effective_library_paths)
-                    .await;
-                let analysis = infer_analysis_snapshot(&workspace);
-                let mut diags = Vec::new();
-                if analysis.unresolved_modules.is_empty() {
-                    let mismatches = signature_mismatches_in_workspace(
-                        &doc.module,
-                        self.sources.clone(),
-                        &workspace,
-                    );
-                    diags.extend(signature_mismatch_diagnostics(
-                        mismatches,
-                        self.sources.as_ref(),
-                    ));
-                    diags.extend(type_inconsistency_diagnostics(
-                        &uri,
-                        &analysis.type_diagnostics,
-                        self.sources.as_ref(),
-                    ));
-                }
-                diags
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
         let fallback_doc = if parse_result.is_err() {
             self.documents.get_symbols(&uri).await
         } else {
             None
+        };
+
+        let (analysis_diags, decompilation_diags) = {
+            let analysis_workspace = if parse_result.is_ok()
+                && (config.taint_analysis_enabled
+                    || config.inlay_hint_type == crate::InlayHintType::Decompilation)
+            {
+                Some(
+                    self.build_analysis_workspace(Some(&uri), &effective_library_paths)
+                        .await,
+                )
+            } else {
+                None
+            };
+
+            let analysis_diags = if config.taint_analysis_enabled {
+                if let (Ok(doc), Some(workspace)) = (&parse_result, analysis_workspace.as_ref()) {
+                    let analysis = infer_analysis_snapshot(workspace);
+                    let mut diags = Vec::new();
+                    if analysis.unresolved_modules.is_empty() {
+                        let mismatches = signature_mismatches_in_workspace(
+                            &doc.module,
+                            self.sources.clone(),
+                            workspace,
+                        );
+                        diags.extend(signature_mismatch_diagnostics(
+                            mismatches,
+                            self.sources.as_ref(),
+                        ));
+                        diags.extend(type_inconsistency_diagnostics(
+                            &uri,
+                            &analysis.type_diagnostics,
+                            self.sources.as_ref(),
+                        ));
+                    }
+                    diags
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            let decompilation_diags = if config.inlay_hint_type
+                == crate::InlayHintType::Decompilation
+            {
+                if let (Ok(doc), Some(workspace)) = (&parse_result, analysis_workspace.as_ref()) {
+                    collect_decompilation_diagnostics(&doc.module, self.sources.clone(), workspace)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            (analysis_diags, decompilation_diags)
         };
 
         let workspace = self.workspace.read().await;
@@ -697,6 +723,10 @@ where
 
         if !analysis_diags.is_empty() {
             diagnostics.extend(analysis_diags);
+        }
+
+        if !decompilation_diags.is_empty() {
+            diagnostics.extend(decompilation_diags);
         }
 
         if !extra.is_empty() {

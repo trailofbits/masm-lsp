@@ -1,15 +1,12 @@
 use crate::client::PublishDiagnostics;
 use crate::code_lens::collect_code_lenses;
+use crate::core_lib::{default_core_library_path, normalize_core_library_path};
 use crate::cursor_resolution::resolve_symbol_at_position;
 use crate::inlay_hints::collect_inlay_hints;
 use crate::util::{extract_token_at_position, to_miden_uri};
 use crate::{InlayHintType, LibraryPath};
 use miden_debug_types::SourceManager;
-use std::{
-    collections::HashSet,
-    ffi::OsStr,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, path::PathBuf};
 use tower_lsp::{
     jsonrpc::{ErrorCode, Result},
     lsp_types::{
@@ -34,7 +31,7 @@ use super::helpers::{
     is_on_use_statement,
 };
 
-const CMD_SET_STDLIB_ROOT: &str = "masm-lsp.setStdlibRoot";
+const CMD_SET_CORE_PATH: &str = "masm-lsp.setCorePath";
 const CMD_DECOMPILE_PROCEDURE_AT_CURSOR: &str = "masm-lsp.decompileProcedureAtCursor";
 const CMD_DECOMPILE_FILE: &str = "masm-lsp.decompileFile";
 
@@ -64,7 +61,7 @@ where
             }),
             execute_command_provider: Some(ExecuteCommandOptions {
                 commands: vec![
-                    CMD_SET_STDLIB_ROOT.to_string(),
+                    CMD_SET_CORE_PATH.to_string(),
                     CMD_DECOMPILE_PROCEDURE_AT_CURSOR.to_string(),
                     CMD_DECOMPILE_FILE.to_string(),
                 ],
@@ -89,27 +86,24 @@ where
         params: ExecuteCommandParams,
     ) -> Result<Option<serde_json::Value>> {
         match params.command.as_str() {
-            CMD_SET_STDLIB_ROOT => {
-                let Some(raw_path) = parse_stdlib_root_argument(&params.arguments) else {
+            CMD_SET_CORE_PATH => {
+                let Some(raw_path) = parse_core_library_path_argument(&params.arguments) else {
                     return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                        "masm-lsp.setStdlibRoot expects path as first argument",
+                        "masm-lsp.setCorePath expects path as first argument",
                     ));
                 };
-                let root = normalize_stdlib_root(&raw_path);
+                let root = normalize_core_library_path(&raw_path);
 
                 let mut cfg = self.config.write().await;
-                cfg.library_paths = vec![LibraryPath {
-                    root: root.clone(),
-                    prefix: "std".to_string(),
-                }];
+                cfg.library_paths = vec![default_core_library_path(root.clone())];
                 drop(cfg);
 
-                info!("updated stdlib root via command: {}", root.display());
+                info!("updated core library root via command: {}", root.display());
                 self.load_configured_libraries().await;
 
                 Ok(Some(serde_json::json!({
                     "root": root.to_string_lossy().to_string(),
-                    "prefix": "std",
+                    "prefix": crate::core_lib::DEFAULT_CORE_LIBRARY_PREFIX,
                 })))
             }
             CMD_DECOMPILE_PROCEDURE_AT_CURSOR => {
@@ -649,7 +643,7 @@ fn workspace_parse_paths_from_initialize(params: &InitializeParams) -> Vec<Libra
     out
 }
 
-fn parse_stdlib_root_argument(arguments: &[serde_json::Value]) -> Option<PathBuf> {
+fn parse_core_library_path_argument(arguments: &[serde_json::Value]) -> Option<PathBuf> {
     let first = arguments.first()?;
     if let Some(path) = first.as_str() {
         return Some(PathBuf::from(path));
@@ -744,26 +738,6 @@ fn jsonrpc_error_with_diagnostic(
             "diagnostic": diagnostic,
         })),
     }
-}
-
-fn normalize_stdlib_root(path: &Path) -> PathBuf {
-    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if is_stdlib_asm_path(&normalized) {
-        return normalized;
-    }
-    if is_stdlib_path(&normalized) {
-        return normalized.join("asm");
-    }
-    normalized.join("stdlib").join("asm")
-}
-
-fn is_stdlib_path(path: &Path) -> bool {
-    path.file_name() == Some(OsStr::new("stdlib"))
-}
-
-fn is_stdlib_asm_path(path: &Path) -> bool {
-    path.file_name() == Some(OsStr::new("asm"))
-        && path.parent().and_then(|p| p.file_name()) == Some(OsStr::new("stdlib"))
 }
 
 #[cfg(test)]

@@ -1,9 +1,13 @@
 use clap::Parser;
-use masm_lsp::{server::Backend, LibraryPath, ServerConfig};
-use std::{
-    ffi::OsStr,
-    path::{Path, PathBuf},
+use masm_lsp::{
+    core_lib::{
+        core_library_root_from_repo_root, default_core_library_path, discover_core_library_from,
+        normalize_core_library_path,
+    },
+    server::Backend,
+    ServerConfig,
 };
+use std::path::{Path, PathBuf};
 use tower_lsp::{LspService, Server};
 
 #[tokio::main]
@@ -30,37 +34,35 @@ async fn main() {
 #[derive(Parser, Debug)]
 #[command(name = "masm-lsp")]
 struct Args {
-    /// Path to miden-vm repo root, stdlib root, or stdlib/asm (defaults to auto-discovery, then managed copy)
+    /// Path to the miden-vm repo root, core library root, or core library asm dir
     #[arg(long)]
-    stdlib_path: Option<PathBuf>,
+    core_path: Option<PathBuf>,
 }
 
 fn build_config(args: &Args) -> ServerConfig {
     let mut config = ServerConfig::default();
-    let lib_root = resolve_stdlib_library_root(args.stdlib_path.as_deref());
-    config.library_paths = vec![LibraryPath {
-        root: lib_root,
-        prefix: "std".to_string(),
-    }];
+    let lib_root = resolve_core_library_root(args.core_path.as_deref());
+    tracing::info!("using core library root: {}", lib_root.display());
+    config.library_paths = vec![default_core_library_path(lib_root)];
     config
 }
 
-fn resolve_stdlib_library_root(stdlib_path: Option<&Path>) -> PathBuf {
+fn resolve_core_library_root(core_path: Option<&Path>) -> PathBuf {
     let cwd = std::env::current_dir().ok();
-    resolve_stdlib_library_root_from(stdlib_path, cwd.as_deref())
+    resolve_core_library_root_from(core_path, cwd.as_deref())
 }
 
-fn resolve_stdlib_library_root_from(stdlib_path: Option<&Path>, cwd: Option<&Path>) -> PathBuf {
-    if let Some(path) = stdlib_path {
-        let root = normalize_stdlib_path(path);
-        tracing::info!("using stdlib from --stdlib-path: {}", root.display());
+fn resolve_core_library_root_from(core_path: Option<&Path>, cwd: Option<&Path>) -> PathBuf {
+    if let Some(path) = core_path {
+        let root = normalize_core_library_path(path);
+        tracing::info!("using core library from --core-path: {}", root.display());
         return root;
     }
 
     if let Some(cwd) = cwd {
-        if let Some(root) = discover_stdlib_from(&cwd) {
+        if let Some(root) = discover_core_library_from(cwd) {
             tracing::info!(
-                "resolved stdlib by walking from {}: {}",
+                "resolved core library by walking from {}: {}",
                 cwd.display(),
                 root.display()
             );
@@ -68,51 +70,9 @@ fn resolve_stdlib_library_root_from(stdlib_path: Option<&Path>, cwd: Option<&Pat
         }
     }
 
-    let root = ensure_default_repo().join("stdlib").join("asm");
-    tracing::info!("using managed stdlib copy: {}", root.display());
+    let root = core_library_root_from_repo_root(&ensure_default_repo());
+    tracing::info!("using managed core library copy: {}", root.display());
     root
-}
-
-fn normalize_stdlib_path(path: &Path) -> PathBuf {
-    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if is_stdlib_asm_path(&normalized) {
-        return normalized;
-    }
-    if is_stdlib_path(&normalized) {
-        return normalized.join("asm");
-    }
-    normalized.join("stdlib").join("asm")
-}
-
-fn discover_stdlib_from(start: &Path) -> Option<PathBuf> {
-    let normalized = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    let mut probe = normalized;
-    if probe.is_file() {
-        probe = probe.parent()?.to_path_buf();
-    }
-
-    for ancestor in probe.ancestors() {
-        let direct = ancestor.join("stdlib").join("asm");
-        if direct.is_dir() {
-            return Some(direct);
-        }
-
-        let sibling = ancestor.join("miden-vm").join("stdlib").join("asm");
-        if sibling.is_dir() {
-            return Some(sibling);
-        }
-    }
-
-    None
-}
-
-fn is_stdlib_path(path: &Path) -> bool {
-    path.file_name() == Some(OsStr::new("stdlib"))
-}
-
-fn is_stdlib_asm_path(path: &Path) -> bool {
-    path.file_name() == Some(OsStr::new("asm"))
-        && path.parent().and_then(|p| p.file_name()) == Some(OsStr::new("stdlib"))
 }
 
 fn ensure_default_repo() -> PathBuf {
@@ -156,75 +116,89 @@ mod tests {
     }
 
     #[test]
-    fn normalize_stdlib_path_accepts_repo_root_stdlib_and_asm() {
+    fn resolve_core_library_root_accepts_repo_root_core_and_asm() {
         let base = unique_temp_dir("normalize");
         let repo = base.join("miden-vm");
-        let stdlib = repo.join("stdlib");
-        let asm = stdlib.join("asm");
-        std::fs::create_dir_all(&asm).expect("create stdlib/asm");
+        let core = repo.join("crates").join("lib").join("core");
+        let asm = core.join("asm");
+        std::fs::create_dir_all(&asm).expect("create core library asm");
         let expected = asm
             .canonicalize()
-            .expect("canonicalize expected stdlib/asm path");
+            .expect("canonicalize expected core library path");
 
-        assert_eq!(normalize_stdlib_path(&repo), expected);
-        assert_eq!(normalize_stdlib_path(&stdlib), expected);
-        assert_eq!(normalize_stdlib_path(&asm), expected);
+        assert_eq!(normalize_core_library_path(&repo), expected);
+        assert_eq!(normalize_core_library_path(&core), expected);
+        assert_eq!(normalize_core_library_path(&asm), expected);
 
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
-    fn discover_stdlib_from_finds_ancestor_repo_root() {
+    fn discover_core_library_from_finds_ancestor_repo_root() {
         let base = unique_temp_dir("discover-ancestor");
         let repo = base.join("miden-vm");
-        let asm = repo.join("stdlib").join("asm");
+        let asm = repo.join("crates").join("lib").join("core").join("asm");
         let nested = repo.join("crates").join("masm-lsp");
-        std::fs::create_dir_all(&asm).expect("create stdlib/asm");
+        std::fs::create_dir_all(&asm).expect("create core library asm");
         std::fs::create_dir_all(&nested).expect("create nested project");
         let expected = asm
             .canonicalize()
-            .expect("canonicalize expected stdlib/asm path");
+            .expect("canonicalize expected core library path");
 
-        assert_eq!(discover_stdlib_from(&nested), Some(expected));
+        assert_eq!(discover_core_library_from(&nested), Some(expected));
 
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
-    fn discover_stdlib_from_finds_sibling_miden_vm() {
+    fn discover_core_library_from_finds_sibling_miden_vm() {
         let base = unique_temp_dir("discover-sibling");
         let workspace = base.join("workspace");
         let project = workspace.join("masm-lsp");
-        let asm = workspace.join("miden-vm").join("stdlib").join("asm");
+        let asm = workspace
+            .join("miden-vm")
+            .join("crates")
+            .join("lib")
+            .join("core")
+            .join("asm");
         std::fs::create_dir_all(&project).expect("create project dir");
-        std::fs::create_dir_all(&asm).expect("create sibling stdlib/asm");
+        std::fs::create_dir_all(&asm).expect("create sibling core library asm");
         let expected = asm
             .canonicalize()
-            .expect("canonicalize expected stdlib/asm path");
+            .expect("canonicalize expected core library path");
 
-        assert_eq!(discover_stdlib_from(&project), Some(expected));
+        assert_eq!(discover_core_library_from(&project), Some(expected));
 
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
-    fn resolve_stdlib_library_root_prefers_cli_argument_over_discovery() {
+    fn resolve_core_library_root_prefers_cli_argument_over_discovery() {
         let base = unique_temp_dir("resolve-explicit");
         let workspace = base.join("workspace");
         let project = workspace.join("masm-lsp");
-        let discovered = workspace.join("miden-vm").join("stdlib").join("asm");
+        let discovered = workspace
+            .join("miden-vm")
+            .join("crates")
+            .join("lib")
+            .join("core")
+            .join("asm");
         let explicit_repo = base.join("explicit").join("miden-vm");
-        let explicit_asm = explicit_repo.join("stdlib").join("asm");
+        let explicit_asm = explicit_repo
+            .join("crates")
+            .join("lib")
+            .join("core")
+            .join("asm");
 
         std::fs::create_dir_all(&project).expect("create project dir");
-        std::fs::create_dir_all(&discovered).expect("create discovered stdlib/asm");
-        std::fs::create_dir_all(&explicit_asm).expect("create explicit stdlib/asm");
+        std::fs::create_dir_all(&discovered).expect("create discovered core library");
+        std::fs::create_dir_all(&explicit_asm).expect("create explicit core library");
 
         let expected = explicit_asm
             .canonicalize()
-            .expect("canonicalize explicit stdlib/asm path");
+            .expect("canonicalize explicit core library path");
         let resolved =
-            resolve_stdlib_library_root_from(Some(&explicit_repo), Some(project.as_path()));
+            resolve_core_library_root_from(Some(&explicit_repo), Some(project.as_path()));
 
         assert_eq!(resolved, expected);
 

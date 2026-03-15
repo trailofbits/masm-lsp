@@ -52,6 +52,8 @@ async fn nested_blocks_fixture_resolves_calls_in_blocks() {
 
     tokio::task::yield_now().await;
 
+    harness.assert_no_diagnostics(&uri).await;
+
     // Should be able to find references to helper from within nested blocks
     let refs = harness
         .find_references_at(&uri, &content, "helper", true)

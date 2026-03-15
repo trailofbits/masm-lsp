@@ -6,8 +6,9 @@
 mod common;
 
 use common::fixtures::inline;
+use common::fixtures::load_fixture;
 use common::harness::TestHarness;
-use masm_lsp::diagnostics::SOURCE_ANALYSIS;
+use masm_lsp::diagnostics::{SOURCE_ANALYSIS, SOURCE_DECOMPILATION};
 use tower_lsp::lsp_types::DiagnosticSeverity;
 
 #[tokio::test]
@@ -31,6 +32,29 @@ async fn syntax_error_produces_diagnostics() {
     tokio::task::yield_now().await;
 
     harness.assert_has_diagnostics(&uri).await;
+}
+
+#[tokio::test]
+async fn invalid_nested_control_flow_produces_decompilation_diagnostic() {
+    let harness = TestHarness::new().await;
+    let content = load_fixture("nested_blocks_invalid.masm");
+
+    // Invalid but parseable control flow should surface a decompilation diagnostic
+    // instead of crashing the server during open-time diagnostics.
+    let uri = harness.open_inline("nested_invalid.masm", &content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let decompilation_diag = diags.iter().find(|diag| {
+        diag.source.as_deref() == Some(SOURCE_DECOMPILATION)
+            && diag.message.contains("could not decompile procedure")
+    });
+    assert!(
+        decompilation_diag.is_some(),
+        "expected decompilation diagnostic for invalid nested control flow, got: {:?}",
+        diags
+    );
 }
 
 #[tokio::test]

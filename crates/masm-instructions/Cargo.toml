@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-miden-assembly-syntax = { version = "0.20", default-features = true }
+miden-assembly-syntax = { workspace = true }
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

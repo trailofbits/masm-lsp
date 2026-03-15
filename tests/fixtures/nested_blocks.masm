@@ -3,10 +3,12 @@ proc helper
 end
 
 proc nested_if
+    push.0
+    eq.0
     if.true
         exec.helper
     else
-        push.0
+        nop
     end
 end
 
@@ -17,19 +19,33 @@ proc nested_repeat
 end
 
 proc nested_while
+    push.0
+    eq.0
     while.true
         exec.helper
+        push.1
+        eq.0
     end
 end
 
 proc deeply_nested
+    push.0
+    eq.0
     if.true
-        repeat.3
-            while.true
+        push.0
+        eq.0
+        while.true
+            push.0
+            eq.0
+            if.true
                 exec.helper
+            else
+                nop
             end
+            push.1
+            eq.0
         end
     else
-        push.0
+        nop
     end
 end

@@ -57,6 +57,46 @@ pub fn collect_inlay_hints(
     }
 }
 
+/// Collect decompilation failure diagnostics for every procedure in a module.
+pub fn collect_decompilation_diagnostics(
+    module: &Module,
+    sources: Arc<DefaultSourceManager>,
+    workspace: &Workspace,
+) -> Vec<Diagnostic> {
+    let module_path = module.path().to_string();
+    let unresolved_modules = workspace.unresolved_module_paths();
+    let decompiler = Decompiler::new(workspace);
+    let mut diagnostics = Vec::new();
+
+    for proc in module.procedures() {
+        let Some(range) = span_to_range(sources.as_ref(), proc.name().span()) else {
+            continue;
+        };
+        let proc_name = proc.name().as_str().to_string();
+        let fq_name = if module_path.is_empty() {
+            proc_name.clone()
+        } else {
+            format!("{module_path}::{proc_name}")
+        };
+
+        let Err(error) = decompiler.decompile_proc(&fq_name) else {
+            continue;
+        };
+
+        if !unresolved_modules.is_empty() && should_suppress_with_unresolved_dependencies(&error) {
+            continue;
+        }
+
+        if let Some(diag) =
+            decompilation_error_diagnostic(sources.as_ref(), range, &proc_name, error)
+        {
+            diagnostics.push(diag);
+        }
+    }
+
+    diagnostics
+}
+
 fn collect_decompilation_hints(
     module: &Module,
     sources: Arc<DefaultSourceManager>,
@@ -277,13 +317,17 @@ pub(crate) fn decompilation_error_diagnostic(
     procedure_name: &str,
     error: DecompilationError,
 ) -> Option<Diagnostic> {
-    let kind = match error {
+    let (kind, detail) = match error {
         DecompilationError::Lifting(err) => {
             let message = err.to_string();
-            classify_lifting_error(&message)
+            let kind = classify_lifting_error(&message);
+            (kind, lift_diagnostic_message(kind, &message))
         }
-        DecompilationError::ProcedureNotFound(_) | DecompilationError::ModuleNotFound(_) => {
-            LiftingDiagnosticKind::Other
+        DecompilationError::ProcedureNotFound(_)
+        | DecompilationError::ModuleNotFound(_)
+        | DecompilationError::MissingProcedureSignature(_)
+        | DecompilationError::UnknownProcedureSignature(_) => {
+            (LiftingDiagnosticKind::Other, error.to_string())
         }
     };
 
@@ -292,7 +336,10 @@ pub(crate) fn decompilation_error_diagnostic(
         severity: Some(DiagnosticSeverity::WARNING),
         source: Some(SOURCE_DECOMPILATION.to_string()),
         code: Some(NumberOrString::String(kind.code().to_string())),
-        message: normalize_message(&format!("could not decompile procedure `{procedure_name}`")),
+        message: normalize_message(&format!(
+            "could not decompile procedure `{procedure_name}`: {detail}"
+        ))
+        .replacen("Could", "could", 1),
         ..Default::default()
     })
 }
@@ -302,7 +349,10 @@ fn should_suppress_with_unresolved_dependencies(error: &DecompilationError) -> b
         DecompilationError::Lifting(err) => {
             classify_lifting_error(&err.to_string()).is_call_related()
         }
-        DecompilationError::ProcedureNotFound(_) | DecompilationError::ModuleNotFound(_) => false,
+        DecompilationError::ProcedureNotFound(_)
+        | DecompilationError::ModuleNotFound(_)
+        | DecompilationError::MissingProcedureSignature(_)
+        | DecompilationError::UnknownProcedureSignature(_) => false,
     }
 }
 
@@ -350,7 +400,6 @@ fn classify_lifting_error(message: &str) -> LiftingDiagnosticKind {
     LiftingDiagnosticKind::Other
 }
 
-#[cfg(test)]
 fn lift_diagnostic_message(kind: LiftingDiagnosticKind, message: &str) -> String {
     match kind {
         LiftingDiagnosticKind::CallTargetResolution => {

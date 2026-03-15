@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 masm-decompiler = { workspace = true }
-miden-assembly-syntax = { version = "0.20", default-features = true }
-miden-debug-types = { version = "0.20", default-features = true }
+miden-assembly-syntax = { workspace = true }
+miden-debug-types = { workspace = true }

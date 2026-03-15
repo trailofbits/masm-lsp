@@ -2,6 +2,7 @@ pub use masm_decompiler as decompiler;
 pub use masm_decompiler::symbol::resolution as symbol_resolution;
 pub mod client;
 pub mod code_lens;
+pub mod core_lib;
 pub mod cursor_resolution;
 pub mod diagnostics;
 pub mod index;
@@ -114,16 +115,11 @@ impl ServerConfigBuilder {
 
 fn default_library_paths() -> Vec<LibraryPath> {
     let mut paths = Vec::new();
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".codex")
-        .join("miden-vm")
-        .join("stdlib")
-        .join("asm");
+    let root = core_lib::managed_core_library_root_from_manifest_dir(std::path::Path::new(env!(
+        "CARGO_MANIFEST_DIR"
+    )));
     if root.is_dir() {
-        paths.push(LibraryPath {
-            root,
-            prefix: "std".to_string(),
-        });
+        paths.push(core_lib::default_core_library_path(root));
     }
     paths
 }

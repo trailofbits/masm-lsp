@@ -559,7 +559,7 @@ mod tests {
         let mut index = WorkspaceIndex::default();
         let uri = test_uri();
 
-        let defs = vec![make_definition("::std::crypto::sha256::hash", 0)];
+        let defs = vec![make_definition("::miden::core::crypto::sha256::hash", 0)];
         index.update_document(uri.clone(), &defs, &[]);
 
         // Should find by suffix
@@ -576,8 +576,8 @@ mod tests {
         let uri = test_uri();
 
         let refs = vec![
-            make_reference("::std::crypto::hash", 10),
-            make_reference("::std::math::hash", 15),
+            make_reference("::miden::core::crypto::hash", 10),
+            make_reference("::miden::core::math::hash", 15),
         ];
         index.update_document(uri.clone(), &[], &refs);
 
@@ -592,23 +592,20 @@ mod tests {
         let uri = test_uri();
 
         // References should be stored with fully-qualified paths after module alias expansion.
-        // For example, `exec.base_field::square` with `use std::math::ecgfp5::base_field`
-        // should be stored as `::std::math::ecgfp5::base_field::square`.
-        let refs = vec![make_reference(
-            "::std::math::ecgfp5::base_field::square",
-            10,
-        )];
+        // For example, `exec.base_field::square` with `use miden::core::math::u64`
+        // should be stored using the fully-qualified core-library path.
+        let refs = vec![make_reference("::miden::core::math::u64::checked_add", 10)];
         index.update_document(uri.clone(), &[], &refs);
 
         // Looking up by full path should find the reference
-        let found = index.references_by_suffix("::std::math::ecgfp5::base_field::square");
+        let found = index.references_by_suffix("::miden::core::math::u64::checked_add");
         assert_eq!(found.len(), 1);
 
         // Looking up by suffix should also work
-        let found2 = index.references_by_suffix("base_field::square");
+        let found2 = index.references_by_suffix("u64::checked_add");
         assert_eq!(found2.len(), 1);
 
-        let found3 = index.references_by_suffix("square");
+        let found3 = index.references_by_suffix("checked_add");
         assert_eq!(found3.len(), 1);
     }
 

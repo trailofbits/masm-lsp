@@ -36,4 +36,4 @@ such as:
 - [Miden Assembly Language Reference](https://0xmiden.github.io/miden-vm/user_docs/assembly/main.html)
 - [Miden VM Documentation](https://0xmiden.github.io/miden-vm/)
 - [Miden VM GitHub Repository](https://github.com/0xMiden/miden-vm)
-- [Miden stdlib](https://github.com/0xMiden/miden-vm/tree/main/stdlib)
+- [Miden core library](https://github.com/0xMiden/miden-vm/tree/main/crates/lib/core/asm)

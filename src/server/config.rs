@@ -3,6 +3,7 @@
 //! This module handles parsing configuration values from JSON settings
 //! received via `didChangeConfiguration` notifications.
 
+use crate::core_lib::default_core_library_path;
 use crate::{InlayHintType, LibraryPath};
 
 /// Extract the code lens stack effect toggle from LSP settings.
@@ -22,7 +23,7 @@ pub fn extract_code_lens_stack_effects(settings: &serde_json::Value) -> Option<b
 /// Extract library paths from LSP settings.
 ///
 /// Supports two formats:
-/// 1. Simple string array: `["path/to/lib"]` (uses "std" prefix)
+/// 1. Simple string array: `["path/to/lib"]` (uses the default core-library prefix)
 /// 2. Object array: `[{ "path": "path/to/lib", "prefix": "mylib" }]`
 ///
 /// Expects settings in the format:
@@ -39,16 +40,16 @@ pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<Library
     for entry in arr {
         match entry {
             serde_json::Value::String(path) => {
-                out.push(LibraryPath {
-                    root: path.into(),
-                    prefix: "std".to_string(),
-                });
+                out.push(default_core_library_path(path));
             }
             serde_json::Value::Object(map) => {
                 let Some(path_val) = map.get("path").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                let prefix = map.get("prefix").and_then(|v| v.as_str()).unwrap_or("std");
+                let prefix = map
+                    .get("prefix")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(crate::core_lib::DEFAULT_CORE_LIBRARY_PREFIX);
                 out.push(LibraryPath {
                     root: path_val.into(),
                     prefix: prefix.to_string(),
@@ -131,7 +132,10 @@ mod tests {
         let paths = extract_library_paths(&settings).unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].root.to_str().unwrap(), "/path/to/lib");
-        assert_eq!(paths[0].prefix, "std");
+        assert_eq!(
+            paths[0].prefix,
+            crate::core_lib::DEFAULT_CORE_LIBRARY_PREFIX
+        );
     }
 
     #[test]
@@ -161,7 +165,10 @@ mod tests {
         });
         let paths = extract_library_paths(&settings).unwrap();
         assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].prefix, "std");
+        assert_eq!(
+            paths[0].prefix,
+            crate::core_lib::DEFAULT_CORE_LIBRARY_PREFIX
+        );
         assert_eq!(paths[1].prefix, "custom");
     }
 

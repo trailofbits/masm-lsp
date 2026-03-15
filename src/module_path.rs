@@ -44,8 +44,9 @@ impl<'a> ModulePathResolver<'a> {
 
 /// Build a module path from a file path relative to a library root.
 ///
-/// Given a file at `/path/to/stdlib/crypto/hashes/sha256.masm` with root
-/// `/path/to/stdlib` and prefix `std`, this produces `std::crypto::hashes::sha256`.
+/// Given a file at `/path/to/core/crypto/hashes/sha256.masm` with root
+/// `/path/to/core` and prefix `miden::core`, this produces
+/// `miden::core::crypto::hashes::sha256`.
 fn build_path_from_root(
     path: &Path,
     root: &Path,
@@ -91,21 +92,22 @@ fn fallback_from_uri(uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_lib::{default_core_library_path, DEFAULT_CORE_LIBRARY_PREFIX};
     use std::path::PathBuf;
 
     #[test]
     fn build_path_from_root_basic() {
-        let root = PathBuf::from("/libs/stdlib");
-        let path = PathBuf::from("/libs/stdlib/crypto/sha256.masm");
-        let result = build_path_from_root(&path, &root, "std");
+        let root = PathBuf::from("/libs/core");
+        let path = PathBuf::from("/libs/core/crypto/sha256.masm");
+        let result = build_path_from_root(&path, &root, DEFAULT_CORE_LIBRARY_PREFIX);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().to_string(), "std::crypto::sha256");
+        assert_eq!(result.unwrap().to_string(), "miden::core::crypto::sha256");
     }
 
     #[test]
     fn build_path_from_root_no_prefix() {
-        let root = PathBuf::from("/libs/stdlib");
-        let path = PathBuf::from("/libs/stdlib/crypto/sha256.masm");
+        let root = PathBuf::from("/libs/core");
+        let path = PathBuf::from("/libs/core/crypto/sha256.masm");
         let result = build_path_from_root(&path, &root, "");
         assert!(result.is_some());
         assert_eq!(result.unwrap().to_string(), "crypto::sha256");
@@ -115,16 +117,19 @@ mod tests {
     fn build_path_from_root_nested() {
         let root = PathBuf::from("/libs");
         let path = PathBuf::from("/libs/crypto/hashes/sha256.masm");
-        let result = build_path_from_root(&path, &root, "std");
+        let result = build_path_from_root(&path, &root, DEFAULT_CORE_LIBRARY_PREFIX);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().to_string(), "std::crypto::hashes::sha256");
+        assert_eq!(
+            result.unwrap().to_string(),
+            "miden::core::crypto::hashes::sha256"
+        );
     }
 
     #[test]
     fn build_path_from_root_not_under_root() {
-        let root = PathBuf::from("/libs/stdlib");
+        let root = PathBuf::from("/libs/core");
         let path = PathBuf::from("/other/path/file.masm");
-        let result = build_path_from_root(&path, &root, "std");
+        let result = build_path_from_root(&path, &root, DEFAULT_CORE_LIBRARY_PREFIX);
         assert!(result.is_none());
     }
 
@@ -146,26 +151,20 @@ mod tests {
 
     #[test]
     fn resolver_uses_library_path() {
-        let lib_root = PathBuf::from("/libs/stdlib");
-        let library_paths = vec![LibraryPath {
-            root: lib_root,
-            prefix: "std".to_string(),
-        }];
+        let lib_root = PathBuf::from("/libs/core");
+        let library_paths = vec![default_core_library_path(lib_root)];
         let resolver = ModulePathResolver::new(&library_paths);
 
-        let uri = Url::from_file_path("/libs/stdlib/crypto/hash.masm").unwrap();
+        let uri = Url::from_file_path("/libs/core/crypto/hash.masm").unwrap();
         let result = resolver.resolve(&uri);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().to_string(), "std::crypto::hash");
+        assert_eq!(result.unwrap().to_string(), "miden::core::crypto::hash");
     }
 
     #[test]
     fn resolver_falls_back_when_not_in_library() {
-        let lib_root = PathBuf::from("/libs/stdlib");
-        let library_paths = vec![LibraryPath {
-            root: lib_root,
-            prefix: "std".to_string(),
-        }];
+        let lib_root = PathBuf::from("/libs/core");
+        let library_paths = vec![default_core_library_path(lib_root)];
         let resolver = ModulePathResolver::new(&library_paths);
 
         let uri = Url::from_file_path("/other/path/myfile.masm").unwrap();

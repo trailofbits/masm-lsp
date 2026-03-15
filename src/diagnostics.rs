@@ -35,7 +35,7 @@ pub fn normalize_message(msg: &str) -> String {
     result
 }
 
-/// Convert a miden diagnostics report into LSP diagnostics.
+/// Convert a Miden diagnostics report into LSP diagnostics.
 pub fn diagnostics_from_report(
     sources: &DefaultSourceManager,
     uri: &Url,
