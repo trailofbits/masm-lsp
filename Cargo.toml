@@ -3,14 +3,14 @@ members = [".", "crates/masm-instructions", "crates/masm-analysis"]
 resolver = "2"
 
 [workspace.dependencies]
-masm-decompiler = { version = "=0.4.0", git = "https://github.com/trailofbits/masm-decompiler", rev = "1f4e8086d82af2de03721802e1a7f13fb643b3fc" }
+masm-decompiler = { version = "=0.4.2", git = "https://github.com/trailofbits/masm-decompiler", rev = "831541b3480d4143dba75669333c4a4572ab951a" }
 miden-assembly-syntax = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
 miden-debug-types = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
 miden-utils-diagnostics = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
 
 [package]
 name = "masm-lsp"
-version = "0.4.0"
+version = "0.4.2"
 authors = ["Trail of Bits"]
 homepage = "https://trailofbits.com"
 repository = "https://github.com/trailofbits/masm-decompiler"

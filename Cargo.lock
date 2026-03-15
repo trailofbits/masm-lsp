@@ -1401,8 +1401,8 @@ dependencies = [
 
 [[package]]
 name = "masm-decompiler"
-version = "0.4.0"
-source = "git+https://github.com/trailofbits/masm-decompiler?rev=1f4e8086d82af2de03721802e1a7f13fb643b3fc#1f4e8086d82af2de03721802e1a7f13fb643b3fc"
+version = "0.4.2"
+source = "git+https://github.com/trailofbits/masm-decompiler?rev=831541b3480d4143dba75669333c4a4572ab951a#831541b3480d4143dba75669333c4a4572ab951a"
 dependencies = [
  "clap",
  "log",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "masm-lsp"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "async-trait",
  "clap",
