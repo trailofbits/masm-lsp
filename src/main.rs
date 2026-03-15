@@ -34,7 +34,7 @@ async fn main() {
 #[derive(Parser, Debug)]
 #[command(name = "masm-lsp")]
 struct Args {
-    /// Path to the miden-vm repo root, core library root, or core library asm dir
+    /// Path to the miden-vm repo root, or core library root
     #[arg(long)]
     core_path: Option<PathBuf>,
 }
