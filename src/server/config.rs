@@ -4,7 +4,7 @@
 //! received via `didChangeConfiguration` notifications.
 
 use crate::core_lib::default_core_library_path;
-use crate::{InlayHintType, LibraryPath};
+use crate::{DecompilationConfig, InlayHintType, LibraryPath};
 
 /// Extract the code lens stack effect toggle from LSP settings.
 ///
@@ -90,6 +90,57 @@ pub fn extract_inlay_hint_type(settings: &serde_json::Value) -> Option<InlayHint
         "none" | "disabled" | "off" => Some(InlayHintType::None),
         _ => None,
     }
+}
+
+/// Extract the decompilation optimization configuration from LSP settings.
+///
+/// Expects settings in the format:
+/// ```json
+/// { "masm-lsp": { "decompilation": { "expressionPropagation": true, "deadCodeElimination": false, "simplification": true } } }
+/// ```
+///
+/// Individual flags that are absent or non-boolean are left at their default (`true`).
+/// Returns `None` when the `"decompilation"` key is missing entirely, signalling
+/// that the caller should keep its current configuration.
+pub fn extract_decompilation_config(settings: &serde_json::Value) -> Option<DecompilationConfig> {
+    let section = settings
+        .get("masm-lsp")
+        .and_then(|v| v.get("decompilation"))?;
+
+    let mut config = DecompilationConfig::default();
+
+    if let Some(v) = section.get("expressionPropagation").and_then(|v| v.as_bool()) {
+        config.expression_propagation = v;
+    }
+    if let Some(v) = section
+        .get("deadCodeElimination")
+        .and_then(|v| v.as_bool())
+    {
+        config.dead_code_elimination = v;
+    }
+    if let Some(v) = section.get("simplification").and_then(|v| v.as_bool()) {
+        config.simplification = v;
+    }
+
+    Some(config)
+}
+
+/// Format a comment header describing which decompiler optimizations are enabled.
+pub fn format_decompilation_config_header(config: &DecompilationConfig) -> String {
+    fn status(enabled: bool) -> &'static str {
+        if enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    }
+
+    format!(
+        "# expression propagation: {}\n# dead-code elimination: {}\n# simplification: {}",
+        status(config.expression_propagation),
+        status(config.dead_code_elimination),
+        status(config.simplification),
+    )
 }
 
 #[cfg(test)]
@@ -283,5 +334,98 @@ mod tests {
             }
         });
         assert_eq!(extract_inlay_hint_type(&settings), None);
+    }
+
+    #[test]
+    fn extract_decompilation_config_all_flags() {
+        let settings = json!({
+            "masm-lsp": {
+                "decompilation": {
+                    "expressionPropagation": false,
+                    "deadCodeElimination": false,
+                    "simplification": false
+                }
+            }
+        });
+        let config = extract_decompilation_config(&settings).unwrap();
+        assert!(!config.expression_propagation);
+        assert!(!config.dead_code_elimination);
+        assert!(!config.simplification);
+    }
+
+    #[test]
+    fn extract_decompilation_config_partial_flags() {
+        let settings = json!({
+            "masm-lsp": {
+                "decompilation": {
+                    "deadCodeElimination": false
+                }
+            }
+        });
+        let config = extract_decompilation_config(&settings).unwrap();
+        assert!(config.expression_propagation);
+        assert!(!config.dead_code_elimination);
+        assert!(config.simplification);
+    }
+
+    #[test]
+    fn extract_decompilation_config_empty_section_returns_defaults() {
+        let settings = json!({
+            "masm-lsp": {
+                "decompilation": {}
+            }
+        });
+        let config = extract_decompilation_config(&settings).unwrap();
+        assert!(config.expression_propagation);
+        assert!(config.dead_code_elimination);
+        assert!(config.simplification);
+    }
+
+    #[test]
+    fn extract_decompilation_config_missing_returns_none() {
+        let settings = json!({});
+        assert!(extract_decompilation_config(&settings).is_none());
+    }
+
+    #[test]
+    fn extract_decompilation_config_ignores_non_bool_values() {
+        let settings = json!({
+            "masm-lsp": {
+                "decompilation": {
+                    "expressionPropagation": "yes",
+                    "deadCodeElimination": 1
+                }
+            }
+        });
+        let config = extract_decompilation_config(&settings).unwrap();
+        assert!(config.expression_propagation);
+        assert!(config.dead_code_elimination);
+    }
+
+    #[test]
+    fn format_header_all_enabled() {
+        let config = DecompilationConfig::default();
+        let header = format_decompilation_config_header(&config);
+        assert_eq!(
+            header,
+            "# expression propagation: enabled\n\
+             # dead-code elimination: enabled\n\
+             # simplification: enabled"
+        );
+    }
+
+    #[test]
+    fn format_header_mixed() {
+        let config = DecompilationConfig::default()
+            .with_expression_propagation(false)
+            .with_dead_code_elimination(true)
+            .with_simplification(false);
+        let header = format_decompilation_config_header(&config);
+        assert_eq!(
+            header,
+            "# expression propagation: disabled\n\
+             # dead-code elimination: enabled\n\
+             # simplification: disabled"
+        );
     }
 }

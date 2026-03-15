@@ -24,7 +24,8 @@ use tracing::{debug, info};
 
 use super::backend::{Backend, FileDecompilationError, ProcedureDecompilationError};
 use super::config::{
-    extract_code_lens_stack_effects, extract_inlay_hint_type, extract_library_paths,
+    extract_code_lens_stack_effects, extract_decompilation_config, extract_inlay_hint_type,
+    extract_library_paths, format_decompilation_config_header,
 };
 use super::helpers::{
     extract_doc_comment, extract_procedure_attributes, extract_procedure_signature,
@@ -133,6 +134,10 @@ where
         if let Some(mode) = extract_inlay_hint_type(&params.settings) {
             cfg.inlay_hint_type = mode;
             info!("updated inlay hint type: {:?}", mode);
+        }
+        if let Some(decompilation) = extract_decompilation_config(&params.settings) {
+            cfg.decompilation_config = decompilation;
+            info!("updated decompilation config");
         }
         drop(cfg);
         self.load_configured_libraries().await;
@@ -474,6 +479,7 @@ where
                 source.as_str(),
                 config.inlay_hint_type,
                 Some(&workspace),
+                &config.decompilation_config,
             )
         } else {
             collect_inlay_hints(
@@ -483,6 +489,7 @@ where
                 source.as_str(),
                 config.inlay_hint_type,
                 None,
+                &config.decompilation_config,
             )
         };
         Ok(Some(result.hints))
@@ -508,10 +515,12 @@ where
             .effective_library_paths_from(&config.library_paths)
             .await;
 
+        let decompilation_config = config.decompilation_config.clone();
         let result = self
-            .decompile_file(&uri, &effective_library_paths)
+            .decompile_file(&uri, &effective_library_paths, &decompilation_config)
             .await
             .map_err(decompile_file_command_error)?;
+        let config_header = format_decompilation_config_header(&decompilation_config);
         let procedures = result
             .procedures
             .into_iter()
@@ -552,6 +561,7 @@ where
             "uri": uri,
             "modulePath": result.module_path,
             "useStatements": result.use_statements,
+            "configHeader": config_header,
             "status": status,
             "summary": {
                 "totalProcedures": total_count,
@@ -579,7 +589,12 @@ where
             .await;
 
         match self
-            .decompile_procedure_at_position(&uri, position, &effective_library_paths)
+            .decompile_procedure_at_position(
+                &uri,
+                position,
+                &effective_library_paths,
+                &config.decompilation_config,
+            )
             .await
         {
             Ok(result) => Ok(Some(serde_json::json!({

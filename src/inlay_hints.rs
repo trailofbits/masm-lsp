@@ -3,7 +3,7 @@ use std::sync::Arc;
 use masm_decompiler::{
     fmt::{CodeWriter, FormattingConfig},
     frontend::Workspace,
-    DecompilationError, Decompiler,
+    DecompilationConfig, DecompilationError, Decompiler,
 };
 use masm_instructions::ToDescription;
 use miden_assembly_syntax::ast::{Block, Instruction, Module, Op};
@@ -33,11 +33,19 @@ pub fn collect_inlay_hints(
     source_text: &str,
     hint_type: InlayHintType,
     decompilation_workspace: Option<&Workspace>,
+    decompilation_config: &DecompilationConfig,
 ) -> InlayHintResult {
     match hint_type {
         InlayHintType::Decompilation => decompilation_workspace
             .map(|workspace| {
-                collect_decompilation_hints(module, sources, visible_range, source_text, workspace)
+                collect_decompilation_hints(
+                    module,
+                    sources,
+                    visible_range,
+                    source_text,
+                    workspace,
+                    decompilation_config,
+                )
             })
             .unwrap_or(InlayHintResult {
                 hints: Vec::new(),
@@ -62,10 +70,11 @@ pub fn collect_decompilation_diagnostics(
     module: &Module,
     sources: Arc<DefaultSourceManager>,
     workspace: &Workspace,
+    decompilation_config: &DecompilationConfig,
 ) -> Vec<Diagnostic> {
     let module_path = module.path().to_string();
     let unresolved_modules = workspace.unresolved_module_paths();
-    let decompiler = Decompiler::new(workspace);
+    let decompiler = Decompiler::new(workspace).with_config(decompilation_config.clone());
     let mut diagnostics = Vec::new();
 
     for proc in module.procedures() {
@@ -103,11 +112,12 @@ fn collect_decompilation_hints(
     visible_range: &Range,
     source_text: &str,
     workspace: &Workspace,
+    decompilation_config: &DecompilationConfig,
 ) -> InlayHintResult {
     let module_path = module.path().to_string();
     let unresolved_modules = workspace.unresolved_module_paths();
 
-    let decompiler = Decompiler::new(workspace);
+    let decompiler = Decompiler::new(workspace).with_config(decompilation_config.clone());
     let line_lengths: Vec<u32> = source_text
         .lines()
         .map(|line| line.trim_end().len() as u32)

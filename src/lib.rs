@@ -13,6 +13,7 @@ pub mod service;
 pub mod util;
 
 pub use cursor_resolution::ResolutionError;
+pub use masm_decompiler::decompile::DecompilationConfig;
 pub use masm_decompiler::SymbolPath;
 
 /// The type of inlay hints to display.
@@ -38,6 +39,8 @@ pub struct ServerConfig {
     pub taint_analysis_enabled: bool,
     /// The inlay hint type to display.
     pub inlay_hint_type: InlayHintType,
+    /// Decompiler optimization configuration.
+    pub decompilation_config: DecompilationConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +58,8 @@ impl Default for ServerConfig {
             taint_analysis_enabled: true,
             // Decompilation hints are shown by default.
             inlay_hint_type: InlayHintType::Decompilation,
+            // All optimizations are enabled by default.
+            decompilation_config: DecompilationConfig::default(),
         }
     }
 }
@@ -73,6 +78,7 @@ pub struct ServerConfigBuilder {
     code_lens_stack_effects: Option<bool>,
     taint_analysis_enabled: Option<bool>,
     inlay_hint_type: Option<InlayHintType>,
+    decompilation_config: Option<DecompilationConfig>,
 }
 
 impl ServerConfigBuilder {
@@ -100,6 +106,12 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set the decompiler optimization configuration.
+    pub fn decompilation_config(mut self, config: DecompilationConfig) -> Self {
+        self.decompilation_config = Some(config);
+        self
+    }
+
     /// Build the `ServerConfig` with the configured values.
     ///
     /// Uses defaults for any values not explicitly set.
@@ -109,6 +121,9 @@ impl ServerConfigBuilder {
             code_lens_stack_effects: self.code_lens_stack_effects.unwrap_or(true),
             taint_analysis_enabled: self.taint_analysis_enabled.unwrap_or(true),
             inlay_hint_type: self.inlay_hint_type.unwrap_or(InlayHintType::Decompilation),
+            decompilation_config: self
+                .decompilation_config
+                .unwrap_or_else(DecompilationConfig::default),
         }
     }
 }

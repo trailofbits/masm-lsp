@@ -19,7 +19,7 @@ use masm_decompiler::{
         infer_type_summaries, InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary,
         TypeSummaryMap,
     },
-    Decompiler,
+    DecompilationConfig, Decompiler,
 };
 
 use miden_assembly_syntax::ast::{Module, Procedure};
@@ -381,6 +381,7 @@ where
         uri: &Url,
         position: Position,
         library_paths: &[LibraryPath],
+        decompilation_config: &DecompilationConfig,
     ) -> Result<ProcedureDecompilation, ProcedureDecompilationError> {
         let Some(doc) = self.get_or_parse_document(uri).await else {
             return Err(ProcedureDecompilationError::DocumentUnavailable(format!(
@@ -428,7 +429,7 @@ where
             format!("{module_path}::{proc_name}")
         };
 
-        let decompiler = Decompiler::new(&workspace);
+        let decompiler = Decompiler::new(&workspace).with_config(decompilation_config.clone());
         let decompiled = match decompiler.decompile_proc(&fq_name) {
             Ok(value) => value,
             Err(error) => {
@@ -471,6 +472,7 @@ where
         &self,
         uri: &Url,
         library_paths: &[LibraryPath],
+        decompilation_config: &DecompilationConfig,
     ) -> Result<FileDecompilation, FileDecompilationError> {
         let Some(doc) = self.get_or_parse_document(uri).await else {
             return Err(FileDecompilationError::DocumentUnavailable(format!(
@@ -488,7 +490,7 @@ where
         let workspace = self
             .build_analysis_workspace(Some(uri), library_paths)
             .await;
-        let decompiler = Decompiler::new(&workspace);
+        let decompiler = Decompiler::new(&workspace).with_config(decompilation_config.clone());
 
         let mut procedures = Vec::new();
         let mut failures = Vec::new();
@@ -691,7 +693,12 @@ where
                 == crate::InlayHintType::Decompilation
             {
                 if let (Ok(doc), Some(workspace)) = (&parse_result, analysis_workspace.as_ref()) {
-                    collect_decompilation_diagnostics(&doc.module, self.sources.clone(), workspace)
+                    collect_decompilation_diagnostics(
+                        &doc.module,
+                        self.sources.clone(),
+                        workspace,
+                        &config.decompilation_config,
+                    )
                 } else {
                     Vec::new()
                 }
