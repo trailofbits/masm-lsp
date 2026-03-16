@@ -6,6 +6,41 @@ pub trait ToStackEffect {
     fn to_stack_effect(&self) -> Option<String>;
 }
 
+/// Returns the stack effect for push instructions that operate on inline words.
+///
+/// Handles `push.[a, b, c, d]` (word push) and `push.[a, b, c, d][i..j]` (word
+/// slice push). For word pushes, element `a` ends up on top of the stack. Returns
+/// `None` for all other instruction forms, so the caller can fall through to
+/// template-based lookup.
+fn inline_word_stack_effect(inst: &miden_assembly_syntax::ast::Instruction) -> Option<String> {
+    use miden_assembly_syntax::ast::{Immediate, Instruction};
+    use miden_assembly_syntax::parser::{PushValue, WordValue};
+    use miden_assembly_syntax::Felt;
+
+    fn fmt_felts(felts: &[Felt]) -> String {
+        felts
+            .iter()
+            .map(|f| f.as_canonical_u64().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    match inst {
+        Instruction::Push(Immediate::Value(spanned)) => {
+            let PushValue::Word(WordValue(felts)) = spanned.into_inner() else {
+                return None;
+            };
+            Some(format!("(...) \u{2192} ({}, ...)", fmt_felts(&felts)))
+        }
+        Instruction::PushSlice(Immediate::Value(spanned), range) => {
+            let WordValue(felts) = spanned.into_inner();
+            let slice = felts.get(range.clone())?;
+            Some(format!("(...) \u{2192} ({}, ...)", fmt_felts(slice)))
+        }
+        _ => None,
+    }
+}
+
 fn apply_template(template: &str, value: &str) -> String {
     let mut rendered = replace_offset_placeholders(template, value);
     rendered = rendered.replace("{n}", value);
@@ -147,6 +182,9 @@ macro_rules! impl_instruction_traits {
 
         impl ToStackEffect for miden_assembly_syntax::ast::Instruction {
             fn to_stack_effect(&self) -> Option<String> {
+                if let Some(effect) = inline_word_stack_effect(self) {
+                    return Some(effect);
+                }
                 stack_effect_for_name(&self.to_string())
             }
         }
@@ -157,7 +195,7 @@ include!(concat!(env!("OUT_DIR"), "/instruction_data.rs"));
 
 #[cfg(test)]
 mod tests {
-    use super::apply_template;
+    use super::{apply_template, inline_word_stack_effect};
 
     #[test]
     fn apply_template_numeric_ordinal() {
@@ -221,5 +259,96 @@ mod tests {
     fn apply_template_offset_non_numeric_is_unchanged() {
         let template = "Value {n+3}.";
         assert_eq!(apply_template(template, "CONST"), "Value {n+3}.");
+    }
+
+    fn felt(v: u64) -> miden_assembly_syntax::Felt {
+        miden_assembly_syntax::Felt::new(v)
+    }
+
+    fn push_word_inst(
+        felts: [miden_assembly_syntax::Felt; 4],
+    ) -> miden_assembly_syntax::ast::Instruction {
+        use miden_assembly_syntax::ast::{Immediate, Instruction};
+        use miden_assembly_syntax::parser::{PushValue, WordValue};
+        Instruction::Push(Immediate::Value(miden_assembly_syntax::debuginfo::Span::unknown(
+            PushValue::Word(WordValue(felts)),
+        )))
+    }
+
+    fn push_slice_inst(
+        felts: [miden_assembly_syntax::Felt; 4],
+        range: core::ops::Range<usize>,
+    ) -> miden_assembly_syntax::ast::Instruction {
+        use miden_assembly_syntax::ast::{Immediate, Instruction};
+        use miden_assembly_syntax::parser::WordValue;
+        Instruction::PushSlice(
+            Immediate::Value(miden_assembly_syntax::debuginfo::Span::unknown(WordValue(felts))),
+            range,
+        )
+    }
+
+    fn push_int_inst(v: u8) -> miden_assembly_syntax::ast::Instruction {
+        use miden_assembly_syntax::ast::{Immediate, Instruction};
+        use miden_assembly_syntax::parser::{IntValue, PushValue};
+        Instruction::Push(Immediate::Value(miden_assembly_syntax::debuginfo::Span::unknown(
+            PushValue::Int(IntValue::U8(v)),
+        )))
+    }
+
+    #[test]
+    fn inline_word_stack_effect_basic() {
+        let inst = push_word_inst([felt(1), felt(2), felt(3), felt(4)]);
+        assert_eq!(
+            inline_word_stack_effect(&inst),
+            Some("(...) \u{2192} (1, 2, 3, 4, ...)".to_string())
+        );
+    }
+
+    #[test]
+    fn inline_word_stack_effect_zeros() {
+        let inst = push_word_inst([felt(1), felt(0), felt(0), felt(0)]);
+        assert_eq!(
+            inline_word_stack_effect(&inst),
+            Some("(...) \u{2192} (1, 0, 0, 0, ...)".to_string())
+        );
+    }
+
+    #[test]
+    fn inline_word_stack_effect_returns_none_for_int_push() {
+        let inst = push_int_inst(42);
+        assert_eq!(inline_word_stack_effect(&inst), None);
+    }
+
+    #[test]
+    fn push_slice_stack_effect_single_element() {
+        let inst = push_slice_inst([felt(10), felt(20), felt(30), felt(40)], 0..1);
+        assert_eq!(
+            inline_word_stack_effect(&inst),
+            Some("(...) \u{2192} (10, ...)".to_string())
+        );
+    }
+
+    #[test]
+    fn push_slice_stack_effect_range() {
+        let inst = push_slice_inst([felt(10), felt(20), felt(30), felt(40)], 1..3);
+        assert_eq!(
+            inline_word_stack_effect(&inst),
+            Some("(...) \u{2192} (20, 30, ...)".to_string())
+        );
+    }
+
+    #[test]
+    fn push_slice_stack_effect_full_range() {
+        let inst = push_slice_inst([felt(1), felt(2), felt(3), felt(4)], 0..4);
+        assert_eq!(
+            inline_word_stack_effect(&inst),
+            Some("(...) \u{2192} (1, 2, 3, 4, ...)".to_string())
+        );
+    }
+
+    #[test]
+    fn push_slice_stack_effect_out_of_range() {
+        let inst = push_slice_inst([felt(1), felt(2), felt(3), felt(4)], 2..5);
+        assert_eq!(inline_word_stack_effect(&inst), None);
     }
 }
