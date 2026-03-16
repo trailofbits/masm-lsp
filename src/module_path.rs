@@ -31,10 +31,10 @@ impl<'a> ModulePathResolver<'a> {
     pub fn resolve(&self, uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
         if let Ok(fs_path) = uri.to_file_path() {
             for lib in self.library_paths {
-                if fs_path.starts_with(&lib.root) {
-                    if let Some(buf) = build_path_from_root(&fs_path, &lib.root, &lib.prefix) {
-                        return Some(buf);
-                    }
+                if fs_path.starts_with(&lib.root)
+                    && let Some(buf) = build_path_from_root(&fs_path, &lib.root, &lib.prefix)
+                {
+                    return Some(buf);
                 }
             }
         }
@@ -61,10 +61,10 @@ fn build_path_from_root(
     for (i, comp) in parts.iter().enumerate() {
         let mut seg = comp.to_string_lossy();
         // Strip file extension from the last component
-        if i == parts.len().saturating_sub(1) {
-            if let Some(stripped) = seg.split('.').next() {
-                seg = std::borrow::Cow::Owned(stripped.to_string());
-            }
+        if i == parts.len().saturating_sub(1)
+            && let Some(stripped) = seg.split('.').next()
+        {
+            seg = std::borrow::Cow::Owned(stripped.to_string());
         }
         if seg.is_empty() {
             continue;

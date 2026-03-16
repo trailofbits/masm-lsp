@@ -162,7 +162,7 @@ fn collect_decompilation_hints(
                 }
                 if let Some(diag) = decompilation_error_diagnostic(
                     sources.as_ref(),
-                    proc_range.clone(),
+                    proc_range,
                     &proc_name,
                     error,
                 ) {

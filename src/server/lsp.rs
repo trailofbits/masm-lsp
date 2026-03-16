@@ -178,25 +178,24 @@ where
         let pos = params.text_document_position_params.position;
         let miden_uri = to_miden_uri(&uri);
 
-        if let Some(source) = self.sources.get_by_uri(&miden_uri) {
-            if is_on_use_statement(source.as_str(), pos) {
-                if let Some(token) = extract_token_at_position(&source, pos) {
-                    let normalized = token.trim_start_matches(':');
-                    let workspace = self.workspace.read().await;
+        if let Some(source) = self.sources.get_by_uri(&miden_uri)
+            && is_on_use_statement(source.as_str(), pos)
+            && let Some(token) = extract_token_at_position(&source, pos)
+        {
+            let normalized = token.trim_start_matches(':');
+            let workspace = self.workspace.read().await;
 
-                    if let Some(loc) =
-                        workspace
-                            .definition(&format!("::{}", normalized))
-                            .or_else(|| {
-                                normalized
-                                    .rsplit("::")
-                                    .next()
-                                    .and_then(|name| workspace.definition_by_name(name))
-                            })
-                    {
-                        return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
-                    }
-                }
+            if let Some(loc) =
+                workspace
+                    .definition(&format!("::{}", normalized))
+                    .or_else(|| {
+                        normalized
+                            .rsplit("::")
+                            .next()
+                            .and_then(|name| workspace.definition_by_name(name))
+                    })
+            {
+                return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
             }
         }
 
@@ -629,12 +628,11 @@ fn workspace_parse_paths_from_initialize(params: &InitializeParams) -> Vec<Libra
         }
     }
 
-    if roots.is_empty() {
-        if let Some(root_uri) = &params.root_uri {
-            if let Ok(path) = root_uri.to_file_path() {
-                roots.push(path);
-            }
-        }
+    if roots.is_empty()
+        && let Some(root_uri) = &params.root_uri
+        && let Ok(path) = root_uri.to_file_path()
+    {
+        roots.push(path);
     }
 
     if roots.is_empty() {

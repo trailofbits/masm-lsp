@@ -59,15 +59,15 @@ fn resolve_core_library_root_from(core_path: Option<&Path>, cwd: Option<&Path>) 
         return root;
     }
 
-    if let Some(cwd) = cwd {
-        if let Some(root) = discover_core_library_from(cwd) {
-            tracing::info!(
-                "resolved core library by walking from {}: {}",
-                cwd.display(),
-                root.display()
-            );
-            return root;
-        }
+    if let Some(cwd) = cwd
+        && let Some(root) = discover_core_library_from(cwd)
+    {
+        tracing::info!(
+            "resolved core library by walking from {}: {}",
+            cwd.display(),
+            root.display()
+        );
+        return root;
     }
 
     let root = core_library_root_from_repo_root(&ensure_default_repo());

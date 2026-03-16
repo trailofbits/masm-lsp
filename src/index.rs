@@ -430,10 +430,10 @@ fn constant_like_tokens(text: &str) -> Vec<(usize, usize, String)> {
             i += 1;
         }
         let end = i;
-        if let Some(token) = text.get(start..end) {
-            if is_constant_identifier_candidate(token) {
-                out.push((start, end, token.to_string()));
-            }
+        if let Some(token) = text.get(start..end)
+            && is_constant_identifier_candidate(token)
+        {
+            out.push((start, end, token.to_string()));
         }
     }
 

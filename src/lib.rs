@@ -123,7 +123,7 @@ impl ServerConfigBuilder {
             inlay_hint_type: self.inlay_hint_type.unwrap_or(InlayHintType::Decompilation),
             decompilation_config: self
                 .decompilation_config
-                .unwrap_or_else(DecompilationConfig::default),
+                .unwrap_or_default(),
         }
     }
 }

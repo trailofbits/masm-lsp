@@ -88,10 +88,10 @@ where
     let mut results = workspace_service.find_references(&resolved.path);
 
     // Include the definition if requested
-    if include_declaration {
-        if let Some(def) = workspace_service.find_definition(&resolved.path) {
-            results.push(def);
-        }
+    if include_declaration
+        && let Some(def) = workspace_service.find_definition(&resolved.path)
+    {
+        results.push(def);
     }
 
     if results.is_empty() {

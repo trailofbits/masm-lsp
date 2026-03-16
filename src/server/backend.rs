@@ -435,12 +435,12 @@ where
             Err(error) => {
                 let diagnostic = decompilation_error_diagnostic(
                     self.sources.as_ref(),
-                    proc_range.clone(),
+                    proc_range,
                     &proc_name,
                     error,
                 )
                 .unwrap_or_else(|| Diagnostic {
-                    range: proc_range.clone(),
+                    range: proc_range,
                     severity: Some(DiagnosticSeverity::WARNING),
                     source: Some(SOURCE_DECOMPILATION.to_string()),
                     code: Some(NumberOrString::String("decompilation-failed".to_string())),
@@ -510,7 +510,7 @@ where
                 Err(error) => {
                     let diagnostic = decompilation_error_diagnostic(
                         self.sources.as_ref(),
-                        proc_range.clone(),
+                        proc_range,
                         &proc_name,
                         error,
                     )
@@ -798,13 +798,12 @@ where
             return;
         };
 
-        if matches!(program.origin, ProgramOrigin::DiskTracked) {
-            if let Ok(path) = uri.to_file_path() {
-                if let Ok(text) = fs::read_to_string(path) {
-                    self.sources
-                        .load(SourceLanguage::Masm, to_miden_uri(uri), text);
-                }
-            }
+        if matches!(program.origin, ProgramOrigin::DiskTracked)
+            && let Ok(path) = uri.to_file_path()
+            && let Ok(text) = fs::read_to_string(path)
+        {
+            self.sources
+                .load(SourceLanguage::Masm, to_miden_uri(uri), text);
         }
 
         let version = self.documents.get_version(uri).await.unwrap_or(0);

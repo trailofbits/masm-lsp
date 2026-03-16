@@ -105,10 +105,10 @@ fn build_error_message(
     let label_is_unhelpful = label_msg.map(is_unhelpful_label_message).unwrap_or(true);
 
     // If we have a helpful label message, use it
-    if !label_is_unhelpful {
-        if let Some(msg) = label_msg {
-            return msg.to_string();
-        }
+    if !label_is_unhelpful
+        && let Some(msg) = label_msg
+    {
+        return msg.to_string();
     }
 
     // Try to extract token information from the unhelpful message
@@ -122,10 +122,11 @@ fn build_error_message(
         // Build a message with what was found and what was expected
         if let Some(ref token) = found_token {
             // Try to get the actual text at the error location
-            if let Some(actual_text) = get_text_at_offset(source, offset) {
-                if actual_text != *token && !actual_text.is_empty() {
-                    return format!("Unexpected '{}'; {}", actual_text, simplified_expected);
-                }
+            if let Some(actual_text) = get_text_at_offset(source, offset)
+                && actual_text != *token
+                && !actual_text.is_empty()
+            {
+                return format!("Unexpected '{}'; {}", actual_text, simplified_expected);
             }
             return format!("Unexpected {}; {}", token, simplified_expected);
         } else {
@@ -172,10 +173,10 @@ fn simplify_expected_tokens(help: &str) -> String {
         let mut parts: Vec<&str> = help.split(", or ").take(3).collect();
 
         // Clean up "expected" prefix if present
-        if let Some(first) = parts.first_mut() {
-            if first.starts_with("expected ") {
-                *first = &first[9..];
-            }
+        if let Some(first) = parts.first_mut()
+            && first.starts_with("expected ")
+        {
+            *first = &first[9..];
         }
 
         let remaining = alt_count - 3;

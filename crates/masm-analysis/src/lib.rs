@@ -48,7 +48,7 @@ pub fn signature_mismatches_in_workspace(
     sources: Arc<DefaultSourceManager>,
     workspace: &Workspace,
 ) -> Vec<SignatureMismatch> {
-    let decompiler = Decompiler::new(&workspace);
+    let decompiler = Decompiler::new(workspace);
     let signatures = decompiler.signatures();
     let resolver = module.type_resolver(sources.clone());
 
