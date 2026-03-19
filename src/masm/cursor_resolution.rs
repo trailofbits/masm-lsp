@@ -1,4 +1,5 @@
 use crate::SymbolPath;
+use crate::symbol_resolution;
 use std::sync::Arc;
 
 use crate::util::to_miden_uri;
@@ -222,7 +223,7 @@ fn resolve_procedure_definition(
     name: &str,
 ) -> Result<ResolvedSymbol, ResolutionError> {
     // Use the unified symbol resolution service
-    let resolver = crate::symbol_resolution::create_resolver(module, source_manager);
+    let resolver = symbol_resolution::create_resolver(module, source_manager);
     let path = resolver
         .resolve_symbol(name)
         .map_err(|_| ResolutionError::SymbolNotFound(name.to_string()))?;
@@ -248,7 +249,7 @@ pub fn resolve_invocation_target(
     };
 
     // Use the unified symbol resolution service
-    let resolver = crate::symbol_resolution::create_resolver(module, source_manager);
+    let resolver = symbol_resolution::create_resolver(module, source_manager);
     match resolver.resolve_target(target) {
         Ok(Some(path)) => Ok(ResolvedSymbol {
             path,

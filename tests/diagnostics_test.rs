@@ -8,7 +8,7 @@ mod common;
 use common::fixtures::inline;
 use common::fixtures::load_fixture;
 use common::harness::TestHarness;
-use masm_lsp::diagnostics::{SOURCE_ANALYSIS, SOURCE_DECOMPILATION};
+use masm_lsp::masm::diagnostics::{SOURCE_ANALYSIS, SOURCE_DECOMPILATION};
 use tower_lsp::lsp_types::DiagnosticSeverity;
 
 #[tokio::test]

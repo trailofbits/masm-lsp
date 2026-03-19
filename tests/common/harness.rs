@@ -7,13 +7,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use masm_lsp::client::PublishDiagnostics;
-use masm_lsp::index::DocumentSymbols;
+use masm_lsp::masm::index::DocumentSymbols;
 use masm_lsp::server::Backend;
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::{
     Diagnostic, DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverParams, Location, Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, Url, WorkspaceSymbolParams,
+    HoverParams, Location, Position, PrepareRenameResponse, ReferenceContext, ReferenceParams,
+    RenameParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Url,
+    WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::LanguageServer;
 
@@ -122,7 +123,7 @@ impl TestHarness {
     }
 
     /// Snapshot the current workspace index.
-    pub async fn snapshot_workspace(&self) -> masm_lsp::index::WorkspaceIndex {
+    pub async fn snapshot_workspace(&self) -> masm_lsp::masm::index::WorkspaceIndex {
         self.backend.snapshot_workspace().await
     }
 
@@ -315,5 +316,49 @@ impl TestHarness {
         let mut config = self.backend.snapshot_config().await;
         config.inlay_hint_type = masm_lsp::InlayHintType::None;
         self.backend.update_config(config).await;
+    }
+
+    /// Open a `.dmasm` document with the given content.
+    pub async fn open_dmasm(&self, uri: &Url, text: &str) {
+        let params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "dmasm".into(),
+                version: 1,
+                text: text.to_string(),
+            },
+        };
+        self.backend.did_open(params).await;
+    }
+
+    /// Issue a `textDocument/rename` request.
+    pub async fn rename(
+        &self,
+        uri: &Url,
+        position: Position,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: new_name.to_string(),
+            work_done_progress_params: Default::default(),
+        };
+        self.backend.rename(params).await.ok().flatten()
+    }
+
+    /// Issue a `textDocument/prepareRename` request.
+    pub async fn prepare_rename(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<PrepareRenameResponse> {
+        let params = TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        };
+        self.backend.prepare_rename(params).await.ok().flatten()
     }
 }

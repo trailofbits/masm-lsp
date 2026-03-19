@@ -3,7 +3,7 @@ use miden_assembly_syntax::ast::{Block, Instruction, Module, Op};
 use miden_debug_types::{DefaultSourceManager, Span};
 use tower_lsp::lsp_types::{CodeLens, Command};
 
-use crate::diagnostics::span_to_range;
+use super::diagnostics::span_to_range;
 
 /// Collect stack-effect code lenses for a module.
 pub fn collect_code_lenses(module: &Module, sources: &DefaultSourceManager) -> Vec<CodeLens> {

@@ -8,7 +8,11 @@
       "Bash(find:*)",
       "Bash(cat:*)",
       "Bash(cargo doc:*)",
-      "Bash(cargo metadata:*)"
+      "Bash(cargo metadata:*)",
+      "Bash(cargo build:*)",
+      "Bash(git ls-remote:*)",
+      "Bash(sort -t/ -k3 -V)",
+      "Bash(cargo update:*)"
     ]
   }
 }

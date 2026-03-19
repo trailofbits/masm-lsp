@@ -739,7 +739,7 @@ async fn publish_diagnostics_includes_decompilation_failures_when_hints_are_enab
 
     assert!(
         mem_diags.iter().any(|diag| {
-            diag.source.as_deref() == Some(crate::diagnostics::SOURCE_DECOMPILATION)
+            diag.source.as_deref() == Some(crate::masm::diagnostics::SOURCE_DECOMPILATION)
                 && diag.message.contains("pipe_words_to_memory")
                 && diag.message.contains("incompatible subscripts")
         }),
@@ -1114,7 +1114,7 @@ async fn workspace_folder_noise_does_not_publish_analysis_warning_for_core_libra
         .collect();
     assert!(
         open_mem_diags.iter().all(|diag| {
-            diag.source.as_deref() != Some(crate::diagnostics::SOURCE_ANALYSIS)
+            diag.source.as_deref() != Some(crate::masm::diagnostics::SOURCE_ANALYSIS)
                 && !diag
                     .message
                     .contains("unresolved transitive module dependencies")

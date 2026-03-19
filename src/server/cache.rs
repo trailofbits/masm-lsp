@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::Url;
 
-use crate::index::DocumentSymbols;
+use crate::masm::index::DocumentSymbols;
 
 #[derive(Debug, Default, Clone)]
 struct DocumentState {

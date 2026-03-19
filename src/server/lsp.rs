@@ -1,8 +1,9 @@
 use crate::client::PublishDiagnostics;
-use crate::code_lens::collect_code_lenses;
 use crate::core_lib::{default_core_library_path, normalize_core_library_path};
-use crate::cursor_resolution::resolve_symbol_at_position;
-use crate::inlay_hints::collect_inlay_hints;
+use crate::dmasm::{detect_language, DocumentLanguage};
+use crate::masm::code_lens::collect_code_lenses;
+use crate::masm::cursor_resolution::resolve_symbol_at_position;
+use crate::masm::inlay_hints::collect_inlay_hints;
 use crate::util::{extract_token_at_position, to_miden_uri};
 use crate::{InlayHintType, LibraryPath};
 use miden_debug_types::SourceManager;
@@ -14,9 +15,9 @@ use tower_lsp::{
         CodeLens, CodeLensOptions, CodeLensParams, ExecuteCommandOptions, ExecuteCommandParams,
         GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
         InitializeParams, InitializeResult, InitializedParams, InlayHint, InlayHintParams,
-        Location, MarkupContent, MarkupKind, Position, ReferenceParams, ServerCapabilities,
-        SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
-        WorkspaceSymbolParams,
+        Location, MarkupContent, MarkupKind, Position, ReferenceParams, RenameOptions,
+        ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkspaceEdit, WorkspaceSymbolParams,
     },
     LanguageServer,
 };
@@ -57,6 +58,11 @@ where
             references_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
             workspace_symbol_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
             inlay_hint_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
+            rename_provider: Some(tower_lsp::lsp_types::OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: Default::default(),
+            })),
+            document_symbol_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
             code_lens_provider: Some(CodeLensOptions {
                 resolve_provider: Some(false),
             }),
@@ -151,25 +157,83 @@ where
         let uri = params.text_document.uri;
         let version = params.text_document.version;
         let text = params.text_document.text;
-        let _ = self.handle_open(uri, version, text).await;
+
+        match detect_language(&uri) {
+            DocumentLanguage::Dmasm => {
+                self.handle_open_dmasm(uri, text).await;
+            }
+            DocumentLanguage::Masm => {
+                let _ = self.handle_open(uri, version, text).await;
+            }
+        }
     }
 
     async fn did_change(&self, params: tower_lsp::lsp_types::DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let version = params.text_document.version;
-        self.handle_change(uri, version, params.content_changes)
-            .await;
-        let _ = self.publish_diagnostics(params.text_document.uri).await;
+
+        match detect_language(&uri) {
+            DocumentLanguage::Dmasm => {
+                let miden_uri = crate::util::to_miden_uri(&uri);
+                if let Some(id) = self.sources.find(&miden_uri) {
+                    // Apply incremental changes via the source manager.
+                    for change in &params.content_changes {
+                        let selection =
+                            change.range.map(crate::util::lsp_range_to_selection);
+                        let _ = self.sources.update(
+                            id,
+                            change.text.clone(),
+                            selection,
+                            version,
+                        );
+                    }
+                    // Re-read the full updated text and re-parse.
+                    if let Some(updated) = self.sources.get_by_uri(&miden_uri) {
+                        self.handle_change_dmasm(uri, updated.as_str()).await;
+                    }
+                } else {
+                    // Source not loaded (should not happen if did_open was called).
+                    // Only accept full-document replacements in this fallback.
+                    if let Some(last) = params.content_changes.last() {
+                        if last.range.is_none() {
+                            self.handle_open_dmasm(uri, last.text.clone()).await;
+                        } else {
+                            tracing::warn!(
+                                "DMASM incremental change received but source not loaded: {uri}"
+                            );
+                        }
+                    }
+                }
+            }
+            DocumentLanguage::Masm => {
+                self.handle_change(uri, version, params.content_changes)
+                    .await;
+                let _ = self.publish_diagnostics(params.text_document.uri).await;
+            }
+        }
     }
 
     async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
-        self.handle_close(params.text_document.uri).await;
+        let uri = params.text_document.uri;
+        match detect_language(&uri) {
+            DocumentLanguage::Dmasm => {
+                self.handle_close_dmasm(&uri).await;
+            }
+            DocumentLanguage::Masm => {
+                self.handle_close(uri).await;
+            }
+        }
     }
 
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        if detect_language(&params.text_document_position_params.text_document.uri)
+            == DocumentLanguage::Dmasm
+        {
+            return Ok(None);
+        }
         let config = self.snapshot_config().await;
         let effective_library_paths = self
             .effective_library_paths_from(&config.library_paths)
@@ -239,12 +303,20 @@ where
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        let pos = params.text_document_position_params.position;
+
+        if detect_language(&uri) == DocumentLanguage::Dmasm {
+            let Some(doc) = self.get_dmasm_document(&uri).await else {
+                return Ok(None);
+            };
+            return Ok(crate::dmasm::services::hover(&doc, pos));
+        }
+
         let config = self.snapshot_config().await;
         let effective_library_paths = self
             .effective_library_paths_from(&config.library_paths)
             .await;
-        let uri = params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
         let Some(doc) = self.get_or_parse_document(&uri).await else {
             return Ok(None);
         };
@@ -350,12 +422,20 @@ where
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let pos = params.text_document_position.position;
+
+        if detect_language(&uri) == DocumentLanguage::Dmasm {
+            let Some(doc) = self.get_dmasm_document(&uri).await else {
+                return Ok(None);
+            };
+            return Ok(crate::dmasm::services::references(&doc, &uri, pos));
+        }
+
         let config = self.snapshot_config().await;
         let effective_library_paths = self
             .effective_library_paths_from(&config.library_paths)
             .await;
-        let uri = params.text_document_position.text_document.uri;
-        let pos = params.text_document_position.position;
         let Some(doc) = self.get_or_parse_document(&uri).await else {
             return Ok(None);
         };
@@ -430,6 +510,9 @@ where
     }
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        if detect_language(&params.text_document.uri) == DocumentLanguage::Dmasm {
+            return Ok(Some(vec![]));
+        }
         let config = self.snapshot_config().await;
         if !config.code_lens_stack_effects {
             return Ok(Some(vec![]));
@@ -448,6 +531,9 @@ where
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        if detect_language(&params.text_document.uri) == DocumentLanguage::Dmasm {
+            return Ok(Some(vec![]));
+        }
         let config = self.snapshot_config().await;
         let effective_library_paths = self
             .effective_library_paths_from(&config.library_paths)
@@ -492,6 +578,74 @@ where
             )
         };
         Ok(Some(result.hints))
+    }
+
+    async fn rename(
+        &self,
+        params: tower_lsp::lsp_types::RenameParams,
+    ) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+
+        match detect_language(&uri) {
+            DocumentLanguage::Dmasm => {
+                let Some(doc) = self.get_dmasm_document(&uri).await else {
+                    return Ok(None);
+                };
+                Ok(crate::dmasm::services::rename(
+                    &doc,
+                    &uri,
+                    pos,
+                    &params.new_name,
+                ))
+            }
+            DocumentLanguage::Masm => {
+                // Rename is not supported for MASM files.
+                Ok(None)
+            }
+        }
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: tower_lsp::lsp_types::TextDocumentPositionParams,
+    ) -> Result<Option<tower_lsp::lsp_types::PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let pos = params.position;
+
+        match detect_language(&uri) {
+            DocumentLanguage::Dmasm => {
+                let Some(doc) = self.get_dmasm_document(&uri).await else {
+                    return Ok(None);
+                };
+                Ok(crate::dmasm::services::prepare_rename(&doc, pos)
+                    .map(tower_lsp::lsp_types::PrepareRenameResponse::Range))
+            }
+            DocumentLanguage::Masm => Ok(None),
+        }
+    }
+
+    async fn document_symbol(
+        &self,
+        params: tower_lsp::lsp_types::DocumentSymbolParams,
+    ) -> Result<Option<tower_lsp::lsp_types::DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+
+        match detect_language(&uri) {
+            DocumentLanguage::Dmasm => {
+                let Some(doc) = self.get_dmasm_document(&uri).await else {
+                    return Ok(None);
+                };
+                let symbols = crate::dmasm::services::document_symbols(&doc);
+                Ok(Some(tower_lsp::lsp_types::DocumentSymbolResponse::Nested(
+                    symbols,
+                )))
+            }
+            DocumentLanguage::Masm => {
+                // Document symbols are not currently implemented for MASM.
+                Ok(None)
+            }
+        }
     }
 }
 

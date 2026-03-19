@@ -1,0 +1,17 @@
+use std::math
+
+proc add_and_square(v_0: Felt, v_1: Felt) -> Felt {
+  v_2 = v_0 + v_1;
+  v_3 = v_2 * v_2;
+  return v_3;
+}
+
+proc check_bound(v_0: U32, v_1: U32) -> Bool {
+  v_2 = (v_0 <=_u32 v_1);
+  if (v_2) {
+    v_3 = true;
+  } else {
+    v_3 = false;
+  }
+  return v_3;
+}

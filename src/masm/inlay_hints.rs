@@ -13,7 +13,7 @@ use tower_lsp::lsp_types::{
     Position, Range,
 };
 
-use crate::diagnostics::{normalize_message, span_to_range, SOURCE_DECOMPILATION};
+use super::diagnostics::{normalize_message, span_to_range, SOURCE_DECOMPILATION};
 use crate::InlayHintType;
 
 pub struct InlayHintResult {

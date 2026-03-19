@@ -1,4 +1,5 @@
 use crate::util::to_miden_uri;
+use super::index;
 use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan};
 use miden_utils_diagnostics::{Diagnostic as Midiag, Severity};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
@@ -307,8 +308,8 @@ fn get_context_error_message(
 /// as unresolved invocation targets.
 pub fn unresolved_to_diagnostics(
     _uri: &Url,
-    doc: &crate::index::DocumentSymbols,
-    workspace: &crate::index::WorkspaceIndex,
+    doc: &index::DocumentSymbols,
+    workspace: &index::WorkspaceIndex,
 ) -> Vec<Diagnostic> {
     doc.references
         .iter()

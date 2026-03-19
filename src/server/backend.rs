@@ -35,17 +35,18 @@ use tracing::error;
 
 use crate::{
     client::PublishDiagnostics,
-    cursor_resolution::{
+    dmasm::parser::{parse_dmasm, DmasmDocument},
+    masm::cursor_resolution::{
         find_constant_candidate_at_position, position_to_offset, resolve_symbol_at_position,
         ResolutionError, ResolvedSymbol,
     },
-    diagnostics::{
+    masm::diagnostics::{
         diagnostics_from_report, normalize_message, span_to_range, unresolved_to_diagnostics,
         SOURCE_ANALYSIS, SOURCE_DECOMPILATION,
     },
-    index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
-    inlay_hints::{collect_decompilation_diagnostics, decompilation_error_diagnostic},
-    module_path::ModulePathResolver,
+    masm::index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
+    masm::inlay_hints::{collect_decompilation_diagnostics, decompilation_error_diagnostic},
+    masm::module_path::ModulePathResolver,
     service::DocumentService,
     util::{lsp_range_to_selection, to_miden_uri},
     LibraryPath, ServerConfig, SymbolPath,
@@ -65,6 +66,7 @@ pub struct Backend<C = tower_lsp::Client> {
     pub(crate) workspace_parse_paths: Arc<RwLock<Vec<LibraryPath>>>,
     pub(crate) signature_cache: Arc<SignatureCache>,
     pub(crate) tracked_workspace: Arc<RwLock<TrackedWorkspace>>,
+    pub(crate) dmasm_documents: Arc<RwLock<HashMap<Url, DmasmDocument>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +126,7 @@ impl<C> Backend<C> {
             workspace_parse_paths: Arc::new(RwLock::new(Vec::new())),
             signature_cache: Arc::new(SignatureCache::new()),
             tracked_workspace: Arc::new(RwLock::new(TrackedWorkspace::default())),
+            dmasm_documents: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -151,6 +154,42 @@ impl<C> Backend<C> {
 
     pub async fn snapshot_config(&self) -> ServerConfig {
         self.config.read().await.clone()
+    }
+
+    /// Handle opening a DMASM document.
+    ///
+    /// Stores the text in the source manager (for incremental sync support)
+    /// and parses variable information. No diagnostics are published for
+    /// DMASM files.
+    pub(crate) async fn handle_open_dmasm(&self, uri: Url, text: String) {
+        let miden_uri = to_miden_uri(&uri);
+        // NOTE: SourceLanguage::Masm is the only available variant. The source
+        // manager uses it purely as metadata — text storage is unaffected.
+        // DMASM text stored here will NOT be parsed by the MASM pipeline because
+        // all MASM handlers check the document language before processing.
+        self.sources
+            .load(SourceLanguage::Masm, miden_uri, text.clone());
+        let doc = parse_dmasm(&text);
+        self.dmasm_documents.write().await.insert(uri, doc);
+    }
+
+    /// Handle a change to a DMASM document.
+    pub(crate) async fn handle_change_dmasm(&self, uri: Url, text: &str) {
+        let doc = parse_dmasm(text);
+        self.dmasm_documents.write().await.insert(uri, doc);
+    }
+
+    /// Handle closing a DMASM document.
+    pub(crate) async fn handle_close_dmasm(&self, uri: &Url) {
+        self.dmasm_documents.write().await.remove(uri);
+        // Note: the source manager does not support removal, so the text
+        // may linger until the server shuts down. This is consistent with
+        // how MASM files behave on close.
+    }
+
+    /// Get the parsed DMASM document for a URI, if it exists.
+    pub(crate) async fn get_dmasm_document(&self, uri: &Url) -> Option<DmasmDocument> {
+        self.dmasm_documents.read().await.get(uri).cloned()
     }
 
     pub(crate) async fn set_workspace_parse_paths(&self, paths: Vec<LibraryPath>) {

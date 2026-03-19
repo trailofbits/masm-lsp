@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use masm_decompiler::frontend::Program;
 use tower_lsp::lsp_types::Url;
 
-use crate::index::DocumentSymbols;
+use crate::masm::index::DocumentSymbols;
 use crate::SymbolPath;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,7 +297,7 @@ mod tests {
 
     use miden_debug_types::DefaultSourceManager;
 
-    use crate::index::build_document_symbols;
+    use crate::masm::index::build_document_symbols;
 
     fn tracked_program(
         uri: &str,

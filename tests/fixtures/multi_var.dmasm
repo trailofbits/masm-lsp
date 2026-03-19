@@ -1,0 +1,21 @@
+use std::crypto::sha256
+
+proc hash_loop(v_0: Address, v_1: U32) -> (Felt, Felt, Felt, Felt) {
+  for i in 0..4 {
+    v_(2 + i) = memory[v_0 + i];
+  }
+  (v_6, v_7, v_8, v_9) = exec std::crypto::sha256::hash(v_2, v_3, v_4, v_5);
+  return v_6, v_7, v_8, v_9;
+}
+
+proc constant_proc() -> Felt {
+  v_0 = 42;
+  return v_0;
+}
+
+proc multi_use(v_0: Felt) -> Felt {
+  v_1 = v_0 + v_0;
+  v_2 = v_1 * v_0;
+  v_0 = v_2 + v_1;
+  return v_0;
+}

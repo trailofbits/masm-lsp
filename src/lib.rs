@@ -1,18 +1,14 @@
 pub use masm_decompiler as decompiler;
 pub use masm_decompiler::symbol::resolution as symbol_resolution;
 pub mod client;
-pub mod code_lens;
 pub mod core_lib;
-pub mod cursor_resolution;
-pub mod diagnostics;
-pub mod index;
-pub mod inlay_hints;
-pub mod module_path;
+pub mod dmasm;
+pub mod masm;
 pub mod server;
 pub mod service;
 pub mod util;
 
-pub use cursor_resolution::ResolutionError;
+pub use masm::cursor_resolution::ResolutionError;
 pub use masm_decompiler::decompile::DecompilationConfig;
 pub use masm_decompiler::SymbolPath;
 
