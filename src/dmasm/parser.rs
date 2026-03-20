@@ -254,12 +254,24 @@ fn find_matching_close_brace(lines: &[&str], start_line: usize, start_col: usize
     lines.len().saturating_sub(1)
 }
 
-/// Collect all `v_<id>` variable occurrences in a single line.
+/// DMASM keywords that should not be collected as variable occurrences.
+const DMASM_KEYWORDS: &[&str] = &[
+    "call", "else", "exec", "false", "for", "if", "in", "let", "memory", "proc", "return",
+    "syscall", "true", "use", "while",
+];
+
+/// Check whether an identifier is a DMASM keyword.
+fn is_dmasm_keyword(name: &str) -> bool {
+    DMASM_KEYWORDS.contains(&name)
+}
+
+/// Collect all variable occurrences in a single line.
 ///
-/// Matches simple variables like `v_0`, `v_result`, as well as complex
-/// subscript variables like `v_(2 + i)`. Scanning starts at `from_col`
-/// (byte offset) to support skipping the header portion on the opening
-/// brace line.
+/// Scans for all identifiers (alphabetic start, followed by alphanumeric or
+/// `_`) and collects those that are not keywords or qualified `::` paths.
+/// The `v_(expr)` complex subscript form is handled as a special case.
+/// Scanning starts at `from_col` (byte offset) to support skipping the
+/// header portion on the opening brace line.
 fn collect_variables_in_line(
     line: &str,
     line_num: u32,
@@ -270,61 +282,78 @@ fn collect_variables_in_line(
     let mut pos = from_col;
 
     while pos < bytes.len() {
-        // Look for "v_" pattern.
-        if let Some(offset) = line[pos..].find("v_") {
-            let abs_pos = pos + offset;
-
-            // Make sure this is a word boundary (not part of a longer identifier).
-            if abs_pos > 0 {
-                let prev = bytes[abs_pos - 1] as char;
-                if prev.is_ascii_alphanumeric() || prev == '_' {
-                    pos = abs_pos + 2;
-                    continue;
-                }
-            }
-
-            let start_col = abs_pos as u32;
-            let after_prefix = abs_pos + 2;
-
-            if after_prefix < bytes.len() && bytes[after_prefix] == b'(' {
-                // Complex subscript: v_(expr)
-                if let Some(close) = find_matching_paren(line, after_prefix) {
-                    let end = close + 1;
-                    let name = &line[abs_pos..end];
-                    out.push(VariableOccurrence {
-                        name: name.to_string(),
-                        range: Range::new(
-                            Position::new(line_num, start_col),
-                            Position::new(line_num, end as u32),
-                        ),
-                    });
-                    pos = end;
-                } else {
-                    pos = after_prefix;
-                }
-            } else {
-                // Simple variable: v_0, v_i, v_result
-                let end = line[after_prefix..]
-                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                    .map(|i| after_prefix + i)
-                    .unwrap_or(line.len());
-                if end > after_prefix {
-                    let name = &line[abs_pos..end];
-                    out.push(VariableOccurrence {
-                        name: name.to_string(),
-                        range: Range::new(
-                            Position::new(line_num, start_col),
-                            Position::new(line_num, end as u32),
-                        ),
-                    });
-                    pos = end;
-                } else {
-                    pos = after_prefix;
-                }
-            }
-        } else {
-            break;
+        // Only start scanning at alphabetic characters. This avoids matching
+        // operator suffixes like `_u32` in `<=_u32`.
+        if !bytes[pos].is_ascii_alphabetic() {
+            pos += 1;
+            continue;
         }
+
+        // Word boundary: the preceding character must not be alphanumeric
+        // or `_`, so we don't match inside a longer token.
+        if pos > 0 {
+            let prev = bytes[pos - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                pos += 1;
+                continue;
+            }
+        }
+
+        // Special case: `v_(expr)` complex subscript variables.
+        if bytes[pos] == b'v'
+            && pos + 2 < bytes.len()
+            && bytes[pos + 1] == b'_'
+            && bytes[pos + 2] == b'('
+        {
+            if let Some(close) = find_matching_paren(line, pos + 2) {
+                let end = close + 1;
+                out.push(VariableOccurrence {
+                    name: line[pos..end].to_string(),
+                    range: Range::new(
+                        Position::new(line_num, pos as u32),
+                        Position::new(line_num, end as u32),
+                    ),
+                });
+                pos = end;
+            } else {
+                pos += 3;
+            }
+            continue;
+        }
+
+        // General identifier: extract the full token.
+        let ident_start = pos;
+        while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
+            pos += 1;
+        }
+        let ident = &line[ident_start..pos];
+
+        // Skip qualified paths (e.g. `std::crypto::sha256::hash`).
+        if pos + 1 < bytes.len() && bytes[pos] == b':' && bytes[pos + 1] == b':' {
+            while pos + 1 < bytes.len() && bytes[pos] == b':' && bytes[pos + 1] == b':' {
+                pos += 2;
+                while pos < bytes.len()
+                    && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
+                {
+                    pos += 1;
+                }
+            }
+            continue;
+        }
+
+        // Skip keywords.
+        if is_dmasm_keyword(ident) {
+            continue;
+        }
+
+        // Collect as a variable occurrence.
+        out.push(VariableOccurrence {
+            name: ident.to_string(),
+            range: Range::new(
+                Position::new(line_num, ident_start as u32),
+                Position::new(line_num, pos as u32),
+            ),
+        });
     }
 }
 
@@ -502,14 +531,93 @@ mod tests {
     }
 
     #[test]
-    fn word_boundary_prevents_false_matches() {
-        // "some_v_0" should NOT produce a v_0 match because _ precedes "v_".
+    fn word_boundary_prevents_partial_matches() {
+        // "some_v_0" should be collected as one identifier, not split into
+        // a false "v_0" match.
         let text = "proc foo() {\n  some_v_0 = 1;\n}";
         let doc = parse_dmasm(text);
         let proc = &doc.procedures[0];
+        let var_names: Vec<&str> = proc.variables.iter().map(|v| v.name.as_str()).collect();
         assert!(
-            proc.variables.is_empty(),
-            "should not match v_0 inside some_v_0"
+            var_names.contains(&"some_v_0"),
+            "should collect the full identifier"
         );
+        assert!(
+            !var_names.contains(&"v_0"),
+            "should not split into a partial v_0 match"
+        );
+    }
+
+    #[test]
+    fn renamed_variable_found_in_body() {
+        // After renaming v_0 → input, the parser should find "input" in body.
+        let text = "proc foo(input: Felt) -> Felt {\n  v_1 = input + 1;\n  return v_1;\n}";
+        let doc = parse_dmasm(text);
+        let proc = &doc.procedures[0];
+        let input_count = proc.variables.iter().filter(|v| v.name == "input").count();
+        // Parameter + one body usage.
+        assert_eq!(input_count, 2, "should find 'input' in both parameter and body");
+    }
+
+    #[test]
+    fn renamed_body_local_found_as_identifier() {
+        // After renaming v_1 → sum, body-local "sum" should be collected.
+        let text = "proc foo(v_0: Felt) -> Felt {\n  sum = v_0 + 1;\n  return sum;\n}";
+        let doc = parse_dmasm(text);
+        let proc = &doc.procedures[0];
+        let sum_count = proc.variables.iter().filter(|v| v.name == "sum").count();
+        assert_eq!(sum_count, 2, "should find 'sum' in assignment and return");
+    }
+
+    #[test]
+    fn keywords_not_collected_as_variables() {
+        let text = "proc foo(v_0: Felt) -> Felt {\n  if (v_0) {\n    return true;\n  } else {\n    return false;\n  }\n}";
+        let doc = parse_dmasm(text);
+        let proc = &doc.procedures[0];
+        let var_names: Vec<&str> = proc.variables.iter().map(|v| v.name.as_str()).collect();
+        for kw in &["if", "return", "true", "false", "else"] {
+            assert!(
+                !var_names.contains(kw),
+                "keyword '{kw}' should not be collected as a variable"
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_paths_not_collected_as_variables() {
+        let text = "proc foo() {\n  (v_0, v_1) = exec std::crypto::sha256::hash(v_2);\n}";
+        let doc = parse_dmasm(text);
+        let proc = &doc.procedures[0];
+        let var_names: Vec<&str> = proc.variables.iter().map(|v| v.name.as_str()).collect();
+        assert!(!var_names.contains(&"std"), "should skip qualified path component 'std'");
+        assert!(!var_names.contains(&"crypto"), "should skip qualified path component 'crypto'");
+        assert!(!var_names.contains(&"sha256"), "should skip qualified path component 'sha256'");
+        assert!(!var_names.contains(&"hash"), "should skip qualified path component 'hash'");
+        // But the variables should still be found.
+        assert!(var_names.contains(&"v_0"));
+        assert!(var_names.contains(&"v_1"));
+        assert!(var_names.contains(&"v_2"));
+    }
+
+    #[test]
+    fn operator_suffix_not_collected() {
+        // The `_u32` suffix in `<=_u32` should not be collected.
+        let text = "proc foo(v_0: U32, v_1: U32) -> Bool {\n  v_2 = (v_0 <=_u32 v_1);\n  return v_2;\n}";
+        let doc = parse_dmasm(text);
+        let proc = &doc.procedures[0];
+        let var_names: Vec<&str> = proc.variables.iter().map(|v| v.name.as_str()).collect();
+        assert!(
+            !var_names.iter().any(|n| *n == "_u32" || *n == "u32"),
+            "should not collect operator suffix as variable, got: {var_names:?}"
+        );
+    }
+
+    #[test]
+    fn loop_variable_collected() {
+        let text = "proc foo() {\n  for i in 0..4 {\n    v_0 = i;\n  }\n}";
+        let doc = parse_dmasm(text);
+        let proc = &doc.procedures[0];
+        let i_count = proc.variables.iter().filter(|v| v.name == "i").count();
+        assert_eq!(i_count, 2, "loop variable 'i' should be found on for-line and in body");
     }
 }
