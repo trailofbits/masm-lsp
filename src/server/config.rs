@@ -59,11 +59,7 @@ pub fn extract_library_paths(settings: &serde_json::Value) -> Option<Vec<Library
         }
     }
 
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Extract the inlay hint type from LSP settings.
@@ -109,13 +105,13 @@ pub fn extract_decompilation_config(settings: &serde_json::Value) -> Option<Deco
 
     let mut config = DecompilationConfig::default();
 
-    if let Some(v) = section.get("expressionPropagation").and_then(|v| v.as_bool()) {
-        config.expression_propagation = v;
-    }
     if let Some(v) = section
-        .get("deadCodeElimination")
+        .get("expressionPropagation")
         .and_then(|v| v.as_bool())
     {
+        config.expression_propagation = v;
+    }
+    if let Some(v) = section.get("deadCodeElimination").and_then(|v| v.as_bool()) {
         config.dead_code_elimination = v;
     }
     if let Some(v) = section.get("simplification").and_then(|v| v.as_bool()) {
@@ -128,11 +124,7 @@ pub fn extract_decompilation_config(settings: &serde_json::Value) -> Option<Deco
 /// Format a comment header describing which decompiler optimizations are enabled.
 pub fn format_decompilation_config_header(config: &DecompilationConfig) -> String {
     fn status(enabled: bool) -> &'static str {
-        if enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        if enabled { "enabled" } else { "disabled" }
     }
 
     format!(

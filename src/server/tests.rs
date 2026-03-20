@@ -1,21 +1,21 @@
 use super::*;
+use crate::LibraryPath;
 use crate::client::PublishDiagnostics;
 use crate::core_lib::{
-    core_library_root_from_repo_root, default_core_library_path, default_core_library_symbol_path,
-    DEFAULT_CORE_LIBRARY_PREFIX,
+    DEFAULT_CORE_LIBRARY_PREFIX, core_library_root_from_repo_root, default_core_library_path,
+    default_core_library_symbol_path,
 };
 use crate::util::to_miden_uri;
-use crate::LibraryPath;
 use miden_debug_types::SourceManager;
 use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
+use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types;
 use tower_lsp::lsp_types::{
     Diagnostic, ExecuteCommandParams, Position, TextDocumentContentChangeEvent, Url,
     VersionedTextDocumentIdentifier,
 };
-use tower_lsp::LanguageServer;
 
 fn unique_temp_dir(name: &str) -> std::path::PathBuf {
     let stamp = std::time::SystemTime::now()
@@ -569,14 +569,18 @@ async fn execute_command_decompile_file_includes_all_failures_in_payload() {
         2,
         "expected one failure entry per failed procedure"
     );
-    assert!(failures.iter().any(|entry| entry
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|msg| msg.contains("could not decompile procedure `foo`"))));
-    assert!(failures.iter().any(|entry| entry
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|msg| msg.contains("could not decompile procedure `bar`"))));
+    assert!(failures.iter().any(|entry| {
+        entry
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|msg| msg.contains("could not decompile procedure `foo`"))
+    }));
+    assert!(failures.iter().any(|entry| {
+        entry
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|msg| msg.contains("could not decompile procedure `bar`"))
+    }));
 
     let published = client.take_published().await;
     assert!(
@@ -1027,12 +1031,14 @@ async fn parse_error_without_last_known_good_removes_active_open_state() {
     let ws = backend.snapshot_workspace().await;
     assert!(ws.definition_by_name("proc").is_none());
     assert!(backend.snapshot_document_symbols(&uri).await.is_none());
-    assert!(backend
-        .tracked_workspace
-        .read()
-        .await
-        .active_program_for_uri(&uri)
-        .is_none());
+    assert!(
+        backend
+            .tracked_workspace
+            .read()
+            .await
+            .active_program_for_uri(&uri)
+            .is_none()
+    );
 }
 
 #[tokio::test]

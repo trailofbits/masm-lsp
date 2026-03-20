@@ -9,7 +9,27 @@ use common::fixtures::inline;
 use common::fixtures::load_fixture;
 use common::harness::TestHarness;
 use masm_lsp::masm::diagnostics::{SOURCE_ANALYSIS, SOURCE_DECOMPILATION};
+use tower_lsp::lsp_types::Diagnostic;
 use tower_lsp::lsp_types::DiagnosticSeverity;
+
+fn analysis_warnings(diagnostics: &[Diagnostic]) -> Vec<&Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|diag| {
+            diag.severity == Some(DiagnosticSeverity::WARNING)
+                && diag.source.as_deref() == Some(SOURCE_ANALYSIS)
+        })
+        .collect()
+}
+
+fn analysis_warning_containing<'a>(
+    diagnostics: &'a [Diagnostic],
+    needle: &str,
+) -> Option<&'a Diagnostic> {
+    analysis_warnings(diagnostics)
+        .into_iter()
+        .find(|diag| diag.message.contains(needle))
+}
 
 #[tokio::test]
 async fn valid_source_produces_no_diagnostics() {
@@ -183,6 +203,642 @@ end
         analysis_warnings.is_empty(),
         "expected no analysis warnings for unknown types, got: {:?}",
         analysis_warnings
+    );
+}
+
+#[tokio::test]
+async fn unresolved_modules_suppress_unconstrained_advice_warnings() {
+    let harness = TestHarness::new().await;
+    let content = r#"use ::tmp::missing::add->plus
+
+proc bad
+    adv_push.1
+    push.1
+    u32wrapping_add
+    exec.plus
+end
+"#;
+    let uri = harness
+        .open_inline("advice_unresolved_module_guard.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    assert!(
+        analysis_warnings(&diags).is_empty(),
+        "expected unresolved modules to suppress analysis warnings, got: {:?}",
+        diags
+    );
+    assert!(
+        diags.iter().any(|diag| diag.source.as_deref() != Some(SOURCE_ANALYSIS)),
+        "expected a non-analysis diagnostic from the unresolved dependency, got: {:?}",
+        diags
+    );
+}
+
+#[tokio::test]
+async fn unconstrained_advice_to_u32_operation_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc bad
+    adv_push.1
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness.open_inline("advice_u32_op.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning =
+        analysis_warning_containing(&diags, "Unconstrained advice reaches a u32 operation")
+            .expect("expected unconstrained-advice warning");
+    let related = warning
+        .related_information
+        .as_ref()
+        .expect("expected related source information");
+    assert!(
+        related.iter().any(|info| info.location.uri == uri),
+        "expected source-related information in the same file, got: {:?}",
+        related
+    );
+}
+
+#[tokio::test]
+async fn unconstrained_advice_to_u32_call_argument_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc needs_u32
+    push.1
+    u32wrapping_add
+end
+
+proc caller
+    adv_push.1
+    exec.needs_u32
+end
+"#;
+    let uri = harness.open_inline("advice_u32_call.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings
+            .iter()
+            .any(|diag| diag.message.contains("expects U32")),
+        "expected call-argument unconstrained-advice warning, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn u32cast_sanitizes_unconstrained_advice_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc ok
+    adv_push.1
+    u32cast
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness.open_inline("advice_u32cast.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.is_empty(),
+        "expected no analysis warnings after u32cast, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn direct_u32_intrinsic_sink_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc bad
+    adv_push.1
+    push.1
+    u32overflowing_add
+    drop
+end
+"#;
+    let uri = harness
+        .open_inline("advice_u32_intrinsic.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning =
+        analysis_warning_containing(&diags, "Unconstrained advice reaches a u32 intrinsic")
+            .expect("expected unconstrained-advice intrinsic warning");
+    assert_eq!(
+        warning.source.as_deref(),
+        Some(SOURCE_ANALYSIS),
+        "expected analysis diagnostic, got: {warning:?}"
+    );
+}
+
+#[tokio::test]
+async fn local_round_trip_of_unconstrained_advice_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc local_bad
+    adv_push.1
+    loc_store.0
+    loc_load.0
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness.open_inline("advice_locals.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().any(|diag| diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected local-flow unconstrained-advice warning, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn interprocedural_unconstrained_advice_output_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc source
+    adv_push.1
+end
+
+proc caller
+    exec.source
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness.open_inline("advice_interproc.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().any(|diag| diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected interprocedural unconstrained-advice warning, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn callee_returning_local_advice_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"@locals(1)
+proc source
+    adv_push.1
+    loc_store.0
+    loc_load.0
+end
+
+proc caller
+    exec.source
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_interproc_local.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().any(|diag| diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected local interprocedural unconstrained-advice warning, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn u32_intrinsic_output_is_sanitized_for_follow_on_u32_use() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc source
+    adv_push.1
+    push.1
+    u32overflowing_add
+    drop
+end
+
+proc caller
+    exec.source
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_u32_intrinsic_sanitized.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().all(|diag| !diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected no follow-on u32 warning from sanitized intrinsic output, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn is_odd_output_does_not_trigger_unconstrained_advice_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc ok
+    adv_push.1
+    is_odd
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness.open_inline("advice_is_odd.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    assert!(
+        analysis_warning_containing(&diags, "Unconstrained advice").is_none(),
+        "expected no unconstrained-advice warning after is_odd, got: {:?}",
+        diags
+    );
+}
+
+#[tokio::test]
+async fn unconstrained_advice_warning_includes_multiple_related_sources() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc bad
+    adv_push.1
+    adv_push.1
+    add
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_multi_source.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning =
+        analysis_warning_containing(&diags, "Unconstrained advice reaches a u32 operation")
+            .expect("expected unconstrained-advice warning");
+    let related = warning
+        .related_information
+        .as_ref()
+        .expect("expected related source information");
+    assert_eq!(
+        related.len(),
+        2,
+        "expected two related advice sources, got: {:?}",
+        related
+    );
+}
+
+#[tokio::test]
+async fn interprocedural_warning_includes_cross_file_related_source() {
+    let harness = TestHarness::new().await;
+    let source_uri = harness
+        .open_inline("utils.masm", "proc source\n    adv_push.1\nend\n")
+        .await;
+    let caller_uri = harness
+        .open_inline(
+            "caller.masm",
+            "proc caller\n    exec.utils::source\n    push.1\n    u32wrapping_add\nend\n",
+        )
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&caller_uri).await;
+    let warning =
+        analysis_warning_containing(&diags, "Unconstrained advice reaches a u32 operation")
+            .expect("expected unconstrained-advice warning");
+    let related = warning
+        .related_information
+        .as_ref()
+        .expect("expected related source information");
+    assert!(
+        related.iter().any(|info| info.location.uri == source_uri),
+        "expected cross-file related source information, got: {:?}",
+        related
+    );
+}
+
+#[tokio::test]
+async fn adv_pipe_to_u32_operation_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc pipe_bad
+    padw
+    padw
+    padw
+    push.0
+    adv_pipe
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness.open_inline("advice_adv_pipe.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().any(|diag| diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected adv_pipe unconstrained-advice warning, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn word_local_round_trip_tracks_slots_precisely() {
+    let harness = TestHarness::new().await;
+    let content = r#"@locals(8)
+proc ok
+    adv_push.1
+    push.2
+    push.3
+    push.4
+    loc_storew_be.0
+    dropw
+
+    push.0.0.0.0
+    loc_loadw_be.0
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_word_locals_ok.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().all(|diag| !diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected no u32 warning for clean top word element, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn little_endian_word_local_round_trip_tracks_slots_precisely() {
+    let harness = TestHarness::new().await;
+    let content = r#"@locals(8)
+proc ok
+    adv_push.1
+    push.2
+    push.3
+    push.4
+    loc_storew_le.0
+    dropw
+
+    push.0.0.0.0
+    loc_loadw_le.0
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_word_locals_le_ok.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings.iter().all(|diag| !diag
+            .message
+            .contains("Unconstrained advice reaches a u32 operation")),
+        "expected no u32 warning for clean LE top word element, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn mixed_endian_word_local_round_trip_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"@locals(8)
+proc bad
+    adv_push.1
+    push.2
+    push.3
+    push.4
+    loc_storew_be.0
+    dropw
+
+    push.0.0.0.0
+    loc_loadw_le.0
+    push.1
+    u32wrapping_add
+end
+"#;
+    let uri = harness
+        .open_inline("advice_word_locals_mixed_bad.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning =
+        analysis_warning_containing(&diags, "Unconstrained advice reaches a u32 operation")
+            .expect("expected mixed-endian unconstrained-advice warning");
+    assert_eq!(
+        warning.source.as_deref(),
+        Some(SOURCE_ANALYSIS),
+        "expected analysis diagnostic, got: {warning:?}"
+    );
+}
+
+#[tokio::test]
+async fn unconstrained_advice_to_divisor_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc bad
+    push.2
+    adv_push.1
+    div
+end
+"#;
+    let uri = harness.open_inline("advice_divisor.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning = analysis_warning_containing(&diags, "divisor")
+        .expect("expected divisor unconstrained-advice warning");
+    let related = warning
+        .related_information
+        .as_ref()
+        .expect("expected related source information");
+    assert!(
+        related.iter().any(|info| info.location.uri == uri),
+        "expected source-related information in the same file, got: {:?}",
+        related
+    );
+}
+
+#[tokio::test]
+async fn unconstrained_advice_to_inv_produces_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc bad
+    adv_push.1
+    inv
+end
+"#;
+    let uri = harness.open_inline("advice_inv.masm", content).await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning = analysis_warning_containing(&diags, "inv")
+        .expect("expected inv unconstrained-advice warning");
+    assert_eq!(
+        warning.source.as_deref(),
+        Some(SOURCE_ANALYSIS),
+        "expected analysis diagnostic, got: {warning:?}"
+    );
+}
+
+#[tokio::test]
+async fn interprocedural_nonzero_requirement_produces_call_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc helper
+    inv
+end
+
+proc caller
+    adv_push.1
+    exec.helper
+end
+"#;
+    let uri = harness
+        .open_inline("advice_nonzero_call.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warnings = analysis_warnings(&diags);
+    assert!(
+        warnings
+            .iter()
+            .any(|diag| diag.message.contains("Argument 0") && diag.message.contains("divisor")),
+        "expected interprocedural non-zero call warning, got: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn eq_zero_assertz_suppresses_divisor_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc ok
+    push.2
+    adv_push.1
+    dup.0
+    eq.0
+    assertz
+    div
+end
+"#;
+    let uri = harness
+        .open_inline("advice_divisor_assertz.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    assert!(
+        analysis_warning_containing(&diags, "divisor").is_none(),
+        "expected no divisor warning, got: {:?}",
+        diags
+    );
+}
+
+#[tokio::test]
+async fn eq_zero_else_branch_suppresses_divisor_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc ok
+    push.2
+    adv_push.1
+    dup.0
+    eq.0
+    if.true
+        drop
+    else
+        div
+    end
+end
+"#;
+    let uri = harness
+        .open_inline("advice_divisor_if_else.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    assert!(
+        analysis_warning_containing(&diags, "divisor").is_none(),
+        "expected no divisor warning, got: {:?}",
+        diags
+    );
+}
+
+#[tokio::test]
+async fn proven_nonzero_local_round_trip_suppresses_divisor_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"proc ok
+    push.2
+    adv_push.1
+    dup.0
+    eq.0
+    assertz
+    loc_store.0
+    loc_load.0
+    div
+end
+"#;
+    let uri = harness
+        .open_inline("advice_divisor_local_ok.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    assert!(
+        analysis_warning_containing(&diags, "divisor").is_none(),
+        "expected no divisor warning, got: {:?}",
+        diags
     );
 }
 

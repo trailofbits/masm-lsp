@@ -92,7 +92,7 @@ fn fallback_from_uri(uri: &Url) -> Option<miden_assembly_syntax::ast::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_lib::{default_core_library_path, DEFAULT_CORE_LIBRARY_PREFIX};
+    use crate::core_lib::{DEFAULT_CORE_LIBRARY_PREFIX, default_core_library_path};
     use std::path::PathBuf;
 
     #[test]

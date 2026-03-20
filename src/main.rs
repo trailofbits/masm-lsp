@@ -1,11 +1,11 @@
 use clap::Parser;
 use masm_lsp::{
+    ServerConfig,
     core_lib::{
         core_library_root_from_repo_root, default_core_library_path, discover_core_library_from,
         normalize_core_library_path,
     },
     server::Backend,
-    ServerConfig,
 };
 use std::path::{Path, PathBuf};
 use tower_lsp::{LspService, Server};

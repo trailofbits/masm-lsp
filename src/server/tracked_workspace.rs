@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use masm_decompiler::frontend::Program;
 use tower_lsp::lsp_types::Url;
 
-use crate::masm::index::DocumentSymbols;
 use crate::SymbolPath;
+use crate::masm::index::DocumentSymbols;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProgramOrigin {

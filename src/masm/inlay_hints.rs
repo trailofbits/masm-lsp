@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use masm_decompiler::{
+    DecompilationConfig, DecompilationError, Decompiler,
     fmt::{CodeWriter, FormattingConfig},
     frontend::Workspace,
-    DecompilationConfig, DecompilationError, Decompiler,
 };
 use masm_instructions::ToDescription;
 use miden_assembly_syntax::ast::{Block, Instruction, Module, Op};
@@ -13,7 +13,7 @@ use tower_lsp::lsp_types::{
     Position, Range,
 };
 
-use super::diagnostics::{normalize_message, span_to_range, SOURCE_DECOMPILATION};
+use super::diagnostics::{SOURCE_DECOMPILATION, normalize_message, span_to_range};
 use crate::InlayHintType;
 
 pub struct InlayHintResult {
@@ -160,12 +160,9 @@ fn collect_decompilation_hints(
                 {
                     continue;
                 }
-                if let Some(diag) = decompilation_error_diagnostic(
-                    sources.as_ref(),
-                    proc_range,
-                    &proc_name,
-                    error,
-                ) {
+                if let Some(diag) =
+                    decompilation_error_diagnostic(sources.as_ref(), proc_range, &proc_name, error)
+                {
                     diagnostics.push(diag);
                 }
                 continue;
@@ -427,7 +424,7 @@ fn lift_diagnostic_message(kind: LiftingDiagnosticKind, message: &str) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_lifting_error, lift_diagnostic_message, LiftingDiagnosticKind};
+    use super::{LiftingDiagnosticKind, classify_lifting_error, lift_diagnostic_message};
 
     #[test]
     fn classify_old_unknown_call_target_message() {

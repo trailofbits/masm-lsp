@@ -61,8 +61,7 @@ pub fn parse_dmasm(text: &str) -> DmasmDocument {
         if let Some((name, name_range, params, opening_brace_line, brace_col)) =
             try_parse_proc_header(&lines, i)
         {
-            let close_line =
-                find_matching_close_brace(&lines, opening_brace_line, brace_col + 1);
+            let close_line = find_matching_close_brace(&lines, opening_brace_line, brace_col + 1);
             let proc_range = Range::new(
                 Position::new(i as u32, 0),
                 Position::new(
@@ -372,10 +371,7 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> String {
-        let path = format!(
-            "{}/tests/fixtures/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read_to_string(path).expect("fixture file should exist")
     }
 
@@ -499,7 +495,10 @@ mod tests {
         let proc = &doc.procedures[2]; // multi_use
         let v0_count = proc.variables.iter().filter(|v| v.name == "v_0").count();
         // v_0 appears in: parameter(1) + v_0+v_0(2) + v_1*v_0(1) + v_0=...(1) + return v_0(1) = 6
-        assert_eq!(v0_count, 6, "expected exactly 6 occurrences of v_0, got {v0_count}");
+        assert_eq!(
+            v0_count, 6,
+            "expected exactly 6 occurrences of v_0, got {v0_count}"
+        );
     }
 
     #[test]

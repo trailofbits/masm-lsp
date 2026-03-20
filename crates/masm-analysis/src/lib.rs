@@ -1,9 +1,13 @@
+//! Reusable analysis passes for MASM LSP.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use masm_decompiler::{
+    callgraph::CallGraph,
     frontend::{LibraryRoot, Program, Workspace},
-    signature::ProcSignature,
+    signature::{infer_signatures, ProcSignature, SignatureMap},
+    types::{infer_type_summaries, TypeSummaryMap},
     Decompiler, SymbolPath,
 };
 use miden_assembly_syntax::ast::{
@@ -11,20 +15,36 @@ use miden_assembly_syntax::ast::{
 };
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Spanned};
 
+mod unconstrained_advice;
+
+pub use unconstrained_advice::{
+    infer_unconstrained_advice, infer_unconstrained_advice_in_workspace, AdviceDiagnostic,
+    AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
+};
+
+/// Stack-effect counts extracted from a procedure signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StackSignature {
+    /// Number of inputs.
     pub inputs: usize,
+    /// Number of outputs.
     pub outputs: usize,
 }
 
+/// Mismatch between declared and inferred stack signatures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureMismatch {
+    /// Procedure name without module path.
     pub proc_name: String,
+    /// Source span associated with the mismatch.
     pub span: SourceSpan,
+    /// Declared stack signature.
     pub declared: StackSignature,
+    /// Inferred stack signature.
     pub inferred: StackSignature,
 }
 
+/// Build a temporary workspace for a module and compute signature mismatches.
 pub fn signature_mismatches(
     module: &Module,
     sources: Arc<DefaultSourceManager>,
@@ -43,6 +63,7 @@ pub fn signature_mismatches(
     signature_mismatches_in_workspace(module, sources, &workspace)
 }
 
+/// Compute signature mismatches for a module within an existing workspace.
 pub fn signature_mismatches_in_workspace(
     module: &Module,
     sources: Arc<DefaultSourceManager>,
@@ -91,6 +112,14 @@ pub fn signature_mismatches_in_workspace(
     }
 
     findings
+}
+
+/// Compute the analysis inputs needed by the advice pass in one place.
+pub fn analysis_inputs(workspace: &Workspace) -> (CallGraph, SignatureMap, TypeSummaryMap) {
+    let callgraph = CallGraph::from(workspace);
+    let signatures = infer_signatures(workspace, &callgraph);
+    let (type_summaries, _) = infer_type_summaries(workspace, &callgraph, &signatures);
+    (callgraph, signatures, type_summaries)
 }
 
 fn signature_stack_signature<R>(signature: &FunctionType, resolver: &R) -> Option<StackSignature>

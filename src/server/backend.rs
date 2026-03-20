@@ -3,23 +3,25 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
-use masm_analysis::signature_mismatches_in_workspace;
+use masm_analysis::{
+    AdviceDiagnosticsMap, infer_unconstrained_advice, signature_mismatches_in_workspace,
+};
 use masm_decompiler::{
+    DecompilationConfig, Decompiler,
     callgraph::CallGraph,
     fmt::{CodeWriter, FormattingConfig},
     frontend::{LibraryRoot, Workspace},
-    signature::{infer_signatures, ProcSignature, SignatureMap},
+    signature::{ProcSignature, SignatureMap, infer_signatures},
     symbol::resolution::{resolve_constant_path, resolve_constant_symbol},
     types::{
-        infer_type_summaries, InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary,
-        TypeSummaryMap,
+        InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary, TypeSummaryMap,
+        infer_type_summaries,
     },
-    DecompilationConfig, Decompiler,
 };
 
 use miden_assembly_syntax::ast::{Module, Procedure};
@@ -28,28 +30,28 @@ use miden_debug_types::{DefaultSourceManager, SourceLanguage, SourceManager, Spa
 use miden_utils_diagnostics as diagnostics;
 use tokio::sync::RwLock;
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range,
-    TextDocumentContentChangeEvent, Url,
+    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, NumberOrString,
+    Position, Range, TextDocumentContentChangeEvent, Url,
 };
 use tracing::error;
 
 use crate::{
+    LibraryPath, ServerConfig, SymbolPath,
     client::PublishDiagnostics,
-    dmasm::parser::{parse_dmasm, DmasmDocument},
+    dmasm::parser::{DmasmDocument, parse_dmasm},
     masm::cursor_resolution::{
-        find_constant_candidate_at_position, position_to_offset, resolve_symbol_at_position,
-        ResolutionError, ResolvedSymbol,
+        ResolutionError, ResolvedSymbol, find_constant_candidate_at_position, position_to_offset,
+        resolve_symbol_at_position,
     },
     masm::diagnostics::{
-        diagnostics_from_report, normalize_message, span_to_range, unresolved_to_diagnostics,
-        SOURCE_ANALYSIS, SOURCE_DECOMPILATION,
+        SOURCE_ANALYSIS, SOURCE_DECOMPILATION, diagnostics_from_report, normalize_message,
+        span_to_range, unresolved_to_diagnostics,
     },
-    masm::index::{build_document_symbols, DocumentSymbols, WorkspaceIndex},
+    masm::index::{DocumentSymbols, WorkspaceIndex, build_document_symbols},
     masm::inlay_hints::{collect_decompilation_diagnostics, decompilation_error_diagnostic},
     masm::module_path::ModulePathResolver,
     service::DocumentService,
     util::{lsp_range_to_selection, to_miden_uri},
-    LibraryPath, ServerConfig, SymbolPath,
 };
 
 use super::cache::DocumentCache;
@@ -719,6 +721,11 @@ where
                             &analysis.type_diagnostics,
                             self.sources.as_ref(),
                         ));
+                        diags.extend(advice_flow_diagnostics(
+                            &uri,
+                            &analysis.advice_diagnostics,
+                            self.sources.as_ref(),
+                        ));
                     }
                     diags
                 } else {
@@ -989,6 +996,7 @@ struct AnalysisSnapshot {
     signatures: SignatureMap,
     type_summaries: TypeSummaryMap,
     type_diagnostics: TypeDiagnosticsMap,
+    advice_diagnostics: AdviceDiagnosticsMap,
     unresolved_modules: Vec<SymbolPath>,
 }
 
@@ -999,11 +1007,14 @@ fn infer_analysis_snapshot(workspace: &Workspace) -> AnalysisSnapshot {
     let signatures = infer_signatures(workspace, &callgraph);
     let (type_summaries, type_diagnostics) =
         infer_type_summaries(workspace, &callgraph, &signatures);
+    let (_, advice_diagnostics) =
+        infer_unconstrained_advice(workspace, &callgraph, &signatures, &type_summaries);
 
     AnalysisSnapshot {
         signatures,
         type_summaries,
         type_diagnostics,
+        advice_diagnostics,
         unresolved_modules,
     }
 }
@@ -1343,6 +1354,55 @@ fn type_inconsistency_diagnostics(
         .collect()
 }
 
+fn advice_flow_diagnostics(
+    uri: &Url,
+    diagnostics: &AdviceDiagnosticsMap,
+    sources: &DefaultSourceManager,
+) -> Vec<Diagnostic> {
+    let Some(source_id) = sources.find(&to_miden_uri(uri)) else {
+        return Vec::new();
+    };
+
+    diagnostics
+        .values()
+        .flat_map(|proc_diags| proc_diags.iter())
+        .filter(|diag| diag.span.source_id() == source_id)
+        .map(|diag| {
+            let range = span_to_range(sources, diag.span)
+                .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
+            Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some(SOURCE_ANALYSIS.to_string()),
+                message: normalize_message(&diag.message),
+                related_information: advice_related_information(diag, sources),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn advice_related_information(
+    diag: &masm_analysis::AdviceDiagnostic,
+    sources: &DefaultSourceManager,
+) -> Option<Vec<DiagnosticRelatedInformation>> {
+    let related = diag
+        .origins
+        .iter()
+        .filter_map(|origin| {
+            let source = sources.get(origin.source_id()).ok()?;
+            let uri = Url::parse(source.uri().as_str()).ok()?;
+            let range = span_to_range(sources, *origin)?;
+            Some(DiagnosticRelatedInformation {
+                location: Location { uri, range },
+                message: "possible unconstrained advice source".to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    (!related.is_empty()).then_some(related)
+}
+
 fn signature_mismatch_diagnostics(
     mismatches: Vec<masm_analysis::SignatureMismatch>,
     sources: &DefaultSourceManager,
@@ -1377,13 +1437,11 @@ fn signature_mismatch_message(mismatch: &masm_analysis::SignatureMismatch) -> St
         ),
         (true, false) => format!(
             "the definition declares {} inputs, but the inferred input count is {}",
-            mismatch.declared.inputs,
-            mismatch.inferred.inputs
+            mismatch.declared.inputs, mismatch.inferred.inputs
         ),
         (false, true) => format!(
             "the definition declares {} outputs, but the inferred output count is {}",
-            mismatch.declared.outputs,
-            mismatch.inferred.outputs
+            mismatch.declared.outputs, mismatch.inferred.outputs
         ),
         (false, false) => String::new(),
     }

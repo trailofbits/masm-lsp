@@ -270,9 +270,9 @@ mod tests {
     ) -> miden_assembly_syntax::ast::Instruction {
         use miden_assembly_syntax::ast::{Immediate, Instruction};
         use miden_assembly_syntax::parser::{PushValue, WordValue};
-        Instruction::Push(Immediate::Value(miden_assembly_syntax::debuginfo::Span::unknown(
-            PushValue::Word(WordValue(felts)),
-        )))
+        Instruction::Push(Immediate::Value(
+            miden_assembly_syntax::debuginfo::Span::unknown(PushValue::Word(WordValue(felts))),
+        ))
     }
 
     fn push_slice_inst(
@@ -282,7 +282,9 @@ mod tests {
         use miden_assembly_syntax::ast::{Immediate, Instruction};
         use miden_assembly_syntax::parser::WordValue;
         Instruction::PushSlice(
-            Immediate::Value(miden_assembly_syntax::debuginfo::Span::unknown(WordValue(felts))),
+            Immediate::Value(miden_assembly_syntax::debuginfo::Span::unknown(WordValue(
+                felts,
+            ))),
             range,
         )
     }
@@ -290,9 +292,9 @@ mod tests {
     fn push_int_inst(v: u8) -> miden_assembly_syntax::ast::Instruction {
         use miden_assembly_syntax::ast::{Immediate, Instruction};
         use miden_assembly_syntax::parser::{IntValue, PushValue};
-        Instruction::Push(Immediate::Value(miden_assembly_syntax::debuginfo::Span::unknown(
-            PushValue::Int(IntValue::U8(v)),
-        )))
+        Instruction::Push(Immediate::Value(
+            miden_assembly_syntax::debuginfo::Span::unknown(PushValue::Int(IntValue::U8(v))),
+        ))
     }
 
     #[test]

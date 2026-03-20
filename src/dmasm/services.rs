@@ -119,22 +119,16 @@ pub fn document_symbols(doc: &DmasmDocument) -> Vec<DocumentSymbol> {
 }
 
 /// Find the procedure that contains the given position.
-fn find_procedure_at(
-    doc: &DmasmDocument,
-    position: Position,
-) -> Option<&DmasmProcedure> {
-    doc.procedures.iter().find(|proc| {
-        position.line >= proc.range.start.line && position.line <= proc.range.end.line
-    })
+fn find_procedure_at(doc: &DmasmDocument, position: Position) -> Option<&DmasmProcedure> {
+    doc.procedures
+        .iter()
+        .find(|proc| position.line >= proc.range.start.line && position.line <= proc.range.end.line)
 }
 
 /// Find the variable occurrence at the given position within a procedure.
 ///
 /// Uses exclusive end (standard LSP range convention).
-fn find_variable_at(
-    proc: &DmasmProcedure,
-    position: Position,
-) -> Option<&VariableOccurrence> {
+fn find_variable_at(proc: &DmasmProcedure, position: Position) -> Option<&VariableOccurrence> {
     proc.variables.iter().find(|v| {
         v.range.start.line == position.line
             && position.character >= v.range.start.character

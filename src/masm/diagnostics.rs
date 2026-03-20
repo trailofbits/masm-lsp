@@ -1,5 +1,5 @@
-use crate::util::to_miden_uri;
 use super::index;
+use crate::util::to_miden_uri;
 use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan};
 use miden_utils_diagnostics::{Diagnostic as Midiag, Severity};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
@@ -106,9 +106,7 @@ fn build_error_message(
     let label_is_unhelpful = label_msg.map(is_unhelpful_label_message).unwrap_or(true);
 
     // If we have a helpful label message, use it
-    if !label_is_unhelpful
-        && let Some(msg) = label_msg
-    {
+    if !label_is_unhelpful && let Some(msg) = label_msg {
         return msg.to_string();
     }
 

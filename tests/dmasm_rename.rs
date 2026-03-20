@@ -14,11 +14,12 @@ async fn rename_variable_in_dmasm_file() {
     harness.open_dmasm(&uri, text).await;
 
     // Rename v_0 (parameter at column 9) to "input".
-    let edit = harness
-        .rename(&uri, Position::new(0, 9), "input")
-        .await;
+    let edit = harness.rename(&uri, Position::new(0, 9), "input").await;
 
-    let changes = edit.expect("should return edit").changes.expect("should have changes");
+    let changes = edit
+        .expect("should return edit")
+        .changes
+        .expect("should have changes");
     let file_edits = &changes[&uri];
 
     // v_0 appears twice: parameter + one body usage.
@@ -45,11 +46,12 @@ async fn rename_does_not_cross_procedure_boundaries() {
     harness.open_dmasm(&uri, text).await;
 
     // Rename v_0 in the FIRST procedure only (parameter at column 11).
-    let edit = harness
-        .rename(&uri, Position::new(0, 11), "x")
-        .await;
+    let edit = harness.rename(&uri, Position::new(0, 11), "x").await;
 
-    let changes = edit.expect("should return edit").changes.expect("should have changes");
+    let changes = edit
+        .expect("should return edit")
+        .changes
+        .expect("should have changes");
     let file_edits = &changes[&uri];
 
     // Only 2 edits (parameter + return), not 4 (which would include second proc).

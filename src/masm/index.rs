@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use miden_assembly_syntax::ast::{visit::Visit, InvocationTarget, Module};
+use miden_assembly_syntax::ast::{InvocationTarget, Module, visit::Visit};
 use miden_debug_types::{DefaultSourceManager, SourceManager, SourceSpan, Spanned};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 

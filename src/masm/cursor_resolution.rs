@@ -3,7 +3,7 @@ use crate::symbol_resolution;
 use std::sync::Arc;
 
 use crate::util::to_miden_uri;
-use miden_assembly_syntax::ast::{visit::Visit, Immediate, InvocationTarget, Module, Procedure};
+use miden_assembly_syntax::ast::{Immediate, InvocationTarget, Module, Procedure, visit::Visit};
 use miden_assembly_syntax::parser::{PushValue, WordValue};
 use miden_debug_types::{DefaultSourceManager, SourceManager, Spanned};
 use thiserror::Error;

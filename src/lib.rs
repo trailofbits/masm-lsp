@@ -9,8 +9,8 @@ pub mod service;
 pub mod util;
 
 pub use masm::cursor_resolution::ResolutionError;
-pub use masm_decompiler::decompile::DecompilationConfig;
 pub use masm_decompiler::SymbolPath;
+pub use masm_decompiler::decompile::DecompilationConfig;
 
 /// The type of inlay hints to display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -117,9 +117,7 @@ impl ServerConfigBuilder {
             code_lens_stack_effects: self.code_lens_stack_effects.unwrap_or(true),
             taint_analysis_enabled: self.taint_analysis_enabled.unwrap_or(true),
             inlay_hint_type: self.inlay_hint_type.unwrap_or(InlayHintType::Decompilation),
-            decompilation_config: self
-                .decompilation_config
-                .unwrap_or_default(),
+            decompilation_config: self.decompilation_config.unwrap_or_default(),
         }
     }
 }

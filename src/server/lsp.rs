@@ -1,6 +1,6 @@
 use crate::client::PublishDiagnostics;
 use crate::core_lib::{default_core_library_path, normalize_core_library_path};
-use crate::dmasm::{detect_language, DocumentLanguage};
+use crate::dmasm::{DocumentLanguage, detect_language};
 use crate::masm::code_lens::collect_code_lenses;
 use crate::masm::cursor_resolution::resolve_symbol_at_position;
 use crate::masm::inlay_hints::collect_inlay_hints;
@@ -9,17 +9,17 @@ use crate::{InlayHintType, LibraryPath};
 use miden_debug_types::SourceManager;
 use std::{collections::HashSet, path::PathBuf};
 use tower_lsp::{
+    LanguageServer,
     jsonrpc::{ErrorCode, Result},
     lsp_types::{
-        request::{GotoImplementationParams, GotoImplementationResponse},
         CodeLens, CodeLensOptions, CodeLensParams, ExecuteCommandOptions, ExecuteCommandParams,
         GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
         InitializeParams, InitializeResult, InitializedParams, InlayHint, InlayHintParams,
         Location, MarkupContent, MarkupKind, Position, ReferenceParams, RenameOptions,
         ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
         TextDocumentSyncKind, Url, WorkspaceEdit, WorkspaceSymbolParams,
+        request::{GotoImplementationParams, GotoImplementationResponse},
     },
-    LanguageServer,
 };
 use tracing::{debug, info};
 
@@ -178,14 +178,10 @@ where
                 if let Some(id) = self.sources.find(&miden_uri) {
                     // Apply incremental changes via the source manager.
                     for change in &params.content_changes {
-                        let selection =
-                            change.range.map(crate::util::lsp_range_to_selection);
-                        let _ = self.sources.update(
-                            id,
-                            change.text.clone(),
-                            selection,
-                            version,
-                        );
+                        let selection = change.range.map(crate::util::lsp_range_to_selection);
+                        let _ = self
+                            .sources
+                            .update(id, change.text.clone(), selection, version);
                     }
                     // Re-read the full updated text and re-parse.
                     if let Some(updated) = self.sources.get_by_uri(&miden_uri) {
@@ -249,15 +245,14 @@ where
             let normalized = token.trim_start_matches(':');
             let workspace = self.workspace.read().await;
 
-            if let Some(loc) =
-                workspace
-                    .definition(&format!("::{}", normalized))
-                    .or_else(|| {
-                        normalized
-                            .rsplit("::")
-                            .next()
-                            .and_then(|name| workspace.definition_by_name(name))
-                    })
+            if let Some(loc) = workspace
+                .definition(&format!("::{}", normalized))
+                .or_else(|| {
+                    normalized
+                        .rsplit("::")
+                        .next()
+                        .and_then(|name| workspace.definition_by_name(name))
+                })
             {
                 return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
             }
@@ -303,7 +298,11 @@ where
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let uri = params.text_document_position_params.text_document.uri.clone();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let pos = params.text_document_position_params.position;
 
         if detect_language(&uri) == DocumentLanguage::Dmasm {

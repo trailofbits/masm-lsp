@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use tower_lsp::{
-    lsp_types::{Diagnostic, Url},
     Client,
+    lsp_types::{Diagnostic, Url},
 };
 
 /// Minimal abstraction over publishing diagnostics so the backend can be tested without a real LSP client.

@@ -10,15 +10,15 @@ use masm_lsp::client::PublishDiagnostics;
 use masm_lsp::masm::index::DocumentSymbols;
 use masm_lsp::server::Backend;
 use tokio::sync::Mutex;
+use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::{
     Diagnostic, DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
     HoverParams, Location, Position, PrepareRenameResponse, ReferenceContext, ReferenceParams,
     RenameParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Url,
     WorkspaceEdit, WorkspaceSymbolParams,
 };
-use tower_lsp::LanguageServer;
 
-use super::fixtures::{find_position, FixtureKind};
+use super::fixtures::{FixtureKind, find_position};
 
 /// A recording LSP client that captures published diagnostics.
 #[derive(Clone, Default)]
@@ -288,8 +288,8 @@ impl TestHarness {
         uri: &Url,
         range: tower_lsp::lsp_types::Range,
     ) -> Vec<tower_lsp::lsp_types::InlayHint> {
-        use tower_lsp::lsp_types::{InlayHintParams, TextDocumentIdentifier};
         use tower_lsp::LanguageServer;
+        use tower_lsp::lsp_types::{InlayHintParams, TextDocumentIdentifier};
 
         let params = InlayHintParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },

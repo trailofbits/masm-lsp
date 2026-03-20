@@ -6,9 +6,9 @@
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
+use crate::SymbolPath;
 use crate::masm::cursor_resolution::{ResolutionError, ResolvedSymbol};
 use crate::masm::index::DocumentSymbols;
-use crate::SymbolPath;
 
 /// Service for document-level operations.
 ///
@@ -88,9 +88,7 @@ where
     let mut results = workspace_service.find_references(&resolved.path);
 
     // Include the definition if requested
-    if include_declaration
-        && let Some(def) = workspace_service.find_definition(&resolved.path)
-    {
+    if include_declaration && let Some(def) = workspace_service.find_definition(&resolved.path) {
         results.push(def);
     }
 

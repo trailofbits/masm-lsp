@@ -10,12 +10,12 @@ use std::sync::Arc;
 use common::harness::{RecordingClient, TestHarness};
 use masm_lsp::server::Backend;
 use tokio::task::JoinSet;
+use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams, HoverParams,
     Position, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, Url, VersionedTextDocumentIdentifier, WorkspaceSymbolParams,
 };
-use tower_lsp::LanguageServer;
 
 /// Generate a simple MASM procedure with the given name and version.
 fn gen_proc(name: &str, version: u32) -> String {
