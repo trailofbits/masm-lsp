@@ -1474,12 +1474,10 @@ dependencies = [
 
 [[package]]
 name = "masm-lint"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "insta",
- "log",
- "lovely_env_logger",
  "masm-analysis",
  "masm-decompiler",
  "miden-debug-types",

@@ -7,9 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use log::{error, warn};
 use masm_analysis::{
-    AnalysisSnapshot, AdviceDiagnostic, SignatureMismatch, TypeDiagnostic,
+    AdviceDiagnostic, AnalysisSnapshot, SignatureMismatch, TypeDiagnostic,
     signature_mismatch_message, signature_mismatches_from_snapshot,
 };
 use masm_decompiler::{
@@ -43,8 +42,6 @@ struct Cli {
 }
 
 fn main() {
-    lovely_env_logger::init_default();
-
     let cli = Cli::parse();
 
     if cli.no_color {
@@ -61,7 +58,7 @@ fn run(cli: Cli) -> i32 {
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
-            error!("cannot determine working directory: {e}");
+            eprintln!("masm-lint: cannot determine working directory: {e}");
             return 2;
         }
     };
@@ -69,8 +66,8 @@ fn run(cli: Cli) -> i32 {
     // Validate library root paths before doing anything else.
     for root in &cli.libraries {
         if !root.path.exists() {
-            error!(
-                "library root path does not exist: {} (for namespace `{}`)",
+            eprintln!(
+                "masm-lint: library root path does not exist: {} (for namespace `{}`)",
                 root.path.display(),
                 root.namespace
             );
@@ -87,13 +84,13 @@ fn run(cli: Cli) -> i32 {
         } else if abs.is_file() {
             masm_files.insert(abs);
         } else {
-            error!("input path does not exist: {}", input.display());
+            eprintln!("masm-lint: input path does not exist: {}", input.display());
             return 2;
         }
     }
 
     if masm_files.is_empty() {
-        warn!("no .masm files found in the given inputs");
+        eprintln!("masm-lint: no .masm files found in the given inputs");
         return 0;
     }
 
@@ -108,7 +105,7 @@ fn run(cli: Cli) -> i32 {
 
     for file in &masm_files {
         if let Err(e) = workspace.load_entry(file) {
-            warn!("skipping {}: {e}", file.display());
+            eprintln!("masm-lint: skipping {}: {e}", file.display());
         }
     }
 
@@ -120,6 +117,7 @@ fn run(cli: Cli) -> i32 {
 
     // Collect all lint diagnostics.
     let mut diagnostics: Vec<LintDiagnostic> = Vec::new();
+    let mut error_count: usize = 0;
 
     // Signature mismatches — only when all dependencies are resolved.
     if unresolved.is_empty() {
@@ -134,7 +132,8 @@ fn run(cli: Cli) -> i32 {
             }
         }
     } else {
-        emit_unresolved_dependency_warnings(&unresolved, &workspace);
+        error_count += unresolved.len();
+        emit_unresolved_dependency_errors(&unresolved, &workspace);
     }
 
     // TODO: Re-enable once the decompiler's type analysis distinguishes
@@ -155,20 +154,47 @@ fn run(cli: Cli) -> i32 {
     // Sort diagnostics deterministically by file/line/col.
     sort_diagnostics(&mut diagnostics, sources.as_ref());
 
-    let count = diagnostics.len();
+    let warning_count = diagnostics.len();
 
     // Render.
     for diag in &diagnostics {
         render::render_diagnostic(diag, sources.as_ref());
     }
 
-    // Summary to stderr.
-    if count == 0 {
-        eprintln!("masm-lint: no warnings found");
-        0
-    } else {
-        eprintln!("masm-lint: {} warning(s) found", count);
-        1
+    // Summary to stderr (cargo/clippy style).
+    emit_summary(warning_count, error_count)
+}
+
+/// Emit a cargo/clippy-style summary and return the exit code.
+fn emit_summary(warning_count: usize, error_count: usize) -> i32 {
+    use yansi::Paint as _;
+
+    match (error_count, warning_count) {
+        (0, 0) => {
+            eprintln!("masm-lint: no issues found");
+            0
+        }
+        (0, w) => {
+            eprintln!(
+                "{}: masm-lint generated {w} warning(s)",
+                "warning".yellow().bold(),
+            );
+            1
+        }
+        (e, 0) => {
+            eprintln!(
+                "{}: masm-lint found {e} error(s)",
+                "error".red().bold(),
+            );
+            1
+        }
+        (e, w) => {
+            eprintln!(
+                "{}: masm-lint found {e} error(s); {w} warning(s) emitted",
+                "error".red().bold(),
+            );
+            1
+        }
     }
 }
 
@@ -251,17 +277,20 @@ fn sort_key(
 
 // ── Unresolved dependencies ───────────────────────────────────────────────────
 
-/// Emit warnings about modules that could not be resolved, with guidance on
+/// Emit errors about modules that could not be resolved, with guidance on
 /// how to configure the missing library roots.
-fn emit_unresolved_dependency_warnings(unresolved: &[SymbolPath], workspace: &Workspace) {
+fn emit_unresolved_dependency_errors(unresolved: &[SymbolPath], workspace: &Workspace) {
+    use yansi::Paint as _;
+
     let rendered_modules = unresolved
         .iter()
         .map(|m| m.as_str().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    warn!(
-        "unable to load {} referenced module(s): {rendered_modules}",
-        unresolved.len()
+    eprintln!(
+        "{}: unable to resolve {} referenced module(s): {rendered_modules}",
+        "error".red().bold(),
+        unresolved.len(),
     );
 
     let rendered_roots = workspace
@@ -270,26 +299,34 @@ fn emit_unresolved_dependency_warnings(unresolved: &[SymbolPath], workspace: &Wo
         .map(format_library_root)
         .collect::<Vec<_>>()
         .join(", ");
-    warn!("configured library roots: {rendered_roots}");
-    warn!("signature mismatch checks are skipped when dependencies are unresolved");
+    eprintln!(
+        "  {} configured library roots: {rendered_roots}",
+        "=".cyan().bold(),
+    );
+    eprintln!(
+        "  {} signature mismatch checks are skipped when dependencies are unresolved",
+        "=".cyan().bold(),
+    );
 
     let mut seen_configured: HashSet<String> = HashSet::new();
     let mut seen_unconfigured: HashSet<String> = HashSet::new();
     for module in unresolved {
         if let Some(ns) = configured_namespace_for_module(module, workspace.roots()) {
             if seen_configured.insert(ns.to_string()) {
-                warn!(
-                    "namespace `{ns}` is configured, but some referenced modules were not found under its roots"
+                eprintln!(
+                    "  {} namespace `{ns}` is configured, but some referenced modules were not found under its roots",
+                    "=".cyan().bold(),
                 );
             }
         } else if seen_unconfigured.insert(module.as_str().to_string()) {
-            warn!(
-                "no library root configured for referenced module `{}`. \
-                 Add `--library <namespace>=<path>` using the exact MASM path prefix for that module tree",
-                module.as_str()
+            eprintln!(
+                "  {} add `--library <namespace>=<path>` for module `{}`",
+                "help".cyan().bold(),
+                module.as_str(),
             );
         }
     }
+    eprintln!();
 }
 
 /// Return the longest configured namespace that matches `module`.

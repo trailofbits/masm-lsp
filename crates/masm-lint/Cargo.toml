@@ -1,6 +1,6 @@
 [package]
 name = "masm-lint"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Trail of Bits"]
 homepage = "https://trailofbits.com"
 edition = "2021"
@@ -11,8 +11,6 @@ masm-decompiler = { workspace = true }
 miden-debug-types = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 yansi = { workspace = true }
-log = { workspace = true }
-lovely_env_logger = "0.6"
 
 [dev-dependencies]
 insta = "1.42"
