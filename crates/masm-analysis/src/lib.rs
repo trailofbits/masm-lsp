@@ -6,8 +6,8 @@ use std::sync::Arc;
 use masm_decompiler::{
     callgraph::CallGraph,
     frontend::{LibraryRoot, Program, Workspace},
-    signature::{infer_signatures, ProcSignature, SignatureMap},
-    types::{infer_type_summaries, TypeSummaryMap},
+    signature::{infer_signatures, ProcSignature},
+    types::infer_type_summaries,
     Decompiler, SymbolPath,
 };
 use miden_assembly_syntax::ast::{
@@ -21,6 +21,48 @@ pub use unconstrained_advice::{
     infer_unconstrained_advice, infer_unconstrained_advice_in_workspace, AdviceDiagnostic,
     AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
 };
+
+pub use masm_decompiler::signature::SignatureMap;
+pub use masm_decompiler::types::{
+    InferredType, TypeDiagnostic, TypeDiagnosticsMap, TypeRequirement, TypeSummary, TypeSummaryMap,
+};
+
+/// Results of running all analysis passes on a workspace.
+#[derive(Debug)]
+pub struct AnalysisSnapshot {
+    /// Inferred procedure signatures.
+    pub signatures: SignatureMap,
+    /// Inferred procedure type summaries.
+    pub type_summaries: TypeSummaryMap,
+    /// Type inconsistency diagnostics.
+    pub type_diagnostics: TypeDiagnosticsMap,
+    /// Unconstrained advice flow diagnostics.
+    pub advice_diagnostics: AdviceDiagnosticsMap,
+    /// Module paths that could not be resolved.
+    pub unresolved_modules: Vec<SymbolPath>,
+}
+
+impl AnalysisSnapshot {
+    /// Run all analysis passes on a workspace and return the combined results.
+    pub fn from_workspace(workspace: &Workspace) -> Self {
+        let unresolved_modules = workspace.unresolved_module_paths();
+
+        let callgraph = CallGraph::from(workspace);
+        let signatures = infer_signatures(workspace, &callgraph);
+        let (type_summaries, type_diagnostics) =
+            infer_type_summaries(workspace, &callgraph, &signatures);
+        let (_, advice_diagnostics) =
+            infer_unconstrained_advice(workspace, &callgraph, &signatures, &type_summaries);
+
+        Self {
+            signatures,
+            type_summaries,
+            type_diagnostics,
+            advice_diagnostics,
+            unresolved_modules,
+        }
+    }
+}
 
 /// Stack-effect counts extracted from a procedure signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +84,30 @@ pub struct SignatureMismatch {
     pub declared: StackSignature,
     /// Inferred stack signature.
     pub inferred: StackSignature,
+}
+
+/// Generate a human-readable message describing a signature mismatch.
+pub fn signature_mismatch_message(mismatch: &SignatureMismatch) -> String {
+    let inputs_diff = mismatch.declared.inputs != mismatch.inferred.inputs;
+    let outputs_diff = mismatch.declared.outputs != mismatch.inferred.outputs;
+    match (inputs_diff, outputs_diff) {
+        (true, true) => format!(
+            "the definition declares {} inputs and {} outputs, but the inferred counts are {} and {} respectively",
+            mismatch.declared.inputs,
+            mismatch.declared.outputs,
+            mismatch.inferred.inputs,
+            mismatch.inferred.outputs
+        ),
+        (true, false) => format!(
+            "the definition declares {} inputs, but the inferred input count is {}",
+            mismatch.declared.inputs, mismatch.inferred.inputs
+        ),
+        (false, true) => format!(
+            "the definition declares {} outputs, but the inferred output count is {}",
+            mismatch.declared.outputs, mismatch.inferred.outputs
+        ),
+        (false, false) => String::new(),
+    }
 }
 
 /// Build a temporary workspace for a module and compute signature mismatches.
@@ -72,6 +138,59 @@ pub fn signature_mismatches_in_workspace(
     let decompiler = Decompiler::new(workspace);
     let signatures = decompiler.signatures();
     let resolver = module.type_resolver(sources.clone());
+
+    let mut findings = Vec::new();
+    for proc in module.procedures() {
+        let Some(signature) = proc.signature() else {
+            continue;
+        };
+        let Some(declared) = signature_stack_signature(signature, &resolver) else {
+            continue;
+        };
+
+        let symbol_path = SymbolPath::from_module_and_name(module, proc.name().as_str());
+        let Some(inferred) = signatures.get(&symbol_path) else {
+            continue;
+        };
+        let (inputs, outputs) = match inferred {
+            ProcSignature::Known {
+                inputs, outputs, ..
+            } => (*inputs, *outputs),
+            ProcSignature::Unknown => continue,
+        };
+
+        if declared.inputs != inputs || declared.outputs != outputs {
+            let span = {
+                let sig_span = signature.span();
+                if sig_span == SourceSpan::UNKNOWN {
+                    proc.name().span()
+                } else {
+                    sig_span
+                }
+            };
+            findings.push(SignatureMismatch {
+                proc_name: proc.name().as_str().to_string(),
+                span,
+                declared,
+                inferred: StackSignature { inputs, outputs },
+            });
+        }
+    }
+
+    findings
+}
+
+/// Compute signature mismatches using a pre-computed signature map.
+///
+/// This avoids rebuilding the call graph and signatures from scratch, unlike
+/// [`signature_mismatches_in_workspace`] which creates a new [`Decompiler`]
+/// internally. Use this when an [`AnalysisSnapshot`] is already available.
+pub fn signature_mismatches_from_snapshot(
+    module: &Module,
+    sources: Arc<DefaultSourceManager>,
+    signatures: &SignatureMap,
+) -> Vec<SignatureMismatch> {
+    let resolver = module.type_resolver(sources);
 
     let mut findings = Vec::new();
     for proc in module.procedures() {
@@ -147,5 +266,60 @@ fn type_felts(ty: &AstType) -> Option<usize> {
     match ty {
         AstType::Unknown | AstType::Never | AstType::List(_) => None,
         _ => Some(ty.size_in_felts()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_mismatch_message_both_differ() {
+        let m = SignatureMismatch {
+            proc_name: "foo".into(),
+            span: SourceSpan::UNKNOWN,
+            declared: StackSignature { inputs: 2, outputs: 1 },
+            inferred: StackSignature { inputs: 3, outputs: 2 },
+        };
+        let msg = signature_mismatch_message(&m);
+        assert!(msg.contains("2 inputs and 1 outputs"));
+        assert!(msg.contains("3 and 2 respectively"));
+    }
+
+    #[test]
+    fn signature_mismatch_message_inputs_only() {
+        let m = SignatureMismatch {
+            proc_name: "bar".into(),
+            span: SourceSpan::UNKNOWN,
+            declared: StackSignature { inputs: 2, outputs: 1 },
+            inferred: StackSignature { inputs: 3, outputs: 1 },
+        };
+        let msg = signature_mismatch_message(&m);
+        assert!(msg.contains("declares 2 inputs"));
+        assert!(msg.contains("inferred input count is 3"));
+    }
+
+    #[test]
+    fn signature_mismatch_message_outputs_only() {
+        let m = SignatureMismatch {
+            proc_name: "baz".into(),
+            span: SourceSpan::UNKNOWN,
+            declared: StackSignature { inputs: 1, outputs: 2 },
+            inferred: StackSignature { inputs: 1, outputs: 3 },
+        };
+        let msg = signature_mismatch_message(&m);
+        assert!(msg.contains("declares 2 outputs"));
+        assert!(msg.contains("inferred output count is 3"));
+    }
+
+    #[test]
+    fn signature_mismatch_message_no_diff_is_empty() {
+        let m = SignatureMismatch {
+            proc_name: "qux".into(),
+            span: SourceSpan::UNKNOWN,
+            declared: StackSignature { inputs: 1, outputs: 1 },
+            inferred: StackSignature { inputs: 1, outputs: 1 },
+        };
+        assert!(signature_mismatch_message(&m).is_empty());
     }
 }

@@ -1,0 +1,11 @@
+---
+source: crates/masm-lint/src/render.rs
+assertion_line: 262
+expression: output
+---
+warning: the definition declares 2 inputs, but the inferred input count is 3
+  --> /test/example.masm:1:1
+      |
+    1 | proc.foo.2
+      | ^^^^^^^^^^
+    = note: in procedure `foo`

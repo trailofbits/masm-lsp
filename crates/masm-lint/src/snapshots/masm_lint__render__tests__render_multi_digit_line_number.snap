@@ -1,0 +1,11 @@
+---
+source: crates/masm-lint/src/render.rs
+assertion_line: 340
+expression: output
+---
+warning: suspicious constant on line 12
+  --> /test/example.masm:12:5
+       |
+    12 |     push.42
+       |     ^^^^^^^
+    = note: in procedure `deep`

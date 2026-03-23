@@ -12,6 +12,8 @@ use masm_decompiler::{
 };
 
 use super::{
+    address::collect_address_diagnostics,
+    merkle::collect_merkle_diagnostics,
     nonzero::infer_nonzero_summaries_and_diagnostics,
     provenance::analyze_proc_provenance,
     summary::{AdviceDiagnosticsMap, AdviceSummary, AdviceSummaryMap},
@@ -40,6 +42,10 @@ pub fn infer_unconstrained_advice(
     let prepared = prepare_procs(workspace, callgraph, signatures);
     let provenance_summaries = infer_provenance_summaries(callgraph, &prepared);
     let mut diagnostics = collect_u32_diagnostics(&prepared, &provenance_summaries, type_summaries);
+    let address_diagnostics = collect_address_diagnostics(&prepared, &provenance_summaries);
+    merge_diagnostics(&mut diagnostics, address_diagnostics);
+    let merkle_diagnostics = collect_merkle_diagnostics(&prepared, &provenance_summaries);
+    merge_diagnostics(&mut diagnostics, merkle_diagnostics);
     let (_, nonzero_diagnostics) =
         infer_nonzero_summaries_and_diagnostics(callgraph, &prepared, &provenance_summaries);
     merge_diagnostics(&mut diagnostics, nonzero_diagnostics);

@@ -1,0 +1,11 @@
+---
+source: crates/masm-lint/src/render.rs
+assertion_line: 281
+expression: output
+---
+warning: operand type mismatch: expected u32, found felt
+  --> /test/example.masm:3:5
+      |
+    3 |     u32checked_add
+      |     ^^^^^^^^^^^^^^
+    = note: in procedure `bar`

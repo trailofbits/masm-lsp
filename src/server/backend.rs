@@ -9,19 +9,15 @@ use std::{
 };
 
 use masm_analysis::{
-    AdviceDiagnosticsMap, infer_unconstrained_advice, signature_mismatches_in_workspace,
+    AdviceDiagnosticsMap, AnalysisSnapshot, InferredType, TypeDiagnosticsMap, TypeRequirement,
+    TypeSummary, signature_mismatch_message, signature_mismatches_from_snapshot,
 };
 use masm_decompiler::{
     DecompilationConfig, Decompiler,
-    callgraph::CallGraph,
     fmt::{CodeWriter, FormattingConfig},
     frontend::{LibraryRoot, Workspace},
-    signature::{ProcSignature, SignatureMap, infer_signatures},
+    signature::ProcSignature,
     symbol::resolution::{resolve_constant_path, resolve_constant_symbol},
-    types::{
-        InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary, TypeSummaryMap,
-        infer_type_summaries,
-    },
 };
 
 use miden_assembly_syntax::ast::{Module, Procedure};
@@ -304,7 +300,7 @@ impl<C> Backend<C> {
         let workspace = self
             .build_analysis_workspace(Some(uri), library_paths)
             .await;
-        let analysis = infer_analysis_snapshot(&workspace);
+        let analysis = AnalysisSnapshot::from_workspace(&workspace);
         if !analysis.unresolved_modules.is_empty() {
             return None;
         }
@@ -704,23 +700,26 @@ where
 
             let analysis_diags = if config.taint_analysis_enabled {
                 if let (Ok(doc), Some(workspace)) = (&parse_result, analysis_workspace.as_ref()) {
-                    let analysis = infer_analysis_snapshot(workspace);
+                    let analysis = AnalysisSnapshot::from_workspace(workspace);
                     let mut diags = Vec::new();
                     if analysis.unresolved_modules.is_empty() {
-                        let mismatches = signature_mismatches_in_workspace(
+                        let mismatches = signature_mismatches_from_snapshot(
                             &doc.module,
                             self.sources.clone(),
-                            workspace,
+                            &analysis.signatures,
                         );
                         diags.extend(signature_mismatch_diagnostics(
                             mismatches,
                             self.sources.as_ref(),
                         ));
-                        diags.extend(type_inconsistency_diagnostics(
-                            &uri,
-                            &analysis.type_diagnostics,
-                            self.sources.as_ref(),
-                        ));
+                        // TODO: Re-enable once the decompiler's type analysis
+                        // distinguishes genuinely incorrect types from
+                        // unresolved (default Felt) types.
+                        // diags.extend(type_inconsistency_diagnostics(
+                        //     &uri,
+                        //     &analysis.type_diagnostics,
+                        //     self.sources.as_ref(),
+                        // ));
                         diags.extend(advice_flow_diagnostics(
                             &uri,
                             &analysis.advice_diagnostics,
@@ -991,34 +990,6 @@ fn build_library_roots(library_paths: &[LibraryPath]) -> Vec<LibraryRoot> {
         .collect()
 }
 
-#[derive(Debug)]
-struct AnalysisSnapshot {
-    signatures: SignatureMap,
-    type_summaries: TypeSummaryMap,
-    type_diagnostics: TypeDiagnosticsMap,
-    advice_diagnostics: AdviceDiagnosticsMap,
-    unresolved_modules: Vec<SymbolPath>,
-}
-
-fn infer_analysis_snapshot(workspace: &Workspace) -> AnalysisSnapshot {
-    let unresolved_modules = workspace.unresolved_module_paths();
-
-    let callgraph = CallGraph::from(workspace);
-    let signatures = infer_signatures(workspace, &callgraph);
-    let (type_summaries, type_diagnostics) =
-        infer_type_summaries(workspace, &callgraph, &signatures);
-    let (_, advice_diagnostics) =
-        infer_unconstrained_advice(workspace, &callgraph, &signatures, &type_summaries);
-
-    AnalysisSnapshot {
-        signatures,
-        type_summaries,
-        type_diagnostics,
-        advice_diagnostics,
-        unresolved_modules,
-    }
-}
-
 fn source_path_from_uri(uri: &Url) -> PathBuf {
     uri.to_file_path()
         .unwrap_or_else(|_| PathBuf::from("in-memory.masm"))
@@ -1161,18 +1132,18 @@ fn format_inferred_signature(
         } => {
             let input_types = summary
                 .map(|summary| normalized_input_types(&summary.inputs, *inputs))
-                .unwrap_or_else(|| vec![TypeRequirement::Unknown; *inputs]);
+                .unwrap_or_else(|| vec![TypeRequirement::Felt; *inputs]);
 
             let output_types = summary
                 .map(|summary| normalized_output_types(&summary.outputs, *outputs))
-                .unwrap_or_else(|| vec![InferredType::Unknown; *outputs]);
+                .unwrap_or_else(|| vec![InferredType::Felt; *outputs]);
 
             let args = (0..*inputs)
                 .map(|idx| {
                     let ty = input_types
                         .get(idx)
                         .copied()
-                        .unwrap_or(TypeRequirement::Unknown);
+                        .unwrap_or(TypeRequirement::Felt);
                     format!("v_{idx}: {}", type_requirement_for_display(ty))
                 })
                 .collect::<Vec<_>>()
@@ -1184,7 +1155,7 @@ fn format_inferred_signature(
                     let ty = output_types
                         .first()
                         .copied()
-                        .unwrap_or(InferredType::Unknown);
+                        .unwrap_or(InferredType::Felt);
                     format!(" -> {}", inferred_type_for_display(ty))
                 }
                 n => {
@@ -1193,7 +1164,7 @@ fn format_inferred_signature(
                             let ty = output_types
                                 .get(idx)
                                 .copied()
-                                .unwrap_or(InferredType::Unknown);
+                                .unwrap_or(InferredType::Felt);
                             inferred_type_for_display(ty)
                         })
                         .collect::<Vec<_>>()
@@ -1288,7 +1259,7 @@ fn cursor_outside_procedure_diagnostic(position: Position) -> Diagnostic {
 }
 
 fn normalized_input_types(types: &[TypeRequirement], expected_len: usize) -> Vec<TypeRequirement> {
-    let mut normalized = vec![TypeRequirement::Unknown; expected_len];
+    let mut normalized = vec![TypeRequirement::Felt; expected_len];
     for (display_idx, slot) in normalized.iter_mut().enumerate() {
         let summary_idx = expected_len.saturating_sub(1).saturating_sub(display_idx);
         if let Some(ty) = types.get(summary_idx) {
@@ -1299,7 +1270,7 @@ fn normalized_input_types(types: &[TypeRequirement], expected_len: usize) -> Vec
 }
 
 fn normalized_output_types(types: &[InferredType], expected_len: usize) -> Vec<InferredType> {
-    let mut normalized = vec![InferredType::Unknown; expected_len];
+    let mut normalized = vec![InferredType::Felt; expected_len];
     for (display_idx, slot) in normalized.iter_mut().enumerate() {
         let summary_idx = expected_len.saturating_sub(1).saturating_sub(display_idx);
         if let Some(ty) = types.get(summary_idx) {
@@ -1311,7 +1282,7 @@ fn normalized_output_types(types: &[InferredType], expected_len: usize) -> Vec<I
 
 fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
     match requirement {
-        TypeRequirement::Unknown | TypeRequirement::Felt => "Felt",
+        TypeRequirement::Felt => "Felt",
         TypeRequirement::Bool => "Bool",
         TypeRequirement::U32 => "U32",
         TypeRequirement::Address => "Address",
@@ -1320,13 +1291,14 @@ fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
 
 fn inferred_type_for_display(ty: InferredType) -> &'static str {
     match ty {
-        InferredType::Unknown | InferredType::Felt => "Felt",
+        InferredType::Felt => "Felt",
         InferredType::Bool => "Bool",
         InferredType::U32 => "U32",
         InferredType::Address => "Address",
     }
 }
 
+#[allow(dead_code)]
 fn type_inconsistency_diagnostics(
     uri: &Url,
     diagnostics: &TypeDiagnosticsMap,
@@ -1422,29 +1394,6 @@ fn signature_mismatch_diagnostics(
             }
         })
         .collect()
-}
-
-fn signature_mismatch_message(mismatch: &masm_analysis::SignatureMismatch) -> String {
-    let inputs_diff = mismatch.declared.inputs != mismatch.inferred.inputs;
-    let outputs_diff = mismatch.declared.outputs != mismatch.inferred.outputs;
-    match (inputs_diff, outputs_diff) {
-        (true, true) => format!(
-            "the definition declares {} inputs and {} outputs, but the inferred counts are {} and {} respectively",
-            mismatch.declared.inputs,
-            mismatch.declared.outputs,
-            mismatch.inferred.inputs,
-            mismatch.inferred.outputs
-        ),
-        (true, false) => format!(
-            "the definition declares {} inputs, but the inferred input count is {}",
-            mismatch.declared.inputs, mismatch.inferred.inputs
-        ),
-        (false, true) => format!(
-            "the definition declares {} outputs, but the inferred output count is {}",
-            mismatch.declared.outputs, mismatch.inferred.outputs
-        ),
-        (false, false) => String::new(),
-    }
 }
 
 #[derive(Debug)]

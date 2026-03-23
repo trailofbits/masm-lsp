@@ -1,16 +1,18 @@
 [workspace]
-members = [".", "crates/masm-instructions", "crates/masm-analysis"]
+members = [".", "crates/masm-instructions", "crates/masm-analysis", "crates/masm-lint"]
 resolver = "2"
 
 [workspace.dependencies]
-masm-decompiler = { version = "=0.5.2", git = "https://github.com/trailofbits/masm-decompiler", rev = "bdbb1ba9f864dffd087207360305d57ab2d7e1c8" }
+masm-decompiler = { version = "=0.6.1", git = "https://github.com/trailofbits/masm-decompiler", rev = "dac04e17dea54e7e025c48745705f4dc0433bc91" }
 miden-assembly-syntax = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
 miden-debug-types = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
 miden-utils-diagnostics = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
+yansi = "1.0"
+log = "0.4"
 
 [package]
 name = "masm-lsp"
-version = "0.7.2"
+version = "0.8.0"
 authors = ["Trail of Bits"]
 homepage = "https://trailofbits.com"
 repository = "https://github.com/trailofbits/masm-decompiler"

@@ -1,0 +1,16 @@
+---
+source: crates/masm-lint/src/render.rs
+assertion_line: 362
+expression: output
+---
+warning: unconstrained advice used as memory address
+  --> /test/example.masm:3:5
+      |
+    3 |     mem_load
+      |     ^^^^^^^^
+    ::: /test/example.masm:2:5
+      |
+    2 |     adv_push.1
+      |     ^^^^^^^^^^
+    = help: unconstrained advice introduced here
+    = note: in procedure `unsafe_load`

@@ -1,0 +1,16 @@
+---
+source: crates/masm-lint/src/render.rs
+assertion_line: 303
+expression: output
+---
+warning: unconstrained advice value flows into arithmetic operation
+  --> /test/example.masm:3:5
+      |
+    3 |     add
+      |     ^^^
+    ::: /test/example.masm:2:5
+      |
+    2 |     adv_push.1
+      |     ^^^^^^^^^^
+    = help: unconstrained advice introduced here
+    = note: in procedure `baz`

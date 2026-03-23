@@ -1,0 +1,7 @@
+---
+source: crates/masm-lint/src/render.rs
+assertion_line: 317
+expression: output
+---
+warning: could not determine stack effect
+    = note: in procedure `qux`

@@ -1,0 +1,15 @@
+---
+source: crates/masm-lint/src/render.rs
+expression: output
+---
+warning: unconstrained advice used as Merkle tree root
+  --> /test/example.masm:5:5
+      |
+    5 |     mtree_get
+      |     ^^^^^^^^^
+    ::: /test/example.masm:2:5
+      |
+    2 |     adv_push.4
+      |     ^^^^^^^^^^
+    = help: unconstrained advice introduced here
+    = note: in procedure `unsafe_verify`

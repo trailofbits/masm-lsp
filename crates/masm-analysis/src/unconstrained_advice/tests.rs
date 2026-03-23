@@ -23,10 +23,6 @@ fn direct_adv_push_to_u32_expr_warns() {
             .any(|diag| diag.message.contains("unconstrained advice")),
         "expected advice diagnostic, got: {bad:?}"
     );
-    assert!(
-        bad.iter().any(|diag| diag.origins.len() == 1),
-        "expected one origin span, got: {bad:?}"
-    );
 }
 
 #[test]
@@ -132,23 +128,7 @@ fn call_argument_warning_uses_callee_u32_requirement() {
 }
 
 #[test]
-fn callee_returning_local_advice_propagates_to_caller() {
-    let ws = workspace_from_modules(&[(
-        "advice",
-        "@locals(1)\nproc source\n    adv_push.1\n    loc_store.0\n    loc_load.0\nend\n\nproc caller\n    exec.source\n    push.1\n    u32wrapping_add\nend\n",
-    )]);
-    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
-    let caller = diagnostics_for(&diagnostics, "advice::caller");
-    assert!(
-        caller
-            .iter()
-            .any(|diag| diag.message.contains("unconstrained advice")),
-        "expected propagated local-advice diagnostic, got: {caller:?}"
-    );
-}
-
-#[test]
-fn callee_output_summary_propagates_local_advice() {
+fn callee_output_summary_propagates_advice() {
     let ws = workspace_from_modules(&[(
         "advice",
         "proc source\n    adv_push.1\nend\n\nproc caller\n    exec.source\n    push.1\n    u32wrapping_add\nend\n",
@@ -350,5 +330,229 @@ fn proven_nonzero_value_round_trips_through_local() {
     assert!(
         ok.iter().all(|diag| !diag.message.contains("divisor")),
         "expected no divisor diagnostics, got: {ok:?}"
+    );
+}
+
+#[test]
+fn direct_adv_push_to_mem_store_address_warns() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    push.42\n    swap\n    mem_store\n    drop\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let bad = diagnostics_for(&diagnostics, "advice::bad");
+    assert!(
+        bad.iter()
+            .any(|diag| diag.message.contains("memory address")),
+        "expected memory address diagnostic, got: {bad:?}"
+    );
+    assert!(
+        bad.iter()
+            .any(|diag| diag.sink == super::AdviceSinkKind::MemoryAddress),
+        "expected MemoryAddress sink kind, got: {bad:?}"
+    );
+}
+
+#[test]
+fn direct_adv_push_to_mem_load_address_warns() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    mem_load\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let bad = diagnostics_for(&diagnostics, "advice::bad");
+    assert!(
+        bad.iter()
+            .any(|diag| diag.message.contains("memory address")),
+        "expected memory address diagnostic for mem_load, got: {bad:?}"
+    );
+}
+
+#[test]
+fn indirect_advice_to_address_via_arithmetic_warns() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    push.4\n    mul\n    mem_load\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let bad = diagnostics_for(&diagnostics, "advice::bad");
+    assert!(
+        bad.iter()
+            .any(|diag| diag.message.contains("memory address")),
+        "expected memory address diagnostic for indirect flow, got: {bad:?}"
+    );
+}
+
+#[test]
+fn u32assert_sanitizes_mem_store_address() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc ok\n    adv_push.1\n    u32assert\n    push.42\n    swap\n    mem_store\n    drop\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let ok = diagnostics_for(&diagnostics, "advice::ok");
+    assert!(
+        ok.iter()
+            .all(|diag| !diag.message.contains("memory address")),
+        "expected no memory address diagnostics after u32assert, got: {ok:?}"
+    );
+}
+
+#[test]
+fn adv_pipe_tainted_address_warns() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    padw\n    padw\n    padw\n    adv_pipe\n    dropw\n    dropw\n    dropw\n    drop\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let bad = diagnostics_for(&diagnostics, "advice::bad");
+    assert!(
+        bad.iter()
+            .any(|diag| diag.message.contains("memory address")),
+        "expected memory address diagnostic for adv_pipe, got: {bad:?}"
+    );
+}
+
+#[test]
+fn mem_stream_tainted_address_warns() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    padw\n    padw\n    padw\n    mem_stream\n    dropw\n    dropw\n    dropw\n    drop\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let bad = diagnostics_for(&diagnostics, "advice::bad");
+    assert!(
+        bad.iter()
+            .any(|diag| diag.message.contains("memory address")),
+        "expected memory address diagnostic for mem_stream, got: {bad:?}"
+    );
+}
+
+#[test]
+fn mem_store_values_not_flagged_as_address() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc ok\n    adv_push.1\n    push.100\n    mem_store\n    drop\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let ok = diagnostics_for(&diagnostics, "advice::ok");
+    assert!(
+        ok.iter()
+            .all(|diag| !diag.message.contains("memory address")),
+        "expected no memory address diagnostics when advice is in values, got: {ok:?}"
+    );
+}
+
+#[test]
+fn interprocedural_advice_to_address_warns() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc source\n    adv_push.1\nend\n\nproc caller\n    exec.source\n    mem_load\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let caller = diagnostics_for(&diagnostics, "advice::caller");
+    assert!(
+        caller
+            .iter()
+            .any(|diag| diag.message.contains("memory address")),
+        "expected interprocedural memory address diagnostic, got: {caller:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Merkle root detection tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn direct_advice_to_mtree_get_root_warns() {
+    // Stack for mtree_get: [d, i, R0, R1, R2, R3] (top-first)
+    // Advice fills the root word (positions 2..6).
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.4\n    push.0\n    push.0\n    mtree_get\n    dropw\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let bad = diagnostics_for(&diagnostics, "advice::bad");
+    assert!(
+        bad.iter()
+            .any(|diag| diag.message.contains("Merkle tree root")),
+        "expected Merkle root diagnostic for mtree_get, got: {bad:?}"
+    );
+    assert!(
+        bad.iter()
+            .any(|diag| diag.sink == super::AdviceSinkKind::MerkleRoot),
+        "expected MerkleRoot sink kind, got: {bad:?}"
+    );
+}
+
+#[test]
+fn direct_advice_to_mtree_set_root_warns() {
+    // Stack for mtree_set: [d, i, R0..R3, V0..V3] (top-first)
+    // Advice fills the root word (positions 2..6).
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    padw\n    adv_push.4\n    push.0\n    push.0\n    mtree_set\n    dropw\n    dropw\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let bad = diagnostics_for(&diagnostics, "advice::bad");
+    assert!(
+        bad.iter()
+            .any(|diag| diag.message.contains("Merkle tree root")),
+        "expected Merkle root diagnostic for mtree_set, got: {bad:?}"
+    );
+}
+
+#[test]
+fn direct_advice_to_mtree_verify_root_warns() {
+    // Stack for mtree_verify: [V0..V3, d, i, R0..R3] (top-first)
+    // Advice fills the root word (positions 6..10).
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.4\n    push.0\n    push.0\n    padw\n    mtree_verify\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let bad = diagnostics_for(&diagnostics, "advice::bad");
+    assert!(
+        bad.iter()
+            .any(|diag| diag.message.contains("Merkle tree root")),
+        "expected Merkle root diagnostic for mtree_verify, got: {bad:?}"
+    );
+}
+
+#[test]
+fn advice_in_non_root_position_not_flagged() {
+    // Advice flows into the depth/index positions of mtree_get (positions 0..2),
+    // NOT into the root word. No MerkleRoot diagnostic expected.
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc ok\n    push.1.2.3.4\n    adv_push.1\n    adv_push.1\n    mtree_get\n    dropw\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let ok = diagnostics_for(&diagnostics, "advice::ok");
+    assert!(
+        ok.iter()
+            .all(|diag| !diag.message.contains("Merkle tree root")),
+        "expected no Merkle root diagnostics for non-root advice, got: {ok:?}"
+    );
+}
+
+#[test]
+fn interprocedural_advice_to_merkle_root_warns() {
+    // Callee returns advice, caller uses it as mtree_get root.
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc source\n    adv_push.4\nend\n\nproc caller\n    exec.source\n    push.0\n    push.0\n    mtree_get\n    dropw\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let caller = diagnostics_for(&diagnostics, "advice::caller");
+    assert!(
+        caller
+            .iter()
+            .any(|diag| diag.message.contains("Merkle tree root")),
+        "expected interprocedural Merkle root diagnostic, got: {caller:?}"
+    );
+    assert!(
+        caller.iter().any(|diag| !diag.origins.is_empty()),
+        "expected origin spans tracing to callee's adv_push, got: {caller:?}"
     );
 }

@@ -62,6 +62,10 @@ pub enum AdviceSinkKind {
     NonZeroOperand,
     /// A call argument whose callee expects `U32`.
     CallArgument,
+    /// A memory address operand (mem_load, mem_store, adv_pipe, mem_stream).
+    MemoryAddress,
+    /// A Merkle tree root operand (mtree_get, mtree_set, mtree_verify).
+    MerkleRoot,
 }
 
 /// Diagnostic emitted by unconstrained-advice analysis.
