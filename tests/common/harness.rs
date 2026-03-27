@@ -23,8 +23,11 @@ use super::fixtures::{FixtureKind, find_position};
 /// A recording LSP client that captures published diagnostics.
 #[derive(Clone, Default)]
 pub struct RecordingClient {
-    published: Arc<Mutex<Vec<(Url, Vec<Diagnostic>, Option<i32>)>>>,
+    published: Arc<Mutex<PublishedDiagnostics>>,
 }
+
+type PublishedDiagnostic = (Url, Vec<Diagnostic>, Option<i32>);
+type PublishedDiagnostics = Vec<PublishedDiagnostic>;
 
 #[async_trait]
 impl PublishDiagnostics for RecordingClient {
@@ -46,7 +49,7 @@ impl RecordingClient {
     }
 
     /// Take all published diagnostics, clearing the internal buffer.
-    pub async fn take_published(&self) -> Vec<(Url, Vec<Diagnostic>, Option<i32>)> {
+    pub async fn take_published(&self) -> PublishedDiagnostics {
         let mut guard = self.published.lock().await;
         guard.drain(..).collect()
     }

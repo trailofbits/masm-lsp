@@ -69,11 +69,7 @@ async fn publish_diagnostics_sends_updated_version() {
         .await;
 
     // Send diagnostics for version 1
-    backend
-        .publish_diagnostics(uri.clone())
-        .await
-        .iter()
-        .count();
+    let _ = backend.publish_diagnostics(uri.clone()).await.len();
 
     // Modify document to version 2
     backend
@@ -1219,15 +1215,18 @@ fn command_error_diagnostic(error: &tower_lsp::jsonrpc::Error) -> Option<Diagnos
 
 #[derive(Clone, Default)]
 struct RecordingClient {
-    published: Arc<tokio::sync::Mutex<Vec<(Url, Vec<Diagnostic>, Option<i32>)>>>,
+    published: Arc<tokio::sync::Mutex<PublishedDiagnostics>>,
 }
 
 impl RecordingClient {
-    async fn take_published(&self) -> Vec<(Url, Vec<Diagnostic>, Option<i32>)> {
+    async fn take_published(&self) -> PublishedDiagnostics {
         let mut guard = self.published.lock().await;
         guard.drain(..).collect()
     }
 }
+
+type PublishedDiagnostic = (Url, Vec<Diagnostic>, Option<i32>);
+type PublishedDiagnostics = Vec<PublishedDiagnostic>;
 
 #[async_trait::async_trait]
 impl PublishDiagnostics for RecordingClient {
