@@ -3,9 +3,11 @@
 use std::collections::{HashMap, HashSet};
 
 use masm_decompiler::{
-    ir::{BinOp, Expr, Intrinsic, LocalAccessKind, Stmt, UnOp, Var},
+    ir::{BinOp, Expr, Intrinsic, LocalAccessKind, LoopPhi, Stmt, UnOp, Var},
     types::VarKey,
 };
+
+use crate::abstract_interp::JoinSemiLattice;
 
 use super::domain::AdviceFact;
 
@@ -184,6 +186,15 @@ impl Env {
     }
 }
 
+impl JoinSemiLattice for Env {
+    fn join_assign(&mut self, other: &Self) -> bool {
+        let joined = self.join(other);
+        let changed = *self != joined;
+        *self = joined;
+        changed
+    }
+}
+
 /// Retain only entries that are present in both maps with the same value.
 fn agreeing_entries<K, V>(lhs: &HashMap<K, V>, rhs: &HashMap<K, V>) -> HashMap<K, V>
 where
@@ -244,6 +255,32 @@ pub(crate) fn assign_phi_metadata(
     } else {
         env.set_var_zero_test(dest, None);
     }
+}
+
+/// Join one loop-body evaluation back into the current abstract loop state.
+pub(crate) fn join_loop_head_env(
+    loop_env: &Env,
+    entry_env: &Env,
+    body_env: &Env,
+    phis: &[LoopPhi],
+) -> Env {
+    let mut next_env = loop_env.join(body_env);
+    for phi in phis {
+        let merged = entry_env
+            .fact_for_var(&phi.init)
+            .join(&body_env.fact_for_var(&phi.step));
+        next_env.set_var_fact(&phi.dest, merged);
+        assign_phi_metadata(
+            &phi.dest,
+            &phi.init,
+            entry_env,
+            &phi.step,
+            body_env,
+            &mut next_env,
+        );
+    }
+
+    next_env
 }
 
 /// Refine branch environments using an exact `eq.0` witness when available.
@@ -563,5 +600,40 @@ fn apply_adv_pipe_effect(
     for result in &intrinsic.results {
         env.set_var_fact(result, AdviceFact::from_source(span));
         env.clear_var_metadata(result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Env;
+    use crate::{
+        abstract_interp::JoinSemiLattice,
+        unconstrained_advice::domain::AdviceFact,
+    };
+    use masm_decompiler::ir::Var;
+
+    /// Return a small synthetic SSA variable for flow-environment tests.
+    fn test_var(index: u8) -> Var {
+        Var::new(u64::from(index).into(), usize::from(index))
+    }
+
+    #[test]
+    fn env_join_assign_reports_changes_and_merges_facts() {
+        let mut lhs = Env::default();
+        let lhs_var = test_var(0);
+        lhs.set_var_fact(&lhs_var, AdviceFact::from_input(0));
+
+        let mut rhs = Env::default();
+        let rhs_var = test_var(1);
+        rhs.set_var_fact(&lhs_var, AdviceFact::from_input(1));
+        rhs.set_var_fact(&rhs_var, AdviceFact::from_input(2));
+
+        assert!(lhs.join_assign(&rhs));
+        assert_eq!(
+            lhs.fact_for_var(&lhs_var),
+            AdviceFact::from_input(0).join(&AdviceFact::from_input(1))
+        );
+        assert_eq!(lhs.fact_for_var(&rhs_var), AdviceFact::from_input(2));
+        assert!(!lhs.join_assign(&rhs));
     }
 }

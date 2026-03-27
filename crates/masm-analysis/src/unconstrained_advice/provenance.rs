@@ -1,7 +1,7 @@
 //! Interprocedural provenance summaries for unconstrained advice.
 
 use masm_decompiler::{
-    ir::{LocalAccessKind, Stmt},
+    ir::{LocalAccessKind, LoopPhi, Stmt},
     SymbolPath,
 };
 
@@ -9,10 +9,11 @@ use super::{
     shared::{
         apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
         apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
-        refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
+        join_loop_head_env, refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
     },
     summary::{AdviceSummary, AdviceSummaryMap},
 };
+use crate::abstract_interp::{iterate_to_fixpoint, FixpointConfig, JoinSemiLattice};
 
 /// Analyze one lifted procedure and summarize which outputs may carry unconstrained advice.
 pub(crate) fn analyze_proc_provenance(
@@ -35,6 +36,51 @@ pub(crate) fn analyze_proc_provenance(
 struct EvalResult {
     env: Env,
     opaque: bool,
+}
+
+/// Loop-head state driven by the generic fixpoint engine.
+///
+/// The engine still operates on `join_assign`, but loop phi updates are part of the loop-head
+/// transition itself rather than a second generic environment join.
+#[derive(Clone)]
+struct ProvenanceLoopState<'a> {
+    env: Env,
+    entry_env: &'a Env,
+    phis: &'a [LoopPhi],
+}
+
+impl<'a> ProvenanceLoopState<'a> {
+    /// Build the initial loop-head state from the loop entry environment.
+    fn at_loop_head(entry_env: &'a Env, phis: &'a [LoopPhi]) -> Self {
+        Self {
+            env: entry_env.clone(),
+            entry_env,
+            phis,
+        }
+    }
+
+    /// Build the candidate state produced by one loop-body evaluation.
+    fn from_body_env(body_env: Env, entry_env: &'a Env, phis: &'a [LoopPhi]) -> Self {
+        Self {
+            env: body_env,
+            entry_env,
+            phis,
+        }
+    }
+
+    /// Consume the loop state and return its loop-head environment.
+    fn into_env(self) -> Env {
+        self.env
+    }
+}
+
+impl JoinSemiLattice for ProvenanceLoopState<'_> {
+    fn join_assign(&mut self, other: &Self) -> bool {
+        let next_env = join_loop_head_env(&self.env, self.entry_env, &other.env, self.phis);
+        let changed = self.env != next_env;
+        self.env = next_env;
+        changed
+    }
 }
 
 /// Build the final output summary from the return statement.
@@ -168,42 +214,23 @@ fn eval_stmt(stmt: &Stmt, mut env: Env, callee_summaries: &AdviceSummaryMap) -> 
 /// Evaluate a structured loop body conservatively.
 fn eval_loop_block(
     body: &[Stmt],
-    phis: &[masm_decompiler::ir::LoopPhi],
+    phis: &[LoopPhi],
     entry_env: Env,
     callee_summaries: &AdviceSummaryMap,
 ) -> EvalResult {
-    let mut loop_env = entry_env.clone();
     let mut opaque = false;
-
-    for _ in 0..MAX_LOOP_PASSES {
-        let body_result = eval_block(body, loop_env.clone(), callee_summaries);
-        opaque |= body_result.opaque;
-
-        let mut next_env = loop_env.join(&body_result.env);
-        for phi in phis {
-            let merged = entry_env
-                .fact_for_var(&phi.init)
-                .join(&body_result.env.fact_for_var(&phi.step));
-            next_env.set_var_fact(&phi.dest, merged);
-            assign_phi_metadata(
-                &phi.dest,
-                &phi.init,
-                &entry_env,
-                &phi.step,
-                &body_result.env,
-                &mut next_env,
-            );
-        }
-
-        if next_env == loop_env {
-            loop_env = next_env;
-            break;
-        }
-        loop_env = next_env;
-    }
+    let result = iterate_to_fixpoint(
+        ProvenanceLoopState::at_loop_head(&entry_env, phis),
+        FixpointConfig::new(MAX_LOOP_PASSES),
+        |loop_env| {
+            let body_result = eval_block(body, loop_env.env.clone(), callee_summaries);
+            opaque |= body_result.opaque;
+            ProvenanceLoopState::from_body_env(body_result.env, &entry_env, phis)
+        },
+    );
 
     EvalResult {
-        env: loop_env,
+        env: result.into_state().into_env(),
         opaque,
     }
 }
@@ -258,4 +285,60 @@ fn substitute_output_fact(
         }
     }
     substituted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProvenanceLoopState;
+    use crate::{
+        abstract_interp::JoinSemiLattice,
+        unconstrained_advice::shared::{join_loop_head_env, Env},
+    };
+    use masm_decompiler::{
+        ir::{LoopPhi, Var},
+        types::VarKey,
+    };
+
+    /// Return a small synthetic SSA variable for provenance-loop tests.
+    fn test_var(index: u8) -> Var {
+        Var::new(u64::from(index).into(), usize::from(index))
+    }
+
+    #[test]
+    fn loop_state_join_preserves_phi_metadata_across_iterations() {
+        let init = test_var(0);
+        let step = test_var(1);
+        let dest = test_var(2);
+        let phi = LoopPhi {
+            dest: dest.clone(),
+            init: init.clone(),
+            step: step.clone(),
+        };
+
+        let mut entry_env = Env::default();
+        let shared_identity = VarKey::from_var(&init);
+        entry_env.set_var_identity(&init, shared_identity.clone());
+
+        let mut body_env = Env::default();
+        body_env.set_var_identity(&step, shared_identity.clone());
+
+        let loop_head = join_loop_head_env(
+            &entry_env,
+            &entry_env,
+            &body_env,
+            std::slice::from_ref(&phi),
+        );
+        assert_eq!(loop_head.identity_for_var(&dest), shared_identity);
+
+        let mut state =
+            ProvenanceLoopState::at_loop_head(&entry_env, std::slice::from_ref(&phi));
+        let candidate = ProvenanceLoopState::from_body_env(
+            body_env.clone(),
+            &entry_env,
+            std::slice::from_ref(&phi),
+        );
+
+        assert!(state.join_assign(&candidate));
+        assert_eq!(state.env.identity_for_var(&dest), shared_identity);
+    }
 }
