@@ -1,3 +1,6 @@
+mod corpus;
+mod stdlib_eval;
+
 use masm_decompiler::frontend::testing::workspace_from_modules;
 
 use super::{

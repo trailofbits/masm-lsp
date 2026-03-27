@@ -14,12 +14,6 @@ mod u32_domain;
 mod walker;
 
 #[cfg(test)]
-mod corpus;
-
-#[cfg(test)]
-mod stdlib_eval;
-
-#[cfg(test)]
 mod tests;
 
 pub use inter::{infer_unconstrained_advice, infer_unconstrained_advice_in_workspace};
