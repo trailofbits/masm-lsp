@@ -15,7 +15,10 @@ use super::{
         expr_u32_validity, intrinsic_requires_u32_precondition, refine_if_envs, seed_input_env,
         stmt_span, Env, MAX_LOOP_PASSES,
     },
-    summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
+    summary::{
+        AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap,
+        CallArgumentRequirement,
+    },
 };
 
 /// Collect U32 diagnostics for all procedures using already-computed provenance summaries.
@@ -341,6 +344,7 @@ impl<'a> ProcU32Analyzer<'a> {
             );
             diagnostic.callee = Some(callee);
             diagnostic.arg_index = Some(index);
+            diagnostic.call_requirement = Some(CallArgumentRequirement::U32);
             diagnostics.push(diagnostic);
         }
         diagnostics

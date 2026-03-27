@@ -119,6 +119,15 @@ pub enum AdviceSinkKind {
     MerkleRoot,
 }
 
+/// Refinement for call-argument diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallArgumentRequirement {
+    /// The callee expects a `U32` argument.
+    U32,
+    /// The callee expects a proven non-zero argument.
+    NonZero,
+}
+
 /// Diagnostic emitted by unconstrained-advice analysis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdviceDiagnostic {
@@ -134,6 +143,8 @@ pub struct AdviceDiagnostic {
     pub callee: Option<SymbolPath>,
     /// Optional argument index for call-argument diagnostics.
     pub arg_index: Option<usize>,
+    /// Optional refinement for call-argument diagnostics.
+    pub call_requirement: Option<CallArgumentRequirement>,
     /// Kind of sink that triggered the diagnostic.
     pub sink: AdviceSinkKind,
 }
@@ -153,6 +164,7 @@ impl AdviceDiagnostic {
             message: message.into(),
             callee: None,
             arg_index: None,
+            call_requirement: None,
             sink,
         }
     }

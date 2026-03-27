@@ -1449,6 +1449,7 @@ dependencies = [
  "masm-decompiler",
  "miden-assembly-syntax",
  "miden-debug-types",
+ "serde_json",
 ]
 
 [[package]]

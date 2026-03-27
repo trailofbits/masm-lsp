@@ -1,6 +1,7 @@
 use crate::client::PublishDiagnostics;
 use crate::core_lib::{default_core_library_path, normalize_core_library_path};
 use crate::dmasm::{DocumentLanguage, detect_language};
+use crate::masm::diagnostics::{normalize_message, span_to_range};
 use crate::masm::code_lens::collect_code_lenses;
 use crate::masm::cursor_resolution::resolve_symbol_at_position;
 use crate::masm::inlay_hints::collect_inlay_hints;
@@ -36,6 +37,7 @@ use super::helpers::{
 const CMD_SET_CORE_PATH: &str = "masm-lsp.setCorePath";
 const CMD_DECOMPILE_PROCEDURE_AT_CURSOR: &str = "masm-lsp.decompileProcedureAtCursor";
 const CMD_DECOMPILE_FILE: &str = "masm-lsp.decompileFile";
+const CMD_GROUP_ADVICE_DIAGNOSTICS_BY_ORIGIN: &str = "masm-lsp.groupAdviceDiagnosticsByOrigin";
 
 #[tower_lsp::async_trait]
 impl<C> LanguageServer for Backend<C>
@@ -71,6 +73,7 @@ where
                     CMD_SET_CORE_PATH.to_string(),
                     CMD_DECOMPILE_PROCEDURE_AT_CURSOR.to_string(),
                     CMD_DECOMPILE_FILE.to_string(),
+                    CMD_GROUP_ADVICE_DIAGNOSTICS_BY_ORIGIN.to_string(),
                 ],
                 work_done_progress_options: Default::default(),
             }),
@@ -117,6 +120,9 @@ where
                 self.execute_decompile_procedure_at_cursor(&params).await
             }
             CMD_DECOMPILE_FILE => self.execute_decompile_file(&params).await,
+            CMD_GROUP_ADVICE_DIAGNOSTICS_BY_ORIGIN => {
+                self.execute_group_advice_diagnostics_by_origin(&params).await
+            }
             _ => Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
                 "unknown command: {}",
                 params.command
@@ -768,6 +774,70 @@ where
             }
         }
     }
+
+    async fn execute_group_advice_diagnostics_by_origin(
+        &self,
+        params: &ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        let Some(focus_uri) = parse_group_advice_argument(&params.arguments) else {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "masm-lsp.groupAdviceDiagnosticsByOrigin expects zero arguments or a single argument object: {\"uri\": \"file:///...\"}",
+            ));
+        };
+
+        let config = self.snapshot_config().await;
+        let effective_library_paths = self
+            .effective_library_paths_from(&config.library_paths)
+            .await;
+        let workspace = self
+            .build_analysis_workspace(focus_uri.as_ref(), &effective_library_paths)
+            .await;
+        let analysis = masm_analysis::AnalysisSnapshot::from_workspace(&workspace);
+        let focus_source_id = focus_uri
+            .as_ref()
+            .and_then(|uri| self.sources.find(&to_miden_uri(uri)));
+
+        let groups = masm_analysis::group_advice_diagnostics_by_origin(&analysis.advice_diagnostics)
+            .into_iter()
+            .filter(|group| {
+                focus_source_id.is_none_or(|source_id| {
+                    group.origin.source_id() == source_id
+                        || group
+                            .diagnostics
+                            .iter()
+                            .any(|diag| diag.span.source_id() == source_id)
+                })
+            })
+            .filter_map(|group| {
+                let origin = span_location_value(self.sources.as_ref(), group.origin)?;
+                let sinks = group
+                    .diagnostics
+                    .iter()
+                    .filter_map(|diag| {
+                        Some(serde_json::json!({
+                            "location": span_location_value(self.sources.as_ref(), diag.span)?,
+                            "procedure": diag.procedure.as_str(),
+                            "message": normalize_message(&diag.message),
+                        }))
+                    })
+                    .collect::<Vec<_>>();
+                let procedures = grouped_procedures(&group.diagnostics);
+                Some(serde_json::json!({
+                    "origin": origin,
+                    "message": normalize_message(&group.summary_message()),
+                    "sinkCount": sinks.len(),
+                    "procedures": procedures,
+                    "sinks": sinks,
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Some(serde_json::json!({
+            "scopeUri": focus_uri,
+            "unresolvedModules": analysis.unresolved_modules.iter().map(|module| module.as_str()).collect::<Vec<_>>(),
+            "groups": groups,
+        })))
+    }
 }
 
 fn workspace_parse_paths_from_initialize(params: &InitializeParams) -> Vec<LibraryPath> {
@@ -839,12 +909,44 @@ fn parse_decompile_file_argument(arguments: &[serde_json::Value]) -> Option<Url>
     value.get("uri").and_then(parse_uri_value)
 }
 
+fn parse_group_advice_argument(arguments: &[serde_json::Value]) -> Option<Option<Url>> {
+    match arguments {
+        [] => Some(None),
+        [value] => Some(Some(value.get("uri").and_then(parse_uri_value)?)),
+        _ => None,
+    }
+}
+
 fn parse_uri_value(value: &serde_json::Value) -> Option<Url> {
     value.as_str().and_then(|raw| Url::parse(raw).ok())
 }
 
 fn parse_position_value(value: &serde_json::Value) -> Option<Position> {
     serde_json::from_value(value.clone()).ok()
+}
+
+fn span_location_value(
+    sources: &miden_debug_types::DefaultSourceManager,
+    span: miden_debug_types::SourceSpan,
+) -> Option<serde_json::Value> {
+    let source = sources.get(span.source_id()).ok()?;
+    let uri = Url::parse(source.uri().as_str()).ok()?;
+    let range = span_to_range(sources, span)?;
+    Some(serde_json::json!({
+        "uri": uri,
+        "range": range,
+    }))
+}
+
+fn grouped_procedures(diagnostics: &[masm_analysis::AdviceDiagnostic]) -> Vec<String> {
+    let mut procedures = diagnostics
+        .iter()
+        .map(|diag| diag.procedure.as_str().to_string())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    procedures.sort();
+    procedures
 }
 
 fn decompilation_error_diagnostic_for_publish(

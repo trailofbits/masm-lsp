@@ -2,7 +2,6 @@
 
 use std::fmt::Write;
 
-use masm_decompiler::SymbolPath;
 use miden_debug_types::{SourceManager, SourceSpan};
 use yansi::Paint as _;
 
@@ -13,8 +12,8 @@ pub struct LintDiagnostic {
     pub message: String,
     /// Primary source span.
     pub span: SourceSpan,
-    /// Procedure in which the diagnostic was emitted.
-    pub procedure: SymbolPath,
+    /// Additional explanatory note rendered after the snippets.
+    pub note: String,
     /// Related source locations (e.g., advice origins).
     pub related: Vec<RelatedSpan>,
 }
@@ -58,7 +57,7 @@ pub fn render_diagnostic_to_string(diag: &LintDiagnostic, sources: &dyn SourceMa
 /// NN | source line
 ///    | ^^^
 ///    = help: <related message>
-///    = note: in procedure `name`
+///    = note: <note>
 /// ```
 fn write_diagnostic(out: &mut impl Write, diag: &LintDiagnostic, sources: &dyn SourceManager) {
     // Heading: warning message.
@@ -80,13 +79,7 @@ fn write_diagnostic(out: &mut impl Write, diag: &LintDiagnostic, sources: &dyn S
     }
 
     // Procedure note.
-    writeln!(
-        out,
-        "    {} note: in procedure `{}`",
-        "=".cyan().bold(),
-        diag.procedure.as_str()
-    )
-    .unwrap();
+    writeln!(out, "    {} note: {}", "=".cyan().bold(), diag.note).unwrap();
     writeln!(out).unwrap();
 }
 
@@ -255,7 +248,7 @@ end
             message: "the definition declares 2 inputs, but the inferred input count is 3"
                 .to_string(),
             span: finder.span_of("proc.foo.2"),
-            procedure: SymbolPath::new("foo"),
+            note: "in procedure `foo`".into(),
             related: Vec::new(),
         };
         let output = render_diagnostic_to_string(&diag, &sm);
@@ -274,7 +267,7 @@ end
         let diag = LintDiagnostic {
             message: "operand type mismatch: expected u32, found felt".to_string(),
             span: finder.span_of("u32checked_add"),
-            procedure: SymbolPath::new("bar"),
+            note: "in procedure `bar`".into(),
             related: Vec::new(),
         };
         let output = render_diagnostic_to_string(&diag, &sm);
@@ -293,7 +286,7 @@ end
         let diag = LintDiagnostic {
             message: "unconstrained advice value flows into arithmetic operation".to_string(),
             span: finder.span_of("add"),
-            procedure: SymbolPath::new("baz"),
+            note: "in procedure `baz`".into(),
             related: vec![RelatedSpan {
                 span: finder.span_of("adv_push.1"),
                 message: "unconstrained advice introduced here".to_string(),
@@ -310,7 +303,7 @@ end
         let diag = LintDiagnostic {
             message: "could not determine stack effect".to_string(),
             span: SourceSpan::UNKNOWN,
-            procedure: SymbolPath::new("qux"),
+            note: "in procedure `qux`".into(),
             related: Vec::new(),
         };
         let output = render_diagnostic_to_string(&diag, &sm);
@@ -333,7 +326,7 @@ end
         let diag = LintDiagnostic {
             message: "suspicious constant on line 12".to_string(),
             span: finder.span_of("push.42"),
-            procedure: SymbolPath::new("deep"),
+            note: "in procedure `deep`".into(),
             related: Vec::new(),
         };
         let output = render_diagnostic_to_string(&diag, &sm);
@@ -352,7 +345,7 @@ end
         let diag = LintDiagnostic {
             message: "unconstrained advice used as memory address".to_string(),
             span: finder.span_of("mem_load"),
-            procedure: SymbolPath::new("unsafe_load"),
+            note: "in procedure `unsafe_load`".into(),
             related: vec![RelatedSpan {
                 span: finder.span_of("adv_push.1"),
                 message: "unconstrained advice introduced here".to_string(),
@@ -376,7 +369,7 @@ end
         let diag = LintDiagnostic {
             message: "unconstrained advice used as Merkle tree root".to_string(),
             span: finder.span_of("mtree_get"),
-            procedure: SymbolPath::new("unsafe_verify"),
+            note: "in procedure `unsafe_verify`".into(),
             related: vec![RelatedSpan {
                 span: finder.span_of("adv_push.4"),
                 message: "unconstrained advice introduced here".to_string(),

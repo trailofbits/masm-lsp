@@ -1,6 +1,9 @@
 use masm_decompiler::frontend::testing::workspace_from_modules;
 
-use super::{AdviceDiagnostic, AdviceDiagnosticsMap};
+use super::{
+    AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, CallArgumentRequirement,
+    group_advice_diagnostics_by_origin,
+};
 use crate::infer_unconstrained_advice_in_workspace;
 
 fn diagnostics_for(diags: &AdviceDiagnosticsMap, proc: &str) -> Vec<AdviceDiagnostic> {
@@ -8,6 +11,13 @@ fn diagnostics_for(diags: &AdviceDiagnosticsMap, proc: &str) -> Vec<AdviceDiagno
         .get(&crate::SymbolPath::new(proc.to_string()))
         .cloned()
         .unwrap_or_default()
+}
+
+fn is_u32_relevant_diagnostic(diag: &AdviceDiagnostic) -> bool {
+    matches!(
+        diag.sink,
+        AdviceSinkKind::U32Expression | AdviceSinkKind::U32Intrinsic
+    ) || matches!(diag.call_requirement, Some(CallArgumentRequirement::U32))
 }
 
 #[test]
@@ -122,9 +132,38 @@ fn call_argument_warning_uses_callee_u32_requirement() {
         "expected call-argument advice diagnostic, got: {caller:?}"
     );
     assert!(
+        caller.iter().any(|diag| {
+            diag.call_requirement == Some(CallArgumentRequirement::U32)
+                && is_u32_relevant_diagnostic(diag)
+        }),
+        "expected structured u32 call-argument classification, got: {caller:?}"
+    );
+    assert!(
         caller.iter().any(|diag| !diag.origins.is_empty()),
         "expected call-argument origin spans, got: {caller:?}"
     );
+}
+
+#[test]
+fn u32_filter_excludes_nonzero_call_arguments() {
+    let mut u32_call = AdviceDiagnostic::new(
+        crate::SymbolPath::new("advice::caller".to_string()),
+        miden_debug_types::SourceSpan::UNKNOWN,
+        AdviceSinkKind::CallArgument,
+        "u32 call",
+    );
+    u32_call.call_requirement = Some(CallArgumentRequirement::U32);
+
+    let mut nonzero_call = AdviceDiagnostic::new(
+        crate::SymbolPath::new("advice::caller".to_string()),
+        miden_debug_types::SourceSpan::UNKNOWN,
+        AdviceSinkKind::CallArgument,
+        "nonzero call",
+    );
+    nonzero_call.call_requirement = Some(CallArgumentRequirement::NonZero);
+
+    assert!(is_u32_relevant_diagnostic(&u32_call));
+    assert!(!is_u32_relevant_diagnostic(&nonzero_call));
 }
 
 #[test]
@@ -171,6 +210,37 @@ fn branch_join_overtaints_conservatively() {
         maybe_bad.iter().any(|diag| diag.message.contains("u32 operation")),
         "expected conservative branch-join diagnostic, got: {maybe_bad:?}"
     );
+}
+
+#[test]
+fn origin_grouping_deduplicates_each_origin_per_diagnostic() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    dup\n    push.1\n    u32wrapping_add\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+
+    let groups = group_advice_diagnostics_by_origin(&diagnostics);
+
+    assert_eq!(groups.len(), 1, "expected one root-cause group, got: {groups:?}");
+    assert_eq!(groups[0].sink_count(), 1);
+}
+
+#[test]
+fn origin_grouping_sorts_largest_fanout_first() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc bad\n    adv_push.1\n    dup\n    push.1\n    u32wrapping_add\n    push.1\n    u32wrapping_add\nend\n\nproc other\n    adv_push.1\n    push.1\n    u32wrapping_add\nend\n",
+    )]);
+    let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+
+    let groups = group_advice_diagnostics_by_origin(&diagnostics);
+
+    assert!(
+        groups.len() >= 2,
+        "expected at least two root-cause groups, got: {groups:?}"
+    );
+    assert!(groups[0].sink_count() >= groups[1].sink_count());
 }
 
 #[test]

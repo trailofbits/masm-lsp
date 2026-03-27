@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use masm_analysis::{
-    AdviceDiagnostic, AnalysisSnapshot, SignatureMismatch, TypeDiagnostic,
-    signature_mismatch_message, signature_mismatches_from_snapshot,
+    AdviceDiagnostic, AdviceRootCauseGroup, AnalysisSnapshot, SignatureMismatch, TypeDiagnostic,
+    group_advice_diagnostics_by_origin, signature_mismatch_message,
+    signature_mismatches_from_snapshot,
 };
 use masm_decompiler::{
     SymbolPath,
@@ -39,6 +40,10 @@ struct Cli {
     /// Disable colored output
     #[arg(long)]
     no_color: bool,
+
+    /// Group advice warnings by root-cause origin instead of listing each sink separately
+    #[arg(long)]
+    group_by_origin: bool,
 }
 
 fn main() {
@@ -145,9 +150,15 @@ fn run(cli: Cli) -> i32 {
     // }
 
     // Advice diagnostics.
-    for advice_diags in snapshot.advice_diagnostics.values() {
-        for ad in advice_diags {
-            diagnostics.push(advice_diagnostic_to_lint(ad));
+    if cli.group_by_origin {
+        for group in group_advice_diagnostics_by_origin(&snapshot.advice_diagnostics) {
+            diagnostics.push(root_cause_group_to_lint(&group));
+        }
+    } else {
+        for advice_diags in snapshot.advice_diagnostics.values() {
+            for ad in advice_diags {
+                diagnostics.push(advice_diagnostic_to_lint(ad));
+            }
         }
     }
 
@@ -210,7 +221,7 @@ fn signature_mismatch_to_lint(m: &SignatureMismatch) -> Option<LintDiagnostic> {
     Some(LintDiagnostic {
         message,
         span: m.span,
-        procedure,
+        note: format!("in procedure `{}`", procedure.as_str()),
         related: Vec::new(),
     })
 }
@@ -221,7 +232,7 @@ fn type_diagnostic_to_lint(td: &TypeDiagnostic) -> LintDiagnostic {
     LintDiagnostic {
         message: td.message.clone(),
         span: td.span,
-        procedure: td.procedure.clone(),
+        note: format!("in procedure `{}`", td.procedure.as_str()),
         related: Vec::new(),
     }
 }
@@ -241,8 +252,58 @@ fn advice_diagnostic_to_lint(ad: &AdviceDiagnostic) -> LintDiagnostic {
     LintDiagnostic {
         message: ad.message.clone(),
         span: ad.span,
-        procedure: ad.procedure.clone(),
+        note: format!("in procedure `{}`", ad.procedure.as_str()),
         related,
+    }
+}
+
+/// Convert a root-cause group into a grouped [`LintDiagnostic`].
+fn root_cause_group_to_lint(group: &AdviceRootCauseGroup) -> LintDiagnostic {
+    let mut procedures = group
+        .diagnostics
+        .iter()
+        .map(|diag| diag.procedure.as_str().to_string())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    procedures.sort();
+
+    let related = group
+        .diagnostics
+        .iter()
+        .map(|diag| RelatedSpan {
+            span: diag.span,
+            message: format!("{} (in procedure `{}`)", diag.message, diag.procedure.as_str()),
+        })
+        .collect();
+
+    LintDiagnostic {
+        message: group.summary_message(),
+        span: group.origin,
+        note: grouped_procedure_note(&group.diagnostics),
+        related,
+    }
+}
+
+fn grouped_procedure_note(diagnostics: &[AdviceDiagnostic]) -> String {
+    let mut procedures = diagnostics
+        .iter()
+        .map(|diag| diag.procedure.as_str().to_string())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    procedures.sort();
+
+    match procedures.as_slice() {
+        [] => "root cause group has no downstream procedures".to_string(),
+        [procedure] => format!("root cause fan-out stays within procedure `{procedure}`"),
+        [first, second] => {
+            format!("root cause fan-out reaches procedures `{first}` and `{second}`")
+        }
+        [first, second, rest @ ..] => format!(
+            "root cause fan-out reaches procedures `{first}`, `{second}`, and {} more",
+            rest.len()
+        ),
     }
 }
 

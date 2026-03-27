@@ -20,7 +20,8 @@ mod unconstrained_advice;
 
 pub use unconstrained_advice::{
     infer_unconstrained_advice, infer_unconstrained_advice_in_workspace, AdviceDiagnostic,
-    AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
+    AdviceDiagnosticsMap, AdviceRootCauseGroup, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
+    CallArgumentRequirement, group_advice_diagnostics_by_origin,
 };
 
 pub use masm_decompiler::signature::SignatureMap;
