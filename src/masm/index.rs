@@ -627,7 +627,7 @@ mod tests {
 
         // Search for "format"
         let found = index.workspace_symbols("format");
-        assert!(found.len() >= 1);
+        assert!(!found.is_empty());
 
         // Search for non-existent
         let found = index.workspace_symbols("nonexistent");

@@ -69,11 +69,7 @@ async fn publish_diagnostics_sends_updated_version() {
         .await;
 
     // Send diagnostics for version 1
-    backend
-        .publish_diagnostics(uri.clone())
-        .await
-        .iter()
-        .count();
+    let _ = backend.publish_diagnostics(uri.clone()).await.len();
 
     // Modify document to version 2
     backend
@@ -379,6 +375,90 @@ async fn execute_command_decompile_file_returns_output() {
             json!("use miden::core::crypto::hashes"),
         ]
     );
+}
+
+#[tokio::test]
+async fn execute_command_group_advice_diagnostics_by_origin_returns_grouped_payload() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let uri = Url::parse("file:///tmp/group_advice_success.masm").expect("valid URI");
+
+    backend
+        .handle_open(
+            uri.clone(),
+            1,
+            "@locals(1)\nproc bad\n    adv_push.1\n    loc_store.0\n    loc_load.0\n    push.1\n    u32wrapping_add\n    drop\n    loc_load.0\n    push.1\n    u32wrapping_add\nend\n".to_string(),
+        )
+        .await
+        .expect("open");
+
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.groupAdviceDiagnosticsByOrigin".to_string(),
+        arguments: vec![json!({
+            "uri": uri.as_str(),
+        })],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend
+        .execute_command(params)
+        .await
+        .expect("execute command")
+        .expect("grouped analysis payload");
+
+    let groups = result
+        .get("groups")
+        .and_then(serde_json::Value::as_array)
+        .expect("groups array");
+    assert_eq!(groups.len(), 1, "expected one origin group");
+
+    let group = groups[0].as_object().expect("group object");
+    assert_eq!(
+        group
+            .get("sinkCount")
+            .and_then(serde_json::Value::as_u64)
+            .expect("sink count"),
+        2
+    );
+    assert!(
+        group
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .expect("group message")
+            .contains("downstream sink"),
+        "expected grouped message to summarize downstream sinks"
+    );
+    let procedures = group
+        .get("procedures")
+        .and_then(serde_json::Value::as_array)
+        .expect("procedures array");
+    assert_eq!(procedures.len(), 1);
+    assert!(
+        procedures[0]
+            .as_str()
+            .expect("procedure name")
+            .ends_with("::bad"),
+        "expected grouped payload to retain procedure names: {procedures:?}"
+    );
+    let sinks = group
+        .get("sinks")
+        .and_then(serde_json::Value::as_array)
+        .expect("sinks array");
+    assert_eq!(sinks.len(), 2);
+}
+
+#[tokio::test]
+async fn execute_command_group_advice_diagnostics_by_origin_rejects_extra_arguments() {
+    let client = RecordingClient::default();
+    let backend = Backend::new(client.clone());
+    let params = ExecuteCommandParams {
+        command: "masm-lsp.groupAdviceDiagnosticsByOrigin".to_string(),
+        arguments: vec![json!({ "uri": "file:///tmp/one.masm" }), json!({})],
+        work_done_progress_params: Default::default(),
+    };
+
+    let result = backend.execute_command(params).await;
+    assert!(result.is_err(), "expected invalid params error");
 }
 
 #[tokio::test]
@@ -1219,15 +1299,18 @@ fn command_error_diagnostic(error: &tower_lsp::jsonrpc::Error) -> Option<Diagnos
 
 #[derive(Clone, Default)]
 struct RecordingClient {
-    published: Arc<tokio::sync::Mutex<Vec<(Url, Vec<Diagnostic>, Option<i32>)>>>,
+    published: Arc<tokio::sync::Mutex<PublishedDiagnostics>>,
 }
 
 impl RecordingClient {
-    async fn take_published(&self) -> Vec<(Url, Vec<Diagnostic>, Option<i32>)> {
+    async fn take_published(&self) -> PublishedDiagnostics {
         let mut guard = self.published.lock().await;
         guard.drain(..).collect()
     }
 }
+
+type PublishedDiagnostic = (Url, Vec<Diagnostic>, Option<i32>);
+type PublishedDiagnostics = Vec<PublishedDiagnostic>;
 
 #[async_trait::async_trait]
 impl PublishDiagnostics for RecordingClient {

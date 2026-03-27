@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use masm_decompiler::{
-    ir::Stmt,
+    ir::{LoopPhi, Stmt},
     SymbolPath,
 };
 
@@ -14,10 +14,11 @@ use super::{
     shared::{
         apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
         apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
-        refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
+        join_loop_head_env, refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
     },
     summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSummaryMap},
 };
+use crate::abstract_interp::{iterate_to_fixpoint, FixpointConfig, JoinSemiLattice};
 
 /// Trait for passes that detect specific advice-reaching-sink patterns.
 pub(crate) trait SinkDetector {
@@ -64,6 +65,51 @@ fn walk_procedure<D: SinkDetector>(
 struct EvalResult {
     env: Env,
     diagnostics: Vec<AdviceDiagnostic>,
+}
+
+/// Loop-head state used when sink walkers iterate to a stable environment.
+///
+/// The walker still collects diagnostics from a final pass over the stabilized loop-head
+/// environment, but the fixpoint engine now owns the convergence bookkeeping.
+#[derive(Clone)]
+struct SinkLoopState<'a> {
+    env: Env,
+    entry_env: &'a Env,
+    phis: &'a [LoopPhi],
+}
+
+impl<'a> SinkLoopState<'a> {
+    /// Build the initial loop-head state from the loop entry environment.
+    fn at_loop_head(entry_env: &'a Env, phis: &'a [LoopPhi]) -> Self {
+        Self {
+            env: entry_env.clone(),
+            entry_env,
+            phis,
+        }
+    }
+
+    /// Build the candidate state produced by one loop-body evaluation.
+    fn from_body_env(body_env: Env, entry_env: &'a Env, phis: &'a [LoopPhi]) -> Self {
+        Self {
+            env: body_env,
+            entry_env,
+            phis,
+        }
+    }
+
+    /// Return a clone of the stabilized loop-head environment.
+    fn env(&self) -> Env {
+        self.env.clone()
+    }
+}
+
+impl JoinSemiLattice for SinkLoopState<'_> {
+    fn join_assign(&mut self, other: &Self) -> bool {
+        let next_env = join_loop_head_env(&self.env, self.entry_env, &other.env, self.phis);
+        let changed = self.env != next_env;
+        self.env = next_env;
+        changed
+    }
 }
 
 /// Evaluate a statement block from top to bottom.
@@ -205,54 +251,22 @@ fn eval_loop_block<D: SinkDetector>(
     detector: &D,
     summaries: &AdviceSummaryMap,
     body: &[Stmt],
-    phis: &[masm_decompiler::ir::LoopPhi],
+    phis: &[LoopPhi],
     entry_env: Env,
 ) -> EvalResult {
-    let mut loop_env = entry_env.clone();
+    let loop_state = iterate_to_fixpoint(
+        SinkLoopState::at_loop_head(&entry_env, phis),
+        FixpointConfig::new(MAX_LOOP_PASSES),
+        |loop_env| {
+            let body_result = eval_block(detector, summaries, body, loop_env.env());
+            SinkLoopState::from_body_env(body_result.env, &entry_env, phis)
+        },
+    )
+    .into_state();
 
-    for _ in 0..MAX_LOOP_PASSES {
-        let body_result = eval_block(detector, summaries, body, loop_env.clone());
-
-        let mut next_env = loop_env.join(&body_result.env);
-        for phi in phis {
-            let merged = entry_env
-                .fact_for_var(&phi.init)
-                .join(&body_result.env.fact_for_var(&phi.step));
-            next_env.set_var_fact(&phi.dest, merged);
-            assign_phi_metadata(
-                &phi.dest,
-                &phi.init,
-                &entry_env,
-                &phi.step,
-                &body_result.env,
-                &mut next_env,
-            );
-        }
-
-        if next_env == loop_env {
-            loop_env = next_env;
-            break;
-        }
-        loop_env = next_env;
-    }
-
-    let body_result = eval_block(detector, summaries, body, loop_env.clone());
+    let body_result = eval_block(detector, summaries, body, loop_state.env());
     let diagnostics = body_result.diagnostics;
-    loop_env = loop_env.join(&body_result.env);
-    for phi in phis {
-        let merged = entry_env
-            .fact_for_var(&phi.init)
-            .join(&body_result.env.fact_for_var(&phi.step));
-        loop_env.set_var_fact(&phi.dest, merged);
-        assign_phi_metadata(
-            &phi.dest,
-            &phi.init,
-            &entry_env,
-            &phi.step,
-            &body_result.env,
-            &mut loop_env,
-        );
-    }
+    let loop_env = join_loop_head_env(&loop_state.env(), &entry_env, &body_result.env, phis);
 
     EvalResult {
         env: loop_env,

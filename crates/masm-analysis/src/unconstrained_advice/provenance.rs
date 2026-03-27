@@ -1,7 +1,7 @@
 //! Interprocedural provenance summaries for unconstrained advice.
 
 use masm_decompiler::{
-    ir::{LocalAccessKind, Stmt},
+    ir::{LocalAccessKind, LoopPhi, Stmt, Var},
     SymbolPath,
 };
 
@@ -9,10 +9,12 @@ use super::{
     shared::{
         apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
         apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
-        refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
+        join_loop_head_env, refine_if_envs, seed_input_env, Env, MAX_LOOP_PASSES,
     },
     summary::{AdviceSummary, AdviceSummaryMap},
+    u32_domain::U32Validity,
 };
+use crate::abstract_interp::{iterate_to_fixpoint, FixpointConfig, JoinSemiLattice};
 
 /// Analyze one lifted procedure and summarize which outputs may carry unconstrained advice.
 pub(crate) fn analyze_proc_provenance(
@@ -26,7 +28,7 @@ pub(crate) fn analyze_proc_provenance(
     if result.opaque {
         AdviceSummary::unknown_with_arity(output_count)
     } else {
-        build_summary(stmts, output_count, &result.env)
+        build_summary(input_count, stmts, output_count, &result.env)
     }
 }
 
@@ -37,8 +39,58 @@ struct EvalResult {
     opaque: bool,
 }
 
+/// Loop-head state driven by the generic fixpoint engine.
+///
+/// The engine still operates on `join_assign`, but loop phi updates are part of the loop-head
+/// transition itself rather than a second generic environment join.
+#[derive(Clone)]
+struct ProvenanceLoopState<'a> {
+    env: Env,
+    entry_env: &'a Env,
+    phis: &'a [LoopPhi],
+}
+
+impl<'a> ProvenanceLoopState<'a> {
+    /// Build the initial loop-head state from the loop entry environment.
+    fn at_loop_head(entry_env: &'a Env, phis: &'a [LoopPhi]) -> Self {
+        Self {
+            env: entry_env.clone(),
+            entry_env,
+            phis,
+        }
+    }
+
+    /// Build the candidate state produced by one loop-body evaluation.
+    fn from_body_env(body_env: Env, entry_env: &'a Env, phis: &'a [LoopPhi]) -> Self {
+        Self {
+            env: body_env,
+            entry_env,
+            phis,
+        }
+    }
+
+    /// Consume the loop state and return its loop-head environment.
+    fn into_env(self) -> Env {
+        self.env
+    }
+}
+
+impl JoinSemiLattice for ProvenanceLoopState<'_> {
+    fn join_assign(&mut self, other: &Self) -> bool {
+        let next_env = join_loop_head_env(&self.env, self.entry_env, &other.env, self.phis);
+        let changed = self.env != next_env;
+        self.env = next_env;
+        changed
+    }
+}
+
 /// Build the final output summary from the return statement.
-fn build_summary(stmts: &[Stmt], output_count: usize, env: &Env) -> AdviceSummary {
+fn build_summary(
+    input_count: usize,
+    stmts: &[Stmt],
+    output_count: usize,
+    env: &Env,
+) -> AdviceSummary {
     let Some(values) = stmts.iter().find_map(|stmt| match stmt {
         Stmt::Return { values, .. } => Some(values.as_slice()),
         _ => None,
@@ -47,14 +99,51 @@ fn build_summary(stmts: &[Stmt], output_count: usize, env: &Env) -> AdviceSummar
     };
 
     let mut outputs = Vec::with_capacity(output_count);
+    let mut u32_outputs = Vec::with_capacity(output_count);
+    let mut forwarded_inputs = Vec::with_capacity(output_count);
     for index in (0..output_count).rev() {
         let fact = values
             .get(index)
             .map(|var| env.fact_for_var(var))
             .unwrap_or_else(super::domain::AdviceFact::bottom);
+        let forwarded_input = values
+            .get(index)
+            .and_then(|var| exact_forwarded_input(input_count, var, env));
+        let direct_validity = values
+            .get(index)
+            .map(|var| env.u32_validity_for_var(var))
+            .unwrap_or(U32Validity::Unknown);
+        let forwarded_validity = forwarded_input
+            .map(|input_position| env.u32_validity_for_var(&input_var_for_position(input_count, input_position)))
+            .unwrap_or(U32Validity::Unknown);
+        let validity = if direct_validity.is_proven() || forwarded_validity.is_proven() {
+            U32Validity::ProvenU32
+        } else {
+            U32Validity::Unknown
+        };
         outputs.push(fact);
+        u32_outputs.push(validity);
+        forwarded_inputs.push(forwarded_input);
     }
-    AdviceSummary::new(outputs)
+    let u32_inputs = (0..input_count)
+        .map(|input_position| input_var_for_position(input_count, input_position))
+        .map(|input_var| env.u32_validity_for_var(&input_var))
+        .collect();
+    AdviceSummary::with_forwarding(outputs, u32_outputs, forwarded_inputs, u32_inputs)
+}
+
+/// Return the exact input position forwarded by an output, if the output aliases that input.
+fn exact_forwarded_input(input_count: usize, output: &Var, env: &Env) -> Option<usize> {
+    let output_identity = env.identity_for_var(output);
+    (0..input_count).find(|&input_position| {
+        env.identity_for_var(&input_var_for_position(input_count, input_position)) == output_identity
+    })
+}
+
+/// Return the synthetic SSA variable used for one lifted procedure input.
+fn input_var_for_position(input_count: usize, input_position: usize) -> Var {
+    let depth = input_count - 1 - input_position;
+    Var::new((depth as u64).into(), depth)
 }
 
 /// Evaluate a statement block from top to bottom.
@@ -168,42 +257,23 @@ fn eval_stmt(stmt: &Stmt, mut env: Env, callee_summaries: &AdviceSummaryMap) -> 
 /// Evaluate a structured loop body conservatively.
 fn eval_loop_block(
     body: &[Stmt],
-    phis: &[masm_decompiler::ir::LoopPhi],
+    phis: &[LoopPhi],
     entry_env: Env,
     callee_summaries: &AdviceSummaryMap,
 ) -> EvalResult {
-    let mut loop_env = entry_env.clone();
     let mut opaque = false;
-
-    for _ in 0..MAX_LOOP_PASSES {
-        let body_result = eval_block(body, loop_env.clone(), callee_summaries);
-        opaque |= body_result.opaque;
-
-        let mut next_env = loop_env.join(&body_result.env);
-        for phi in phis {
-            let merged = entry_env
-                .fact_for_var(&phi.init)
-                .join(&body_result.env.fact_for_var(&phi.step));
-            next_env.set_var_fact(&phi.dest, merged);
-            assign_phi_metadata(
-                &phi.dest,
-                &phi.init,
-                &entry_env,
-                &phi.step,
-                &body_result.env,
-                &mut next_env,
-            );
-        }
-
-        if next_env == loop_env {
-            loop_env = next_env;
-            break;
-        }
-        loop_env = next_env;
-    }
+    let result = iterate_to_fixpoint(
+        ProvenanceLoopState::at_loop_head(&entry_env, phis),
+        FixpointConfig::new(MAX_LOOP_PASSES),
+        |loop_env| {
+            let body_result = eval_block(body, loop_env.env.clone(), callee_summaries);
+            opaque |= body_result.opaque;
+            ProvenanceLoopState::from_body_env(body_result.env, &entry_env, phis)
+        },
+    );
 
     EvalResult {
-        env: loop_env,
+        env: result.into_state().into_env(),
         opaque,
     }
 }
@@ -217,17 +287,11 @@ pub(crate) fn assign_call_results(
     callee_summaries: &AdviceSummaryMap,
 ) {
     let Some(summary) = callee_summaries.get(&SymbolPath::new(target.to_string())) else {
-        for result in results {
-            env.set_var_fact(result, super::domain::AdviceFact::bottom());
-            env.clear_var_metadata(result);
-        }
+        clear_call_results(env, results);
         return;
     };
     if summary.is_unknown() {
-        for result in results {
-            env.set_var_fact(result, super::domain::AdviceFact::bottom());
-            env.clear_var_metadata(result);
-        }
+        clear_call_results(env, results);
         return;
     }
 
@@ -235,11 +299,59 @@ pub(crate) fn assign_call_results(
         .iter()
         .map(|arg| env.fact_for_var(arg))
         .collect::<Vec<_>>();
-    for (result, summary_fact) in results.iter().zip(summary.outputs.iter()) {
+    let caller_arg_u32_validity = args
+        .iter()
+        .map(|arg| env.u32_validity_for_var(arg))
+        .collect::<Vec<_>>();
+    for ((arg, summary_u32), caller_u32) in args
+        .iter()
+        .zip(summary.u32_inputs().iter())
+        .zip(caller_arg_u32_validity.iter().copied())
+    {
+        env.set_var_u32_validity(
+            arg,
+            if summary_u32.is_proven() || caller_u32.is_proven() {
+                U32Validity::ProvenU32
+            } else {
+                U32Validity::Unknown
+            },
+        );
+    }
+    for (((result, summary_fact), summary_u32), forwarded_input) in results
+        .iter()
+        .zip(summary.outputs.iter())
+        .zip(summary.u32_outputs().iter())
+        .zip(summary.forwarded_inputs().iter())
+    {
         env.set_var_fact(result, substitute_output_fact(summary_fact, &arg_facts));
+        let forwarded_arg = forwarded_input.and_then(|input_index| args.get(input_index));
+        let forwarded_validity = forwarded_arg
+            .map(|arg| env.u32_validity_for_var(arg))
+            .unwrap_or(U32Validity::Unknown);
+        env.set_var_u32_validity(
+            result,
+            if summary_u32.is_proven() || forwarded_validity.is_proven() {
+                U32Validity::ProvenU32
+            } else {
+                U32Validity::Unknown
+            },
+        );
+        if let Some(arg) = forwarded_arg {
+            env.set_var_identity(result, env.identity_for_var(arg));
+            env.set_var_zero_test(result, env.zero_test_for_var(arg));
+        } else {
+            env.clear_var_metadata(result);
+        }
+    }
+    for result in results.iter().skip(summary.output_count()) {
+        env.set_var_fact(result, super::domain::AdviceFact::bottom());
         env.clear_var_metadata(result);
     }
-    for result in results.iter().skip(summary.outputs.len()) {
+}
+
+/// Clear call outputs when the callee is missing or opaque.
+fn clear_call_results(env: &mut Env, results: &[masm_decompiler::ir::Var]) {
+    for result in results {
         env.set_var_fact(result, super::domain::AdviceFact::bottom());
         env.clear_var_metadata(result);
     }
@@ -258,4 +370,60 @@ fn substitute_output_fact(
         }
     }
     substituted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProvenanceLoopState;
+    use crate::{
+        abstract_interp::JoinSemiLattice,
+        unconstrained_advice::shared::{join_loop_head_env, Env},
+    };
+    use masm_decompiler::{
+        ir::{LoopPhi, Var},
+        types::VarKey,
+    };
+
+    /// Return a small synthetic SSA variable for provenance-loop tests.
+    fn test_var(index: u8) -> Var {
+        Var::new(u64::from(index).into(), usize::from(index))
+    }
+
+    #[test]
+    fn loop_state_join_preserves_phi_metadata_across_iterations() {
+        let init = test_var(0);
+        let step = test_var(1);
+        let dest = test_var(2);
+        let phi = LoopPhi {
+            dest: dest.clone(),
+            init: init.clone(),
+            step: step.clone(),
+        };
+
+        let mut entry_env = Env::default();
+        let shared_identity = VarKey::from_var(&init);
+        entry_env.set_var_identity(&init, shared_identity.clone());
+
+        let mut body_env = Env::default();
+        body_env.set_var_identity(&step, shared_identity.clone());
+
+        let loop_head = join_loop_head_env(
+            &entry_env,
+            &entry_env,
+            &body_env,
+            std::slice::from_ref(&phi),
+        );
+        assert_eq!(loop_head.identity_for_var(&dest), shared_identity);
+
+        let mut state =
+            ProvenanceLoopState::at_loop_head(&entry_env, std::slice::from_ref(&phi));
+        let candidate = ProvenanceLoopState::from_body_env(
+            body_env.clone(),
+            &entry_env,
+            std::slice::from_ref(&phi),
+        );
+
+        assert!(state.join_assign(&candidate));
+        assert_eq!(state.env.identity_for_var(&dest), shared_identity);
+    }
 }
