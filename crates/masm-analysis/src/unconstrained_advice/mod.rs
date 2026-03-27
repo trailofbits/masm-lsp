@@ -9,6 +9,7 @@ mod provenance;
 mod shared;
 mod summary;
 mod u32;
+mod u32_domain;
 mod walker;
 
 #[cfg(test)]

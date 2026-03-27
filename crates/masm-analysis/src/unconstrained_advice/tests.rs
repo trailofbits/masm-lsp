@@ -221,6 +221,30 @@ fn adv_pipe_results_are_tainted() {
 }
 
 #[test]
+fn interprocedural_u32assert_sanitizes_mem_load_address() {
+    let ws = workspace_from_modules(&[(
+        "advice",
+        "proc sanitize\n    u32assert\nend\n\nproc caller\n    adv_push.1\n    exec.sanitize\n    mem_load\nend\n",
+    )]);
+    let (summaries, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
+    let sanitize = summaries
+        .get(&crate::SymbolPath::new("advice::sanitize".to_string()))
+        .expect("expected sanitize summary");
+    assert_eq!(
+        sanitize.u32_inputs().first().copied(),
+        Some(super::u32_domain::U32Validity::ProvenU32),
+        "expected sanitize summary to preserve a proven-u32 input postcondition, got: {sanitize:?}"
+    );
+    let caller = diagnostics_for(&diagnostics, "advice::caller");
+    assert!(
+        caller
+            .iter()
+            .all(|diag| !diag.message.contains("memory address")),
+        "expected no interprocedural memory address diagnostic after u32assert, got: {caller:?}"
+    );
+}
+
+#[test]
 fn diagnostics_retain_multiple_advice_origins() {
     let ws = workspace_from_modules(&[(
         "advice",

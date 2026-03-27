@@ -12,8 +12,8 @@ use super::{
     shared::{
         apply_intrinsic_effect, apply_local_load_scalar, apply_local_load_word, apply_local_store,
         apply_local_store_word, assign_expr_metadata, assign_phi_metadata, expr_output_fact,
-        intrinsic_requires_u32_precondition, refine_if_envs, seed_input_env, stmt_span, Env,
-        MAX_LOOP_PASSES,
+        expr_u32_validity, intrinsic_requires_u32_precondition, refine_if_envs, seed_input_env,
+        stmt_span, Env, MAX_LOOP_PASSES,
     },
     summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
 };
@@ -324,7 +324,10 @@ impl<'a> ProcU32Analyzer<'a> {
         let mut diagnostics = Vec::new();
         for (index, (arg, expected)) in args.iter().zip(summary.inputs.iter()).enumerate() {
             let arg_fact = env.fact_for_var(arg);
-            if *expected != TypeRequirement::U32 || !arg_fact.has_concrete_sources() {
+            if *expected != TypeRequirement::U32
+                || !arg_fact.has_concrete_sources()
+                || env.u32_validity_for_var(arg).is_proven()
+            {
                 continue;
             }
             let callee = SymbolPath::new(target.to_string());
@@ -359,7 +362,7 @@ fn expr_u32_sink_fact(expr: &Expr, env: &Env) -> AdviceFact {
             .join(&expr_u32_sink_fact(else_expr, env)),
         Expr::Unary(op, inner) => match op {
             UnOp::U32Not | UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
-                expr_u32_sink_fact(inner, env).join(&expr_output_fact(inner, env))
+                expr_u32_sink_fact(inner, env).join(&u32_operand_fact(inner, env))
             }
             _ => expr_u32_sink_fact(inner, env),
         },
@@ -378,10 +381,8 @@ fn expr_u32_sink_fact(expr: &Expr, env: &Env) -> AdviceFact {
                 | BinOp::U32Gte
                 | BinOp::U32WrappingAdd
                 | BinOp::U32WrappingSub
-                | BinOp::U32WrappingMul => {
-                    expr_output_fact(lhs, env).join(&expr_output_fact(rhs, env))
-                }
-                BinOp::U32Exp => expr_output_fact(rhs, env),
+                | BinOp::U32WrappingMul => u32_operand_fact(lhs, env).join(&u32_operand_fact(rhs, env)),
+                BinOp::U32Exp => u32_operand_fact(rhs, env),
                 _ => AdviceFact::bottom(),
             };
             nested.join(&sink)
@@ -394,5 +395,90 @@ fn intrinsic_u32_sink_fact(intrinsic: &Intrinsic, env: &Env) -> AdviceFact {
     if !intrinsic_requires_u32_precondition(&intrinsic.name) {
         return AdviceFact::bottom();
     }
-    AdviceFact::join_all(intrinsic.args.iter().map(|arg| env.fact_for_var(arg)))
+    AdviceFact::join_all(
+        intrinsic
+            .args
+            .iter()
+            .filter(|arg| !env.u32_validity_for_var(arg).is_proven())
+            .map(|arg| env.fact_for_var(arg)),
+    )
+}
+
+/// Return the advice fact for one operand only when it is not already proven `u32`.
+fn u32_operand_fact(expr: &Expr, env: &Env) -> AdviceFact {
+    if expr_u32_validity(expr, env).is_proven() {
+        AdviceFact::bottom()
+    } else {
+        expr_output_fact(expr, env)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expr_u32_sink_fact, intrinsic_u32_sink_fact};
+    use crate::unconstrained_advice::{domain::AdviceFact, shared::Env, u32_domain::U32Validity};
+    use masm_decompiler::ir::{BinOp, Expr, Intrinsic, Var};
+
+    fn test_var(index: u8) -> Var {
+        Var::new(u64::from(index).into(), usize::from(index))
+    }
+
+    #[test]
+    fn proven_u32_operand_does_not_trigger_expression_sink() {
+        let arg = test_var(0);
+        let other = test_var(1);
+        let mut env = Env::default();
+        env.set_var_fact(&arg, AdviceFact::from_input(0));
+        env.set_var_u32_validity(&arg, U32Validity::ProvenU32);
+
+        let fact = expr_u32_sink_fact(
+            &Expr::Binary(
+                BinOp::U32WrappingAdd,
+                Box::new(Expr::Var(arg)),
+                Box::new(Expr::Var(other)),
+            ),
+            &env,
+        );
+
+        assert_eq!(fact, AdviceFact::bottom());
+    }
+
+    #[test]
+    fn unchecked_operand_still_triggers_expression_sink() {
+        let arg = test_var(0);
+        let other = test_var(1);
+        let mut env = Env::default();
+        let fact = AdviceFact::from_input(0);
+        env.set_var_fact(&arg, fact.clone());
+
+        let observed = expr_u32_sink_fact(
+            &Expr::Binary(
+                BinOp::U32WrappingAdd,
+                Box::new(Expr::Var(arg)),
+                Box::new(Expr::Var(other)),
+            ),
+            &env,
+        );
+
+        assert_eq!(observed, fact);
+    }
+
+    #[test]
+    fn proven_u32_operand_does_not_trigger_intrinsic_sink() {
+        let arg = test_var(0);
+        let mut env = Env::default();
+        env.set_var_fact(&arg, AdviceFact::from_input(0));
+        env.set_var_u32_validity(&arg, U32Validity::ProvenU32);
+
+        let fact = intrinsic_u32_sink_fact(
+            &Intrinsic {
+                name: "u32overflowing_add".to_string(),
+                args: vec![arg],
+                results: Vec::new(),
+            },
+            &env,
+        );
+
+        assert_eq!(fact, AdviceFact::bottom());
+    }
 }

@@ -9,7 +9,7 @@ use masm_decompiler::{
 
 use crate::abstract_interp::JoinSemiLattice;
 
-use super::domain::AdviceFact;
+use super::{domain::AdviceFact, u32_domain::U32Validity};
 
 /// Maximum number of loop-approximation passes.
 pub(crate) const MAX_LOOP_PASSES: usize = 32;
@@ -26,6 +26,9 @@ pub(crate) struct EqZeroWitness {
 pub(crate) struct Env {
     vars: HashMap<VarKey, AdviceFact>,
     locals: HashMap<u32, AdviceFact>,
+    u32_validity: HashMap<VarKey, U32Validity>,
+    local_u32_validity: HashMap<u32, U32Validity>,
+    u32_valid_identities: HashSet<VarKey>,
     aliases: HashMap<VarKey, VarKey>,
     local_aliases: HashMap<u32, VarKey>,
     zero_tests: HashMap<VarKey, EqZeroWitness>,
@@ -47,6 +50,38 @@ impl Env {
         self.vars.insert(VarKey::from_var(var), fact);
     }
 
+    /// Read the current `u32` validity fact for a variable.
+    pub(crate) fn u32_validity_for_var(&self, var: &Var) -> U32Validity {
+        let key = VarKey::from_var(var);
+        let direct = self
+            .u32_validity
+            .get(&key)
+            .copied()
+            .unwrap_or(U32Validity::Unknown);
+        if direct.is_proven() {
+            return direct;
+        }
+
+        let identity = self.identity_for_var(var);
+        if self.u32_valid_identities.contains(&identity) {
+            U32Validity::ProvenU32
+        } else {
+            U32Validity::Unknown
+        }
+    }
+
+    /// Set the current `u32` validity fact for a variable.
+    pub(crate) fn set_var_u32_validity(&mut self, var: &Var, validity: U32Validity) {
+        let key = VarKey::from_var(var);
+        if validity.is_proven() {
+            self.u32_validity.insert(key.clone(), validity);
+        } else {
+            self.u32_validity.remove(&key);
+        }
+        let identity = self.identity_for_var(var);
+        self.refresh_u32_identity_cache(&identity);
+    }
+
     /// Return the alias identity for a variable.
     pub(crate) fn identity_for_var(&self, var: &Var) -> VarKey {
         let key = VarKey::from_var(var);
@@ -61,20 +96,27 @@ impl Env {
     /// Set the alias identity for a variable.
     pub(crate) fn set_var_identity(&mut self, var: &Var, identity: VarKey) {
         let key = VarKey::from_var(var);
+        let old_identity = self.identity_for_var(var);
         if identity == key {
             self.aliases.remove(&key);
         } else {
             self.aliases.insert(key, identity);
         }
+        self.refresh_u32_identity_cache(&old_identity);
+        self.refresh_u32_identity_cache(&self.identity_for_var(var));
     }
 
     /// Clear any alias identity for a variable.
     pub(crate) fn clear_var_identity(&mut self, var: &Var) {
+        let old_identity = self.identity_for_var(var);
         self.aliases.remove(&VarKey::from_var(var));
+        self.refresh_u32_identity_cache(&old_identity);
+        self.refresh_u32_identity_cache(&self.identity_for_var(var));
     }
 
     /// Set the alias identity for a local slot.
     pub(crate) fn set_local_identity(&mut self, slot: u32, identity: Option<VarKey>) {
+        let old_identity = self.identity_for_local(slot);
         match identity {
             Some(identity) => {
                 self.local_aliases.insert(slot, identity);
@@ -82,6 +124,12 @@ impl Env {
             None => {
                 self.local_aliases.remove(&slot);
             }
+        }
+        if let Some(identity) = old_identity {
+            self.refresh_u32_identity_cache(&identity);
+        }
+        if let Some(identity) = self.identity_for_local(slot) {
+            self.refresh_u32_identity_cache(&identity);
         }
     }
 
@@ -139,6 +187,8 @@ impl Env {
     /// Sanitize a variable from this point onward.
     pub(crate) fn sanitize_var(&mut self, var: &Var) {
         self.set_var_fact(var, AdviceFact::bottom());
+        let identity = self.identity_for_var(var);
+        self.set_identity_u32_validity(&identity, U32Validity::ProvenU32);
     }
 
     /// Read the current fact for a local slot.
@@ -149,9 +199,56 @@ impl Env {
             .unwrap_or_else(AdviceFact::bottom)
     }
 
+    /// Read the current `u32` validity fact for a local slot.
+    pub(crate) fn u32_validity_for_local(&self, slot: u32) -> U32Validity {
+        let direct = self
+            .local_u32_validity
+            .get(&slot)
+            .copied()
+            .unwrap_or(U32Validity::Unknown);
+        if direct.is_proven() {
+            return direct;
+        }
+
+        self.identity_for_local(slot)
+            .filter(|identity| self.u32_valid_identities.contains(identity))
+            .map(|_| U32Validity::ProvenU32)
+            .unwrap_or(U32Validity::Unknown)
+    }
+
     /// Set the current fact for a local slot.
     pub(crate) fn set_local_fact(&mut self, slot: u32, fact: AdviceFact) {
         self.locals.insert(slot, fact);
+    }
+
+    /// Set the current `u32` validity fact for a local slot.
+    pub(crate) fn set_local_u32_validity(&mut self, slot: u32, validity: U32Validity) {
+        if validity.is_proven() {
+            self.local_u32_validity.insert(slot, validity);
+        } else {
+            self.local_u32_validity.remove(&slot);
+        }
+        if let Some(identity) = self.identity_for_local(slot) {
+            self.refresh_u32_identity_cache(&identity);
+        }
+    }
+
+    /// Return the place-local `u32` validity fact for one variable.
+    #[cfg(test)]
+    pub(crate) fn place_u32_validity_for_var(&self, var: &Var) -> U32Validity {
+        self.u32_validity
+            .get(&VarKey::from_var(var))
+            .copied()
+            .unwrap_or(U32Validity::Unknown)
+    }
+
+    /// Return the place-local `u32` validity fact for one local slot.
+    #[cfg(test)]
+    pub(crate) fn place_u32_validity_for_local(&self, slot: u32) -> U32Validity {
+        self.local_u32_validity
+            .get(&slot)
+            .copied()
+            .unwrap_or(U32Validity::Unknown)
     }
 
     /// Join two environments conservatively.
@@ -173,6 +270,32 @@ impl Env {
                 .unwrap_or_else(AdviceFact::bottom);
             joined.locals.insert(*slot, current.join(fact));
         }
+        for (key, validity) in &other.u32_validity {
+            let current = joined
+                .u32_validity
+                .get(key)
+                .copied()
+                .unwrap_or(U32Validity::Unknown);
+            let merged = current.join(*validity);
+            if merged.is_proven() {
+                joined.u32_validity.insert(key.clone(), merged);
+            } else {
+                joined.u32_validity.remove(key);
+            }
+        }
+        for (slot, validity) in &other.local_u32_validity {
+            let current = joined
+                .local_u32_validity
+                .get(slot)
+                .copied()
+                .unwrap_or(U32Validity::Unknown);
+            let merged = current.join(*validity);
+            if merged.is_proven() {
+                joined.local_u32_validity.insert(*slot, merged);
+            } else {
+                joined.local_u32_validity.remove(slot);
+            }
+        }
         joined.aliases = agreeing_entries(&self.aliases, &other.aliases);
         joined.local_aliases = agreeing_entries(&self.local_aliases, &other.local_aliases);
         joined.zero_tests = agreeing_entries(&self.zero_tests, &other.zero_tests);
@@ -182,7 +305,68 @@ impl Env {
             .intersection(&other.nonzero_identities)
             .cloned()
             .collect();
+        joined.rebuild_u32_identity_cache();
         joined
+    }
+
+    /// Set one alias identity to the requested `u32` validity fact.
+    fn set_identity_u32_validity(&mut self, identity: &VarKey, validity: U32Validity) {
+        for key in self
+            .aliases
+            .iter()
+            .filter_map(|(key, alias)| (alias == identity).then_some(key.clone()))
+        {
+            if validity.is_proven() {
+                self.u32_validity.insert(key, validity);
+            } else {
+                self.u32_validity.remove(&key);
+            }
+        }
+        for (slot, alias) in self.local_aliases.clone() {
+            if alias == *identity {
+                if validity.is_proven() {
+                    self.local_u32_validity.insert(slot, validity);
+                } else {
+                    self.local_u32_validity.remove(&slot);
+                }
+            }
+        }
+        if validity.is_proven() {
+            self.u32_valid_identities.insert(identity.clone());
+        } else {
+            self.u32_valid_identities.remove(identity);
+        }
+    }
+
+    /// Refresh the cached `u32` proof bit for one alias identity.
+    fn refresh_u32_identity_cache(&mut self, identity: &VarKey) {
+        let has_proven_var = self
+            .u32_validity
+            .keys()
+            .any(|key| self.aliases.get(key).cloned().unwrap_or_else(|| key.clone()) == *identity);
+        let has_proven_local = self
+            .local_u32_validity
+            .keys()
+            .any(|slot| self.local_aliases.get(slot).cloned() == Some(identity.clone()));
+        if has_proven_var || has_proven_local {
+            self.u32_valid_identities.insert(identity.clone());
+        } else {
+            self.u32_valid_identities.remove(identity);
+        }
+    }
+
+    /// Rebuild the alias-identity proof cache from place-level validity facts.
+    fn rebuild_u32_identity_cache(&mut self) {
+        self.u32_valid_identities.clear();
+        let identities = self
+            .u32_validity
+            .keys()
+            .map(|key| self.aliases.get(key).cloned().unwrap_or_else(|| key.clone()))
+            .chain(self.local_u32_validity.keys().filter_map(|slot| self.local_aliases.get(slot).cloned()))
+            .collect::<Vec<_>>();
+        for identity in identities {
+            self.refresh_u32_identity_cache(&identity);
+        }
     }
 }
 
@@ -229,6 +413,7 @@ pub(crate) fn assign_expr_metadata(dest: &Var, expr: &Expr, env: &mut Env) {
         env.clear_var_identity(dest);
     }
     env.set_var_zero_test(dest, eq_zero_witness_for_expr(expr, env));
+    env.set_var_u32_validity(dest, expr_u32_validity(expr, env));
 }
 
 /// Preserve metadata across a phi only when both sides agree exactly.
@@ -389,6 +574,58 @@ pub(crate) fn expr_output_fact(expr: &Expr, env: &Env) -> AdviceFact {
     }
 }
 
+/// Compute the `u32` validity of an expression result.
+pub(crate) fn expr_u32_validity(expr: &Expr, env: &Env) -> U32Validity {
+    match expr {
+        Expr::Var(var) => env.u32_validity_for_var(var),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => expr_u32_validity(then_expr, env).join(expr_u32_validity(else_expr, env)),
+        Expr::Unary(op, _) => match op {
+            UnOp::U32Cast
+            | UnOp::U32Test
+            | UnOp::U32Not
+            | UnOp::U32Clz
+            | UnOp::U32Ctz
+            | UnOp::U32Clo
+            | UnOp::U32Cto => U32Validity::ProvenU32,
+            UnOp::Neg | UnOp::Inv | UnOp::Pow2 | UnOp::Not => U32Validity::Unknown,
+        },
+        Expr::Binary(op, _, _) => match op {
+            BinOp::U32And
+            | BinOp::U32Or
+            | BinOp::U32Xor
+            | BinOp::U32Shl
+            | BinOp::U32Shr
+            | BinOp::U32Rotr
+            | BinOp::U32Lt
+            | BinOp::U32Lte
+            | BinOp::U32Gt
+            | BinOp::U32Gte
+            | BinOp::U32WrappingAdd
+            | BinOp::U32WrappingSub
+            | BinOp::U32WrappingMul => U32Validity::ProvenU32,
+            BinOp::U32Exp
+            | BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::Xor
+            | BinOp::Eq
+            | BinOp::Neq
+            | BinOp::Lt
+            | BinOp::Lte
+            | BinOp::Gt
+            | BinOp::Gte => U32Validity::Unknown,
+        },
+        Expr::EqW { .. } | Expr::True | Expr::False | Expr::Constant(_) => U32Validity::Unknown,
+    }
+}
+
 /// Apply the common provenance transfer semantics of one intrinsic statement.
 pub(crate) fn apply_intrinsic_effect(
     span: miden_debug_types::SourceSpan,
@@ -410,15 +647,31 @@ pub(crate) fn apply_intrinsic_effect(
             }
         }
         "u32split" => {
-            for result in &intrinsic.results {
+            for (index, result) in intrinsic.results.iter().enumerate() {
                 env.set_var_fact(result, AdviceFact::bottom());
                 env.clear_var_metadata(result);
+                if index == intrinsic.results.len().saturating_sub(1) {
+                    env.set_var_u32_validity(result, U32Validity::ProvenU32);
+                }
             }
         }
         "is_odd" => {
             for result in &intrinsic.results {
                 env.set_var_fact(result, AdviceFact::bottom());
                 env.clear_var_metadata(result);
+            }
+        }
+        "u32testw" => {
+            if let Some((flag, preserved)) = intrinsic.results.split_first() {
+                env.set_var_fact(flag, AdviceFact::bottom());
+                env.clear_var_metadata(flag);
+                env.set_var_u32_validity(flag, U32Validity::ProvenU32);
+                for (result, arg) in preserved.iter().zip(intrinsic.args.iter()) {
+                    env.set_var_fact(result, env.fact_for_var(arg));
+                    env.set_var_u32_validity(result, env.u32_validity_for_var(arg));
+                    env.set_var_identity(result, env.identity_for_var(arg));
+                    env.set_var_zero_test(result, env.zero_test_for_var(arg));
+                }
             }
         }
         "adv_pipe" => {
@@ -440,6 +693,7 @@ pub(crate) fn apply_intrinsic_effect(
             for result in &intrinsic.results {
                 env.set_var_fact(result, AdviceFact::bottom());
                 env.clear_var_metadata(result);
+                env.set_var_u32_validity(result, U32Validity::ProvenU32);
             }
         }
         _ => {
@@ -457,6 +711,10 @@ pub(crate) fn apply_intrinsic_effect(
 pub(crate) fn apply_local_store(values: &[Var], index: u32, env: &mut Env) {
     let fact = AdviceFact::join_all(values.iter().map(|var| env.fact_for_var(var)));
     env.set_local_fact(index, fact);
+    let validity = single_var(values)
+        .map(|var| env.u32_validity_for_var(var))
+        .unwrap_or(U32Validity::Unknown);
+    env.set_local_u32_validity(index, validity);
     let identity = single_var(values).map(|var| env.identity_for_var(var));
     let witness = single_var(values).and_then(|var| env.zero_test_for_var(var));
     env.set_local_identity(index, identity);
@@ -478,6 +736,7 @@ pub(crate) fn apply_local_store_word(
             LocalAccessKind::Element => index,
         };
         env.set_local_fact(slot, env.fact_for_var(value));
+        env.set_local_u32_validity(slot, env.u32_validity_for_var(value));
         env.set_local_identity(slot, None);
         env.set_local_zero_test(slot, None);
     }
@@ -490,6 +749,7 @@ pub(crate) fn apply_local_load_scalar(outputs: &[Var], index: u32, env: &mut Env
     let witness = env.zero_test_for_local(index);
     for output in outputs {
         env.set_var_fact(output, fact.clone());
+        env.set_var_u32_validity(output, env.u32_validity_for_local(index));
         if let Some(identity) = identity.clone() {
             env.set_var_identity(output, identity);
         } else {
@@ -513,6 +773,7 @@ pub(crate) fn apply_local_load_word(
             LocalAccessKind::Element => index,
         };
         env.set_var_fact(output, env.fact_for_local(slot));
+        env.set_var_u32_validity(output, env.u32_validity_for_local(slot));
         env.clear_var_metadata(output);
     }
 }
@@ -587,7 +848,9 @@ fn apply_adv_pipe_effect(
         for (offset, result) in intrinsic.results[1..5].iter().enumerate() {
             let preserved_input = &intrinsic.args[11 - offset];
             env.set_var_fact(result, env.fact_for_var(preserved_input));
-            env.clear_var_metadata(result);
+            env.set_var_u32_validity(result, env.u32_validity_for_var(preserved_input));
+            env.set_var_identity(result, env.identity_for_var(preserved_input));
+            env.set_var_zero_test(result, env.zero_test_for_var(preserved_input));
         }
 
         for result in &intrinsic.results[5..] {
@@ -605,12 +868,13 @@ fn apply_adv_pipe_effect(
 
 #[cfg(test)]
 mod tests {
-    use super::Env;
+    use super::{apply_intrinsic_effect, assign_expr_metadata, apply_local_load_scalar, apply_local_store, Env};
     use crate::{
         abstract_interp::JoinSemiLattice,
-        unconstrained_advice::domain::AdviceFact,
+        unconstrained_advice::{domain::AdviceFact, u32_domain::U32Validity},
     };
-    use masm_decompiler::ir::Var;
+    use masm_decompiler::ir::{Expr, Intrinsic, UnOp, Var};
+    use miden_debug_types::SourceSpan;
 
     /// Return a small synthetic SSA variable for flow-environment tests.
     fn test_var(index: u8) -> Var {
@@ -635,5 +899,50 @@ mod tests {
         );
         assert_eq!(lhs.fact_for_var(&rhs_var), AdviceFact::from_input(2));
         assert!(!lhs.join_assign(&rhs));
+    }
+
+    #[test]
+    fn u32assert_marks_an_alias_identity_as_proven() {
+        let input = test_var(0);
+        let alias = test_var(1);
+        let mut env = Env::default();
+        env.set_var_fact(&input, AdviceFact::from_input(0));
+        env.set_var_fact(&alias, AdviceFact::from_input(0));
+        env.set_var_identity(&alias, env.identity_for_var(&input));
+
+        let intrinsic = Intrinsic {
+            name: "u32assert".to_string(),
+            args: vec![input],
+            results: Vec::new(),
+        };
+        apply_intrinsic_effect(SourceSpan::UNKNOWN, &intrinsic, &mut env);
+
+        assert_eq!(env.u32_validity_for_var(&alias), U32Validity::ProvenU32);
+    }
+
+    #[test]
+    fn u32cast_assignment_marks_result_as_proven() {
+        let input = test_var(0);
+        let result = test_var(1);
+        let mut env = Env::default();
+        env.set_var_fact(&input, AdviceFact::from_input(0));
+
+        assign_expr_metadata(&result, &Expr::Unary(UnOp::U32Cast, Box::new(Expr::Var(input))), &mut env);
+
+        assert_eq!(env.place_u32_validity_for_var(&result), U32Validity::ProvenU32);
+    }
+
+    #[test]
+    fn local_round_trip_preserves_u32_validity() {
+        let input = test_var(0);
+        let output = test_var(1);
+        let mut env = Env::default();
+        env.set_var_u32_validity(&input, U32Validity::ProvenU32);
+
+        apply_local_store(std::slice::from_ref(&input), 0, &mut env);
+        apply_local_load_scalar(std::slice::from_ref(&output), 0, &mut env);
+
+        assert_eq!(env.place_u32_validity_for_local(0), U32Validity::ProvenU32);
+        assert_eq!(env.place_u32_validity_for_var(&output), U32Validity::ProvenU32);
     }
 }
