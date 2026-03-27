@@ -3,7 +3,7 @@ members = [".", "crates/masm-instructions", "crates/masm-analysis", "crates/masm
 resolver = "2"
 
 [workspace.dependencies]
-masm-decompiler = { version = "=0.6.1", git = "https://github.com/trailofbits/masm-decompiler", rev = "dac04e17dea54e7e025c48745705f4dc0433bc91" }
+masm-decompiler = { version = "=0.7.0", git = "https://github.com/trailofbits/masm-decompiler", tag = "v0.7.0" }
 miden-assembly-syntax = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
 miden-debug-types = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
 miden-utils-diagnostics = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
