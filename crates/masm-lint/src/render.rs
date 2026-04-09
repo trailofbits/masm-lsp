@@ -62,7 +62,13 @@ pub fn render_diagnostic_to_string(diag: &LintDiagnostic, sources: &dyn SourceMa
 /// ```
 fn write_diagnostic(out: &mut impl Write, diag: &LintDiagnostic, sources: &dyn SourceManager) {
     // Heading: warning message.
-    writeln!(out, "{}: {}", "warning".yellow().bold(), diag.message.bold()).unwrap();
+    writeln!(
+        out,
+        "{}: {}",
+        "warning".yellow().bold(),
+        diag.message.bold()
+    )
+    .unwrap();
 
     // Primary location.
     if let Some(loc) = location_string(diag.span, sources) {
@@ -100,7 +106,12 @@ fn location_string(span: SourceSpan, sources: &dyn SourceManager) -> Option<Stri
     let flc = sources.file_line_col(span).ok()?;
     let raw_uri = flc.uri.as_str();
     let path = strip_file_scheme(raw_uri);
-    Some(format!("{}:{}:{}", path, flc.line.to_usize(), flc.column.to_usize()))
+    Some(format!(
+        "{}:{}:{}",
+        path,
+        flc.line.to_usize(),
+        flc.column.to_usize()
+    ))
 }
 
 /// Strip the `file://` (or `file:`) scheme prefix from a URI for display.
@@ -118,7 +129,12 @@ fn strip_file_scheme(uri: &str) -> &str {
 ///
 /// `indent` is prepended to every line of output (typically four spaces so
 /// the snippet aligns with the `-->` arrow).
-fn write_snippet(out: &mut impl Write, span: SourceSpan, sources: &dyn SourceManager, indent: &str) {
+fn write_snippet(
+    out: &mut impl Write,
+    span: SourceSpan,
+    sources: &dyn SourceManager,
+    indent: &str,
+) {
     let Some((line_text, line_number, col_zero)) = resolve_line(span, sources) else {
         return;
     };
@@ -161,10 +177,7 @@ fn write_snippet(out: &mut impl Write, span: SourceSpan, sources: &dyn SourceMan
 /// offset for the start of `span`.
 ///
 /// Returns `None` if the span cannot be resolved.
-fn resolve_line(
-    span: SourceSpan,
-    sources: &dyn SourceManager,
-) -> Option<(String, usize, usize)> {
+fn resolve_line(span: SourceSpan, sources: &dyn SourceManager) -> Option<(String, usize, usize)> {
     let flc = sources.file_line_col(span).ok()?;
 
     // line is one-indexed; lines().nth() is zero-indexed.
@@ -172,11 +185,7 @@ fn resolve_line(
     let col_zero = flc.column.to_usize().saturating_sub(1);
 
     let source_file = sources.get(span.source_id()).ok()?;
-    let line_text = source_file
-        .as_str()
-        .lines()
-        .nth(line_idx)?
-        .to_owned();
+    let line_text = source_file.as_str().lines().nth(line_idx)?.to_owned();
 
     Some((line_text, flc.line.to_usize(), col_zero))
 }
@@ -220,7 +229,13 @@ mod tests {
         let sf = sm.load(SourceLanguage::Masm, uri, content.to_string());
         let source_id = sf.id();
         let owned = content.to_string();
-        (sm, SpanFinder { content: owned, source_id })
+        (
+            sm,
+            SpanFinder {
+                content: owned,
+                source_id,
+            },
+        )
     }
 
     /// Helper to create [`SourceSpan`] values by searching for a substring.
@@ -235,7 +250,8 @@ mod tests {
             let start = self
                 .content
                 .find(needle)
-                .unwrap_or_else(|| panic!("needle {needle:?} not found in source")) as u32;
+                .unwrap_or_else(|| panic!("needle {needle:?} not found in source"))
+                as u32;
             let end = start + needle.len() as u32;
             SourceSpan::new(self.source_id, start..end)
         }
@@ -357,6 +373,26 @@ end
                 span: finder.span_of("adv_push.1"),
                 message: "unconstrained advice introduced here".to_string(),
             }],
+        };
+        let output = render_diagnostic_to_string(&diag, &sm);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn render_local_init_diagnostic() {
+        let source = "\
+@locals(1)
+proc.bad.0
+    loc_load.0
+    drop
+end
+";
+        let (sm, finder) = setup(source);
+        let diag = LintDiagnostic {
+            message: "local 0 may be read before initialization".to_string(),
+            span: finder.span_of("loc_load.0"),
+            procedure: SymbolPath::new("bad"),
+            related: Vec::new(),
         };
         let output = render_diagnostic_to_string(&diag, &sm);
         insta::assert_snapshot!(output);

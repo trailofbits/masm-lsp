@@ -15,11 +15,17 @@ use miden_assembly_syntax::ast::{
 };
 use miden_debug_types::{DefaultSourceManager, SourceSpan, Spanned};
 
+pub mod prepared;
 mod unconstrained_advice;
+mod uninitialized_locals;
 
 pub use unconstrained_advice::{
     infer_unconstrained_advice, infer_unconstrained_advice_in_workspace, AdviceDiagnostic,
     AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
+};
+pub use uninitialized_locals::{
+    infer_uninitialized_locals_in_workspace, LocalInitDiagnostic, LocalInitDiagnosticKind,
+    LocalInitDiagnosticsMap, LocalInitSummary, LocalInitSummaryMap,
 };
 
 pub use masm_decompiler::signature::SignatureMap;
@@ -38,6 +44,8 @@ pub struct AnalysisSnapshot {
     pub type_diagnostics: TypeDiagnosticsMap,
     /// Unconstrained advice flow diagnostics.
     pub advice_diagnostics: AdviceDiagnosticsMap,
+    /// Uninitialized local read diagnostics.
+    pub local_init_diagnostics: LocalInitDiagnosticsMap,
     /// Module paths that could not be resolved.
     pub unresolved_modules: Vec<SymbolPath>,
 }
@@ -53,12 +61,20 @@ impl AnalysisSnapshot {
             infer_type_summaries(workspace, &callgraph, &signatures);
         let (_, advice_diagnostics) =
             infer_unconstrained_advice(workspace, &callgraph, &signatures, &type_summaries);
+        let (_, local_init_diagnostics) =
+            uninitialized_locals::inter::infer_uninitialized_locals_with_inputs(
+                workspace,
+                &callgraph,
+                &signatures,
+                &type_summaries,
+            );
 
         Self {
             signatures,
             type_summaries,
             type_diagnostics,
             advice_diagnostics,
+            local_init_diagnostics,
             unresolved_modules,
         }
     }
@@ -278,8 +294,14 @@ mod tests {
         let m = SignatureMismatch {
             proc_name: "foo".into(),
             span: SourceSpan::UNKNOWN,
-            declared: StackSignature { inputs: 2, outputs: 1 },
-            inferred: StackSignature { inputs: 3, outputs: 2 },
+            declared: StackSignature {
+                inputs: 2,
+                outputs: 1,
+            },
+            inferred: StackSignature {
+                inputs: 3,
+                outputs: 2,
+            },
         };
         let msg = signature_mismatch_message(&m);
         assert!(msg.contains("2 inputs and 1 outputs"));
@@ -291,8 +313,14 @@ mod tests {
         let m = SignatureMismatch {
             proc_name: "bar".into(),
             span: SourceSpan::UNKNOWN,
-            declared: StackSignature { inputs: 2, outputs: 1 },
-            inferred: StackSignature { inputs: 3, outputs: 1 },
+            declared: StackSignature {
+                inputs: 2,
+                outputs: 1,
+            },
+            inferred: StackSignature {
+                inputs: 3,
+                outputs: 1,
+            },
         };
         let msg = signature_mismatch_message(&m);
         assert!(msg.contains("declares 2 inputs"));
@@ -304,8 +332,14 @@ mod tests {
         let m = SignatureMismatch {
             proc_name: "baz".into(),
             span: SourceSpan::UNKNOWN,
-            declared: StackSignature { inputs: 1, outputs: 2 },
-            inferred: StackSignature { inputs: 1, outputs: 3 },
+            declared: StackSignature {
+                inputs: 1,
+                outputs: 2,
+            },
+            inferred: StackSignature {
+                inputs: 1,
+                outputs: 3,
+            },
         };
         let msg = signature_mismatch_message(&m);
         assert!(msg.contains("declares 2 outputs"));
@@ -317,9 +351,38 @@ mod tests {
         let m = SignatureMismatch {
             proc_name: "qux".into(),
             span: SourceSpan::UNKNOWN,
-            declared: StackSignature { inputs: 1, outputs: 1 },
-            inferred: StackSignature { inputs: 1, outputs: 1 },
+            declared: StackSignature {
+                inputs: 1,
+                outputs: 1,
+            },
+            inferred: StackSignature {
+                inputs: 1,
+                outputs: 1,
+            },
         };
         assert!(signature_mismatch_message(&m).is_empty());
+    }
+
+    #[test]
+    fn snapshot_includes_local_init_diagnostics() {
+        use masm_decompiler::frontend::testing::workspace_from_modules;
+
+        let ws = workspace_from_modules(&[(
+            "test",
+            "@locals(1)\nproc bad\n  loc_load.0\n  drop\nend\n",
+        )]);
+        let snapshot = AnalysisSnapshot::from_workspace(&ws);
+        assert!(
+            !snapshot.local_init_diagnostics.is_empty(),
+            "expected local_init_diagnostics in snapshot, got empty"
+        );
+        let diags: Vec<_> = snapshot.local_init_diagnostics.values().flatten().collect();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("read before initialization")),
+            "expected a 'read before initialization' diagnostic, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 }

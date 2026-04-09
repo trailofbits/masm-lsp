@@ -6,6 +6,8 @@ use masm_decompiler::{
     SymbolPath,
 };
 
+use crate::prepared::PreparedProcMap;
+
 use super::{
     domain::AdviceFact,
     provenance::assign_call_results,
@@ -20,7 +22,7 @@ use super::{
 
 /// Collect U32 diagnostics for all procedures using already-computed provenance summaries.
 pub(crate) fn collect_u32_diagnostics(
-    prepared: &std::collections::HashMap<SymbolPath, super::inter::PreparedProc>,
+    prepared: &PreparedProcMap,
     provenance_summaries: &AdviceSummaryMap,
     type_summaries: &TypeSummaryMap,
 ) -> AdviceDiagnosticsMap {

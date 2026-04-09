@@ -2,14 +2,12 @@
 
 use std::collections::HashMap;
 
-use masm_decompiler::{
-    ir::Stmt,
-    SymbolPath,
-};
+use masm_decompiler::{ir::Stmt, SymbolPath};
+
+use crate::prepared::PreparedProc;
 
 use super::{
     domain::AdviceFact,
-    inter::PreparedProc,
     shared::{intrinsic_base_name, Env},
     summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
     walker::{self, SinkDetector},
@@ -20,8 +18,8 @@ pub(crate) fn collect_merkle_diagnostics(
     prepared: &HashMap<SymbolPath, PreparedProc>,
     provenance_summaries: &AdviceSummaryMap,
 ) -> AdviceDiagnosticsMap {
-    walker::collect_diagnostics(prepared, provenance_summaries, |proc_path| {
-        MerkleDetector { proc_path }
+    walker::collect_diagnostics(prepared, provenance_summaries, |proc_path| MerkleDetector {
+        proc_path,
     })
 }
 
@@ -45,7 +43,9 @@ impl SinkDetector for MerkleDetector {
         };
 
         let root_fact = AdviceFact::join_all(
-            intrinsic.args[root_range].iter().map(|var| env.fact_for_var(var)),
+            intrinsic.args[root_range]
+                .iter()
+                .map(|var| env.fact_for_var(var)),
         );
 
         if root_fact.has_concrete_sources() {
@@ -68,8 +68,12 @@ impl MerkleDetector {
         message: impl Into<String>,
         fact: &AdviceFact,
     ) -> AdviceDiagnostic {
-        let mut diagnostic =
-            AdviceDiagnostic::new(self.proc_path.clone(), span, AdviceSinkKind::MerkleRoot, message);
+        let mut diagnostic = AdviceDiagnostic::new(
+            self.proc_path.clone(),
+            span,
+            AdviceSinkKind::MerkleRoot,
+            message,
+        );
         diagnostic.origins = fact.source_spans.iter().copied().collect();
         diagnostic
     }

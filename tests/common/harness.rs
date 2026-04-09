@@ -20,10 +20,13 @@ use tower_lsp::lsp_types::{
 
 use super::fixtures::{FixtureKind, find_position};
 
+/// Published diagnostics collected during a test run.
+type PublishedDiagnostics = Vec<(Url, Vec<Diagnostic>, Option<i32>)>;
+
 /// A recording LSP client that captures published diagnostics.
 #[derive(Clone, Default)]
 pub struct RecordingClient {
-    published: Arc<Mutex<Vec<(Url, Vec<Diagnostic>, Option<i32>)>>>,
+    published: Arc<Mutex<PublishedDiagnostics>>,
 }
 
 #[async_trait]

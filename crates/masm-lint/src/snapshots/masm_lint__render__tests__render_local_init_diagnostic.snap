@@ -1,0 +1,11 @@
+---
+source: crates/masm-lint/src/render.rs
+assertion_line: 382
+expression: output
+---
+warning: local 0 may be read before initialization
+  --> /test/example.masm:3:5
+      |
+    3 |     loc_load.0
+      |     ^^^^^^^^^^
+    = note: in procedure `bad`

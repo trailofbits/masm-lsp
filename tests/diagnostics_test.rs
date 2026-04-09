@@ -138,8 +138,6 @@ end
     );
 }
 
-// TODO: Re-enable once type analysis warnings are restored.
-#[ignore]
 #[tokio::test]
 async fn type_inconsistency_produces_warning() {
     let harness = TestHarness::new().await;
@@ -164,11 +162,11 @@ end
     let warning = diags.iter().find(|diag| {
         diag.severity == Some(DiagnosticSeverity::WARNING)
             && diag.source.as_deref() == Some(SOURCE_ANALYSIS)
-            && diag.message.contains("expects Bool")
+            && diag.message.contains("Bool")
     });
     assert!(
         warning.is_some(),
-        "expected type inconsistency warning, got: {:?}",
+        "expected type inconsistency warning mentioning Bool, got: {:?}",
         diags
     );
 }
@@ -233,7 +231,9 @@ end
         diags
     );
     assert!(
-        diags.iter().any(|diag| diag.source.as_deref() != Some(SOURCE_ANALYSIS)),
+        diags
+            .iter()
+            .any(|diag| diag.source.as_deref() != Some(SOURCE_ANALYSIS)),
         "expected a non-analysis diagnostic from the unresolved dependency, got: {:?}",
         diags
     );
@@ -1005,6 +1005,82 @@ async fn analysis_resolves_calls_into_other_open_documents() {
             .iter()
             .all(|diag| !diag.message.contains("Unresolved invocation target")),
         "expected no unresolved invocation diagnostics, got: {:?}",
+        diags
+    );
+}
+
+#[tokio::test]
+async fn local_read_before_write_produces_analysis_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"@locals(1)
+proc bad
+    loc_load.0
+    drop
+end
+"#;
+    let uri = harness
+        .open_inline("local_init_read_before_write.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    let warning = analysis_warning_containing(&diags, "read before initialization")
+        .expect("expected local-init warning");
+    assert_eq!(
+        warning.severity,
+        Some(DiagnosticSeverity::WARNING),
+        "expected WARNING severity"
+    );
+}
+
+#[tokio::test]
+async fn local_write_then_read_produces_no_local_init_warning() {
+    let harness = TestHarness::new().await;
+    let content = r#"@locals(1)
+proc ok
+    push.42
+    loc_store.0
+    loc_load.0
+    drop
+end
+"#;
+    let uri = harness
+        .open_inline("local_init_write_then_read.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    assert!(
+        analysis_warning_containing(&diags, "read before initialization").is_none(),
+        "expected no local-init warning after definite write, got: {:?}",
+        diags
+    );
+}
+
+#[tokio::test]
+async fn unresolved_modules_suppress_local_init_warnings() {
+    let harness = TestHarness::new().await;
+    let content = r#"use ::tmp::missing::add->plus
+
+@locals(1)
+proc bad
+    loc_load.0
+    drop
+    exec.plus
+end
+"#;
+    let uri = harness
+        .open_inline("local_init_unresolved_module_guard.masm", content)
+        .await;
+
+    tokio::task::yield_now().await;
+
+    let diags = harness.client.diagnostics_for(&uri).await;
+    assert!(
+        analysis_warnings(&diags).is_empty(),
+        "expected unresolved modules to suppress analysis warnings, got: {:?}",
         diags
     );
 }

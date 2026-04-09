@@ -2,14 +2,12 @@
 
 use std::collections::HashMap;
 
-use masm_decompiler::{
-    ir::Stmt,
-    SymbolPath,
-};
+use masm_decompiler::{ir::Stmt, SymbolPath};
+
+use crate::prepared::PreparedProc;
 
 use super::{
     domain::AdviceFact,
-    inter::PreparedProc,
     shared::{intrinsic_base_name, Env},
     summary::{AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, AdviceSummaryMap},
     walker::{self, SinkDetector},
@@ -90,8 +88,12 @@ impl AddressDetector {
         message: impl Into<String>,
         fact: &AdviceFact,
     ) -> AdviceDiagnostic {
-        let mut diagnostic =
-            AdviceDiagnostic::new(self.proc_path.clone(), span, AdviceSinkKind::MemoryAddress, message);
+        let mut diagnostic = AdviceDiagnostic::new(
+            self.proc_path.clone(),
+            span,
+            AdviceSinkKind::MemoryAddress,
+            message,
+        );
         diagnostic.origins = fact.source_spans.iter().copied().collect();
         diagnostic
     }

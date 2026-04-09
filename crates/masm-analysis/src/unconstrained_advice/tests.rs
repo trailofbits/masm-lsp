@@ -34,7 +34,8 @@ fn direct_adv_push_to_u32_intrinsic_warns() {
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
     assert!(
-        bad.iter().any(|diag| diag.message.contains("u32 intrinsic")),
+        bad.iter()
+            .any(|diag| diag.message.contains("u32 intrinsic")),
         "expected u32 intrinsic diagnostic, got: {bad:?}"
     );
 }
@@ -75,7 +76,8 @@ fn word_local_round_trip_tracks_little_endian_slots_precisely() {
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
     assert!(
-        ok.iter().all(|diag| !diag.message.contains("u32 operation")),
+        ok.iter()
+            .all(|diag| !diag.message.contains("u32 operation")),
         "expected no u32 diagnostics for clean LE top word element, got: {ok:?}"
     );
 }
@@ -104,7 +106,8 @@ fn word_local_mixed_endianness_reaches_u32_sink() {
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
     assert!(
-        bad.iter().any(|diag| diag.message.contains("u32 operation")),
+        bad.iter()
+            .any(|diag| diag.message.contains("u32 operation")),
         "expected mixed-endian word-local diagnostic, got: {bad:?}"
     );
 }
@@ -168,7 +171,9 @@ fn branch_join_overtaints_conservatively() {
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let maybe_bad = diagnostics_for(&diagnostics, "advice::maybe_bad");
     assert!(
-        maybe_bad.iter().any(|diag| diag.message.contains("u32 operation")),
+        maybe_bad
+            .iter()
+            .any(|diag| diag.message.contains("u32 operation")),
         "expected conservative branch-join diagnostic, got: {maybe_bad:?}"
     );
 }
@@ -355,10 +360,7 @@ fn direct_adv_push_to_mem_store_address_warns() {
 
 #[test]
 fn direct_adv_push_to_mem_load_address_warns() {
-    let ws = workspace_from_modules(&[(
-        "advice",
-        "proc bad\n    adv_push.1\n    mem_load\nend\n",
-    )]);
+    let ws = workspace_from_modules(&[("advice", "proc bad\n    adv_push.1\n    mem_load\nend\n")]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
     assert!(

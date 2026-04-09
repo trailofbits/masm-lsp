@@ -7,6 +7,8 @@ use masm_decompiler::{
     SymbolPath,
 };
 
+use crate::prepared::PreparedProcMap;
+
 use super::{
     domain::AdviceFact,
     provenance::assign_call_results,
@@ -57,7 +59,7 @@ pub(crate) type NonZeroSummaryMap = std::collections::HashMap<SymbolPath, NonZer
 /// Infer non-zero summaries and diagnostics using already-computed provenance summaries.
 pub(crate) fn infer_nonzero_summaries_and_diagnostics(
     callgraph: &masm_decompiler::callgraph::CallGraph,
-    prepared: &std::collections::HashMap<SymbolPath, super::inter::PreparedProc>,
+    prepared: &PreparedProcMap,
     provenance_summaries: &AdviceSummaryMap,
 ) -> (NonZeroSummaryMap, AdviceDiagnosticsMap) {
     let mut summaries = NonZeroSummaryMap::default();

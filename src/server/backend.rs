@@ -9,8 +9,9 @@ use std::{
 };
 
 use masm_analysis::{
-    AdviceDiagnosticsMap, AnalysisSnapshot, InferredType, TypeDiagnosticsMap, TypeRequirement,
-    TypeSummary, signature_mismatch_message, signature_mismatches_from_snapshot,
+    AdviceDiagnosticsMap, AnalysisSnapshot, InferredType, LocalInitDiagnosticsMap,
+    TypeDiagnosticsMap, TypeRequirement, TypeSummary, signature_mismatch_message,
+    signature_mismatches_from_snapshot,
 };
 use masm_decompiler::{
     DecompilationConfig, Decompiler,
@@ -712,17 +713,19 @@ where
                             mismatches,
                             self.sources.as_ref(),
                         ));
-                        // TODO: Re-enable once the decompiler's type analysis
-                        // distinguishes genuinely incorrect types from
-                        // unresolved (default Felt) types.
-                        // diags.extend(type_inconsistency_diagnostics(
-                        //     &uri,
-                        //     &analysis.type_diagnostics,
-                        //     self.sources.as_ref(),
-                        // ));
+                        diags.extend(type_inconsistency_diagnostics(
+                            &uri,
+                            &analysis.type_diagnostics,
+                            self.sources.as_ref(),
+                        ));
                         diags.extend(advice_flow_diagnostics(
                             &uri,
                             &analysis.advice_diagnostics,
+                            self.sources.as_ref(),
+                        ));
+                        diags.extend(local_init_diagnostics(
+                            &uri,
+                            &analysis.local_init_diagnostics,
                             self.sources.as_ref(),
                         ));
                     }
@@ -1152,19 +1155,13 @@ fn format_inferred_signature(
             let ret = match *outputs {
                 0 => String::new(),
                 1 => {
-                    let ty = output_types
-                        .first()
-                        .copied()
-                        .unwrap_or(InferredType::Felt);
+                    let ty = output_types.first().copied().unwrap_or(InferredType::Felt);
                     format!(" -> {}", inferred_type_for_display(ty))
                 }
                 n => {
                     let types = (0..n)
                         .map(|idx| {
-                            let ty = output_types
-                                .get(idx)
-                                .copied()
-                                .unwrap_or(InferredType::Felt);
+                            let ty = output_types.get(idx).copied().unwrap_or(InferredType::Felt);
                             inferred_type_for_display(ty)
                         })
                         .collect::<Vec<_>>()
@@ -1285,7 +1282,6 @@ fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
         TypeRequirement::Felt => "Felt",
         TypeRequirement::Bool => "Bool",
         TypeRequirement::U32 => "U32",
-        TypeRequirement::Address => "Address",
     }
 }
 
@@ -1294,11 +1290,9 @@ fn inferred_type_for_display(ty: InferredType) -> &'static str {
         InferredType::Felt => "Felt",
         InferredType::Bool => "Bool",
         InferredType::U32 => "U32",
-        InferredType::Address => "Address",
     }
 }
 
-#[allow(dead_code)]
 fn type_inconsistency_diagnostics(
     uri: &Url,
     diagnostics: &TypeDiagnosticsMap,
@@ -1320,10 +1314,26 @@ fn type_inconsistency_diagnostics(
                 severity: Some(DiagnosticSeverity::WARNING),
                 source: Some(SOURCE_ANALYSIS.to_string()),
                 message: normalize_message(&diag.message),
+                related_information: type_related_information(diag, sources),
                 ..Default::default()
             }
         })
         .collect()
+}
+
+/// Build `relatedInformation` from a type diagnostic's source span.
+fn type_related_information(
+    diag: &masm_analysis::TypeDiagnostic,
+    sources: &DefaultSourceManager,
+) -> Option<Vec<DiagnosticRelatedInformation>> {
+    let source_span = diag.source_span.as_ref()?;
+    let source = sources.get(source_span.source_id()).ok()?;
+    let uri = Url::parse(source.uri().as_str()).ok()?;
+    let range = span_to_range(sources, *source_span)?;
+    Some(vec![DiagnosticRelatedInformation {
+        location: Location { uri, range },
+        message: diag.source_description.clone().unwrap_or_default(),
+    }])
 }
 
 fn advice_flow_diagnostics(
@@ -1368,6 +1378,57 @@ fn advice_related_information(
             Some(DiagnosticRelatedInformation {
                 location: Location { uri, range },
                 message: "possible unconstrained advice source".to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    (!related.is_empty()).then_some(related)
+}
+
+/// Convert local-init diagnostics for the given URI into LSP diagnostics.
+fn local_init_diagnostics(
+    uri: &Url,
+    diagnostics: &LocalInitDiagnosticsMap,
+    sources: &DefaultSourceManager,
+) -> Vec<Diagnostic> {
+    let Some(source_id) = sources.find(&to_miden_uri(uri)) else {
+        return Vec::new();
+    };
+
+    diagnostics
+        .values()
+        .flat_map(|proc_diags| proc_diags.iter())
+        .filter(|diag| diag.span.source_id() == source_id)
+        .map(|diag| {
+            let range = span_to_range(sources, diag.span)
+                .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
+            Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some(SOURCE_ANALYSIS.to_string()),
+                message: normalize_message(&diag.message),
+                related_information: local_init_related_information(diag, sources),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+/// Build `relatedInformation` from a local-init diagnostic's related spans.
+fn local_init_related_information(
+    diag: &masm_analysis::LocalInitDiagnostic,
+    sources: &DefaultSourceManager,
+) -> Option<Vec<DiagnosticRelatedInformation>> {
+    let related = diag
+        .related
+        .iter()
+        .filter_map(|span| {
+            let source = sources.get(span.source_id()).ok()?;
+            let uri = Url::parse(source.uri().as_str()).ok()?;
+            let range = span_to_range(sources, *span)?;
+            Some(DiagnosticRelatedInformation {
+                location: Location { uri, range },
+                message: "related local address origin".to_string(),
             })
         })
         .collect::<Vec<_>>();

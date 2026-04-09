@@ -69,11 +69,7 @@ async fn publish_diagnostics_sends_updated_version() {
         .await;
 
     // Send diagnostics for version 1
-    backend
-        .publish_diagnostics(uri.clone())
-        .await
-        .iter()
-        .count();
+    backend.publish_diagnostics(uri.clone()).await.len();
 
     // Modify document to version 2
     backend
@@ -1120,10 +1116,9 @@ async fn workspace_folder_noise_does_not_publish_analysis_warning_for_core_libra
         .collect();
     assert!(
         open_mem_diags.iter().all(|diag| {
-            diag.source.as_deref() != Some(crate::masm::diagnostics::SOURCE_ANALYSIS)
-                && !diag
-                    .message
-                    .contains("unresolved transitive module dependencies")
+            !diag
+                .message
+                .contains("unresolved transitive module dependencies")
         }),
         "expected core library mem.masm open diagnostics to be free of cross-workspace analysis warnings, got: {:?}",
         open_mem_diags
@@ -1217,13 +1212,16 @@ fn command_error_diagnostic(error: &tower_lsp::jsonrpc::Error) -> Option<Diagnos
     serde_json::from_value(diagnostic.clone()).ok()
 }
 
+/// Published diagnostics collected during a test run.
+type PublishedDiagnostics = Vec<(Url, Vec<Diagnostic>, Option<i32>)>;
+
 #[derive(Clone, Default)]
 struct RecordingClient {
-    published: Arc<tokio::sync::Mutex<Vec<(Url, Vec<Diagnostic>, Option<i32>)>>>,
+    published: Arc<tokio::sync::Mutex<PublishedDiagnostics>>,
 }
 
 impl RecordingClient {
-    async fn take_published(&self) -> Vec<(Url, Vec<Diagnostic>, Option<i32>)> {
+    async fn take_published(&self) -> PublishedDiagnostics {
         let mut guard = self.published.lock().await;
         guard.drain(..).collect()
     }

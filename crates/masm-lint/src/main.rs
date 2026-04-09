@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use clap::Parser;
 use masm_analysis::{
-    AdviceDiagnostic, AnalysisSnapshot, SignatureMismatch, TypeDiagnostic,
-    signature_mismatch_message, signature_mismatches_from_snapshot,
+    signature_mismatch_message, signature_mismatches_from_snapshot, AdviceDiagnostic,
+    AnalysisSnapshot, LocalInitDiagnostic, SignatureMismatch, TypeDiagnostic,
 };
 use masm_decompiler::{
-    SymbolPath,
     frontend::{LibraryRoot, Workspace},
+    SymbolPath,
 };
 use miden_debug_types::DefaultSourceManager;
 
@@ -136,18 +136,23 @@ fn run(cli: Cli) -> i32 {
         emit_unresolved_dependency_errors(&unresolved, &workspace);
     }
 
-    // TODO: Re-enable once the decompiler's type analysis distinguishes
-    // genuinely incorrect types from unresolved (default Felt) types.
-    // for type_diags in snapshot.type_diagnostics.values() {
-    //     for td in type_diags {
-    //         diagnostics.push(type_diagnostic_to_lint(td));
-    //     }
-    // }
+    for type_diags in snapshot.type_diagnostics.values() {
+        for td in type_diags {
+            diagnostics.push(type_diagnostic_to_lint(td));
+        }
+    }
 
     // Advice diagnostics.
     for advice_diags in snapshot.advice_diagnostics.values() {
         for ad in advice_diags {
             diagnostics.push(advice_diagnostic_to_lint(ad));
+        }
+    }
+
+    // Local-init diagnostics.
+    for local_init_diags in snapshot.local_init_diagnostics.values() {
+        for lid in local_init_diags {
+            diagnostics.push(local_init_diagnostic_to_lint(lid));
         }
     }
 
@@ -182,10 +187,7 @@ fn emit_summary(warning_count: usize, error_count: usize) -> i32 {
             1
         }
         (e, 0) => {
-            eprintln!(
-                "{}: masm-lint found {e} error(s)",
-                "error".red().bold(),
-            );
+            eprintln!("{}: masm-lint found {e} error(s)", "error".red().bold(),);
             1
         }
         (e, w) => {
@@ -216,13 +218,20 @@ fn signature_mismatch_to_lint(m: &SignatureMismatch) -> Option<LintDiagnostic> {
 }
 
 /// Convert a [`TypeDiagnostic`] into a [`LintDiagnostic`].
-#[allow(dead_code)]
 fn type_diagnostic_to_lint(td: &TypeDiagnostic) -> LintDiagnostic {
+    let related = td
+        .source_span
+        .map(|span| RelatedSpan {
+            span,
+            message: td.source_description.clone().unwrap_or_default(),
+        })
+        .into_iter()
+        .collect();
     LintDiagnostic {
         message: td.message.clone(),
         span: td.span,
         procedure: td.procedure.clone(),
-        related: Vec::new(),
+        related,
     }
 }
 
@@ -246,10 +255,32 @@ fn advice_diagnostic_to_lint(ad: &AdviceDiagnostic) -> LintDiagnostic {
     }
 }
 
+/// Convert a [`LocalInitDiagnostic`] into a [`LintDiagnostic`].
+fn local_init_diagnostic_to_lint(lid: &LocalInitDiagnostic) -> LintDiagnostic {
+    let related = lid
+        .related
+        .iter()
+        .map(|&span| RelatedSpan {
+            span,
+            message: "related local address origin".to_string(),
+        })
+        .collect();
+
+    LintDiagnostic {
+        message: lid.message.clone(),
+        span: lid.span,
+        procedure: lid.procedure.clone(),
+        related,
+    }
+}
+
 // ── Sorting ───────────────────────────────────────────────────────────────────
 
 /// Sort diagnostics by (uri, line, col) of their primary span.
-fn sort_diagnostics(diagnostics: &mut [LintDiagnostic], sources: &dyn miden_debug_types::SourceManager) {
+fn sort_diagnostics(
+    diagnostics: &mut [LintDiagnostic],
+    sources: &dyn miden_debug_types::SourceManager,
+) {
     diagnostics.sort_by(|a, b| {
         let key_a = sort_key(a.span, sources);
         let key_b = sort_key(b.span, sources);
