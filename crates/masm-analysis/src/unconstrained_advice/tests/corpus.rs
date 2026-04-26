@@ -308,25 +308,15 @@ const CALL_ARGUMENT_REQUIRED_DIAGNOSTICS: [ExpectedDiagnostic; 1] = [expected_di
     &[expected_origin("calls", 7, 5)],
 )];
 
-/// Required diagnostics for a fixture where one origin fans out into two `u32` warnings.
-const FANOUT_REQUIRED_DIAGNOSTICS: [ExpectedDiagnostic; 2] = [
-    expected_diagnostic(
-        AdviceSinkKind::U32Intrinsic,
-        None,
-        None,
-        None,
-        Some(5),
-        &[expected_origin("noise", 2, 5)],
-    ),
-    expected_diagnostic(
-        AdviceSinkKind::U32Intrinsic,
-        None,
-        None,
-        None,
-        Some(8),
-        &[expected_origin("noise", 2, 5)],
-    ),
-];
+/// Required diagnostics for a fixture where the first `u32` use sanitizes the reused value.
+const FANOUT_REQUIRED_DIAGNOSTICS: [ExpectedDiagnostic; 1] = [expected_diagnostic(
+    AdviceSinkKind::U32Intrinsic,
+    None,
+    None,
+    None,
+    Some(5),
+    &[expected_origin("noise", 2, 5)],
+)];
 
 /// Required diagnostics for a fixture where one origin fans out into two `U32` call warnings.
 const CALL_FANOUT_REQUIRED_DIAGNOSTICS: [ExpectedDiagnostic; 2] = [
@@ -376,13 +366,13 @@ const CORPUS_CASES: [CorpusCase; 7] = [
         required_diagnostics: &CALL_ARGUMENT_REQUIRED_DIAGNOSTICS,
     },
     CorpusCase {
-        name: "single_origin_fans_out_to_two_u32_warnings",
+        name: "single_origin_warns_once_then_reuses_sanitized_u32",
         modules: &[(
             "noise",
             "proc noisy\n    adv_push.1\n    dup\n    push.1\n    u32overflowing_add\n    drop\n    push.2\n    u32wrapping_add\nend\n",
         )],
         procedure: "noise::noisy",
-        expected_count: 2,
+        expected_count: 1,
         allow_other_diagnostics: false,
         required_diagnostics: &FANOUT_REQUIRED_DIAGNOSTICS,
     },

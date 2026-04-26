@@ -6,8 +6,7 @@ use std::sync::Arc;
 use masm_decompiler::{
     callgraph::CallGraph,
     frontend::{LibraryRoot, Program, Workspace},
-    signature::{infer_signatures, ProcSignature},
-    types::infer_type_summaries,
+    signature::ProcSignature,
     Decompiler, SymbolPath,
 };
 use miden_assembly_syntax::ast::{
@@ -48,11 +47,11 @@ impl AnalysisSnapshot {
     /// Run all analysis passes on a workspace and return the combined results.
     pub fn from_workspace(workspace: &Workspace) -> Self {
         let unresolved_modules = workspace.unresolved_module_paths();
-
+        let decompiler = Decompiler::new(workspace);
         let callgraph = CallGraph::from(workspace);
-        let signatures = infer_signatures(workspace, &callgraph);
-        let (type_summaries, type_diagnostics) =
-            infer_type_summaries(workspace, &callgraph, &signatures);
+        let signatures = decompiler.signatures().clone();
+        let type_summaries = decompiler.type_summaries().clone();
+        let type_diagnostics = decompiler.type_diagnostics().clone();
         let (_, advice_diagnostics) =
             infer_unconstrained_advice(workspace, &callgraph, &signatures, &type_summaries);
 
@@ -154,11 +153,8 @@ pub fn signature_mismatches_in_workspace(
         let Some(inferred) = signatures.get(&symbol_path) else {
             continue;
         };
-        let (inputs, outputs) = match inferred {
-            ProcSignature::Known {
-                inputs, outputs, ..
-            } => (*inputs, *outputs),
-            ProcSignature::Unknown => continue,
+        let Some(StackSignature { inputs, outputs }) = inferred_stack_signature(inferred) else {
+            continue;
         };
 
         if declared.inputs != inputs || declared.outputs != outputs {
@@ -207,11 +203,8 @@ pub fn signature_mismatches_from_snapshot(
         let Some(inferred) = signatures.get(&symbol_path) else {
             continue;
         };
-        let (inputs, outputs) = match inferred {
-            ProcSignature::Known {
-                inputs, outputs, ..
-            } => (*inputs, *outputs),
-            ProcSignature::Unknown => continue,
+        let Some(StackSignature { inputs, outputs }) = inferred_stack_signature(inferred) else {
+            continue;
         };
 
         if declared.inputs != inputs || declared.outputs != outputs {
@@ -237,9 +230,10 @@ pub fn signature_mismatches_from_snapshot(
 
 /// Compute the analysis inputs needed by the advice pass in one place.
 pub fn analysis_inputs(workspace: &Workspace) -> (CallGraph, SignatureMap, TypeSummaryMap) {
+    let decompiler = Decompiler::new(workspace);
     let callgraph = CallGraph::from(workspace);
-    let signatures = infer_signatures(workspace, &callgraph);
-    let (type_summaries, _) = infer_type_summaries(workspace, &callgraph, &signatures);
+    let signatures = decompiler.signatures().clone();
+    let type_summaries = decompiler.type_summaries().clone();
     (callgraph, signatures, type_summaries)
 }
 
@@ -262,6 +256,20 @@ where
     }
 
     Some(StackSignature { inputs, outputs })
+}
+
+fn inferred_stack_signature(signature: &ProcSignature) -> Option<StackSignature> {
+    match signature {
+        ProcSignature::Known {
+            public_inputs,
+            outputs,
+            ..
+        } => Some(StackSignature {
+            inputs: *public_inputs,
+            outputs: *outputs,
+        }),
+        ProcSignature::Unknown => None,
+    }
 }
 
 fn type_felts(ty: &AstType) -> Option<usize> {
@@ -323,5 +331,22 @@ mod tests {
             inferred: StackSignature { inputs: 1, outputs: 1 },
         };
         assert!(signature_mismatch_message(&m).is_empty());
+    }
+
+    #[test]
+    fn inferred_stack_signature_uses_public_inputs() {
+        let inferred = ProcSignature::Known {
+            inputs: 24,
+            public_inputs: 16,
+            outputs: 8,
+            net_effect: -16,
+        };
+        assert_eq!(
+            inferred_stack_signature(&inferred),
+            Some(StackSignature {
+                inputs: 16,
+                outputs: 8,
+            })
+        );
     }
 }
