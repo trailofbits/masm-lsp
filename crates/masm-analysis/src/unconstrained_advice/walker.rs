@@ -171,24 +171,11 @@ fn eval_stmt<D: SinkDetector>(
             }
             masm_decompiler::ir::LocalAccessKind::WordBe
             | masm_decompiler::ir::LocalAccessKind::WordLe => {
-                apply_local_load_word(
-                    load.kind,
-                    &load.outputs,
-                    u32::from(load.index),
-                    &mut env,
-                );
+                apply_local_load_word(load.kind, &load.outputs, u32::from(load.index), &mut env);
             }
         },
-        Stmt::Call { call, .. }
-        | Stmt::Exec { call, .. }
-        | Stmt::SysCall { call, .. } => {
-            assign_call_results(
-                &mut env,
-                &call.target,
-                &call.args,
-                &call.results,
-                summaries,
-            );
+        Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
+            assign_call_results(&mut env, &call.target, &call.args, &call.results, summaries);
         }
         Stmt::DynCall { results, .. } => {
             for result in results {
@@ -230,7 +217,10 @@ fn eval_stmt<D: SinkDetector>(
             }
         }
         Stmt::While {
-            cond: _, body, phis, ..
+            cond: _,
+            body,
+            phis,
+            ..
         } => {
             let loop_result = eval_loop_block(detector, summaries, body, phis, env);
             env = loop_result.env;

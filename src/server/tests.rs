@@ -387,7 +387,7 @@ async fn execute_command_group_advice_diagnostics_by_origin_returns_grouped_payl
         .handle_open(
             uri.clone(),
             1,
-            "@locals(1)\nproc bad\n    adv_push.1\n    loc_store.0\n    loc_load.0\n    push.1\n    u32wrapping_add\n    drop\n    loc_load.0\n    push.1\n    u32wrapping_add\nend\n".to_string(),
+            "@locals(1)\nproc bad\n    adv_push\n    loc_store.0\n    loc_load.0\n    push.1\n    u32wrapping_add\n    drop\n    loc_load.0\n    push.1\n    u32wrapping_add\nend\n".to_string(),
         )
         .await
         .expect("open");
@@ -797,38 +797,36 @@ async fn execute_command_decompile_procedure_at_cursor_returns_decompilation_err
 async fn publish_diagnostics_includes_decompilation_failures_when_hints_are_enabled() {
     let client = RecordingClient::default();
     let backend = Backend::new(client.clone());
-    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let core_root = repo_root.join("examples").join("core");
-    let mem_path = core_root.join("mem.masm");
-    let mem_uri = Url::from_file_path(&mem_path).expect("mem URI");
-    let mem_text = std::fs::read_to_string(&mem_path).expect("read core library mem.masm");
+    let uri = Url::parse("file:///tmp/decompile_failure.masm").expect("valid URI");
 
     let mut cfg = backend.snapshot_config().await;
-    cfg.library_paths = vec![default_core_library_path(core_root)];
     cfg.inlay_hint_type = crate::InlayHintType::Decompilation;
     cfg.taint_analysis_enabled = false;
     backend.update_config(cfg).await;
 
     backend
-        .handle_open(mem_uri.clone(), 1, mem_text)
+        .handle_open(uri.clone(), 1, "proc foo\n    dynexec\nend\n".to_string())
         .await
-        .expect("open core library mem.masm");
+        .expect("open");
 
     let published = client.take_published().await;
-    let mem_diags: Vec<_> = published
+    let diagnostics: Vec<_> = published
         .iter()
-        .filter(|(uri, _, _)| uri == &mem_uri)
+        .filter(|(published_uri, _, _)| published_uri == &uri)
         .flat_map(|(_, diags, _)| diags.iter())
         .collect();
 
     assert!(
-        mem_diags.iter().any(|diag| {
+        diagnostics.iter().any(|diag| {
             diag.source.as_deref() == Some(crate::masm::diagnostics::SOURCE_DECOMPILATION)
-                && diag.message.contains("pipe_words_to_memory")
-                && diag.message.contains("incompatible subscripts")
+                && diag.message.contains("could not decompile procedure `foo`")
+                && (diag
+                    .message
+                    .contains("unsupported instruction `dynexec` found")
+                    || diag.message.contains("unknown inferred signature"))
         }),
-        "expected detailed decompilation diagnostic for pipe_words_to_memory, got: {:?}",
-        mem_diags
+        "expected detailed decompilation diagnostic for foo, got: {:?}",
+        diagnostics
             .iter()
             .map(|diag| (diag.source.clone(), diag.message.clone()))
             .collect::<Vec<_>>()

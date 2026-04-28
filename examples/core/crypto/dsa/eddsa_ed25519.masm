@@ -226,7 +226,7 @@ pub proc verify_prehash_impl
     # => [pk_ptr, k_digest_ptr, sig_ptr, ...]
 
     # Read verification result from advice stack (provided by the host).
-    adv_push.1
+    adv_push
     # => [result, pk_ptr, k_digest_ptr, sig_ptr, ...]
 
     # Compute COMM_PK = poseidon2::hash_memory(pk_ptr, PK_LEN_FELTS)

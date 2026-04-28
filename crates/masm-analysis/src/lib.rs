@@ -18,9 +18,9 @@ pub mod abstract_interp;
 mod unconstrained_advice;
 
 pub use unconstrained_advice::{
-    infer_unconstrained_advice, infer_unconstrained_advice_in_workspace, AdviceDiagnostic,
-    AdviceDiagnosticsMap, AdviceRootCauseGroup, AdviceSinkKind, AdviceSummary, AdviceSummaryMap,
-    CallArgumentRequirement, group_advice_diagnostics_by_origin,
+    group_advice_diagnostics_by_origin, infer_unconstrained_advice,
+    infer_unconstrained_advice_in_workspace, AdviceDiagnostic, AdviceDiagnosticsMap,
+    AdviceRootCauseGroup, AdviceSinkKind, AdviceSummary, AdviceSummaryMap, CallArgumentRequirement,
 };
 
 pub use masm_decompiler::signature::SignatureMap;
@@ -138,14 +138,14 @@ pub fn signature_mismatches_in_workspace(
 ) -> Vec<SignatureMismatch> {
     let decompiler = Decompiler::new(workspace);
     let signatures = decompiler.signatures();
-    let resolver = module.type_resolver(sources.clone());
+    let mut resolver = module.type_resolver(sources.clone());
 
     let mut findings = Vec::new();
     for proc in module.procedures() {
         let Some(signature) = proc.signature() else {
             continue;
         };
-        let Some(declared) = signature_stack_signature(signature, &resolver) else {
+        let Some(declared) = signature_stack_signature(signature, &mut resolver) else {
             continue;
         };
 
@@ -188,14 +188,14 @@ pub fn signature_mismatches_from_snapshot(
     sources: Arc<DefaultSourceManager>,
     signatures: &SignatureMap,
 ) -> Vec<SignatureMismatch> {
-    let resolver = module.type_resolver(sources);
+    let mut resolver = module.type_resolver(sources);
 
     let mut findings = Vec::new();
     for proc in module.procedures() {
         let Some(signature) = proc.signature() else {
             continue;
         };
-        let Some(declared) = signature_stack_signature(signature, &resolver) else {
+        let Some(declared) = signature_stack_signature(signature, &mut resolver) else {
             continue;
         };
 
@@ -237,7 +237,10 @@ pub fn analysis_inputs(workspace: &Workspace) -> (CallGraph, SignatureMap, TypeS
     (callgraph, signatures, type_summaries)
 }
 
-fn signature_stack_signature<R>(signature: &FunctionType, resolver: &R) -> Option<StackSignature>
+fn signature_stack_signature<R>(
+    signature: &FunctionType,
+    resolver: &mut R,
+) -> Option<StackSignature>
 where
     R: TypeResolver<SymbolResolutionError>,
 {
@@ -288,8 +291,14 @@ mod tests {
         let m = SignatureMismatch {
             proc_name: "foo".into(),
             span: SourceSpan::UNKNOWN,
-            declared: StackSignature { inputs: 2, outputs: 1 },
-            inferred: StackSignature { inputs: 3, outputs: 2 },
+            declared: StackSignature {
+                inputs: 2,
+                outputs: 1,
+            },
+            inferred: StackSignature {
+                inputs: 3,
+                outputs: 2,
+            },
         };
         let msg = signature_mismatch_message(&m);
         assert!(msg.contains("2 inputs and 1 outputs"));
@@ -301,8 +310,14 @@ mod tests {
         let m = SignatureMismatch {
             proc_name: "bar".into(),
             span: SourceSpan::UNKNOWN,
-            declared: StackSignature { inputs: 2, outputs: 1 },
-            inferred: StackSignature { inputs: 3, outputs: 1 },
+            declared: StackSignature {
+                inputs: 2,
+                outputs: 1,
+            },
+            inferred: StackSignature {
+                inputs: 3,
+                outputs: 1,
+            },
         };
         let msg = signature_mismatch_message(&m);
         assert!(msg.contains("declares 2 inputs"));
@@ -314,8 +329,14 @@ mod tests {
         let m = SignatureMismatch {
             proc_name: "baz".into(),
             span: SourceSpan::UNKNOWN,
-            declared: StackSignature { inputs: 1, outputs: 2 },
-            inferred: StackSignature { inputs: 1, outputs: 3 },
+            declared: StackSignature {
+                inputs: 1,
+                outputs: 2,
+            },
+            inferred: StackSignature {
+                inputs: 1,
+                outputs: 3,
+            },
         };
         let msg = signature_mismatch_message(&m);
         assert!(msg.contains("declares 2 outputs"));
@@ -327,8 +348,14 @@ mod tests {
         let m = SignatureMismatch {
             proc_name: "qux".into(),
             span: SourceSpan::UNKNOWN,
-            declared: StackSignature { inputs: 1, outputs: 1 },
-            inferred: StackSignature { inputs: 1, outputs: 1 },
+            declared: StackSignature {
+                inputs: 1,
+                outputs: 1,
+            },
+            inferred: StackSignature {
+                inputs: 1,
+                outputs: 1,
+            },
         };
         assert!(signature_mismatch_message(&m).is_empty());
     }

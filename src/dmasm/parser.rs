@@ -556,7 +556,10 @@ mod tests {
         let proc = &doc.procedures[0];
         let input_count = proc.variables.iter().filter(|v| v.name == "input").count();
         // Parameter + one body usage.
-        assert_eq!(input_count, 2, "should find 'input' in both parameter and body");
+        assert_eq!(
+            input_count, 2,
+            "should find 'input' in both parameter and body"
+        );
     }
 
     #[test]
@@ -589,10 +592,22 @@ mod tests {
         let doc = parse_dmasm(text);
         let proc = &doc.procedures[0];
         let var_names: Vec<&str> = proc.variables.iter().map(|v| v.name.as_str()).collect();
-        assert!(!var_names.contains(&"std"), "should skip qualified path component 'std'");
-        assert!(!var_names.contains(&"crypto"), "should skip qualified path component 'crypto'");
-        assert!(!var_names.contains(&"sha256"), "should skip qualified path component 'sha256'");
-        assert!(!var_names.contains(&"hash"), "should skip qualified path component 'hash'");
+        assert!(
+            !var_names.contains(&"std"),
+            "should skip qualified path component 'std'"
+        );
+        assert!(
+            !var_names.contains(&"crypto"),
+            "should skip qualified path component 'crypto'"
+        );
+        assert!(
+            !var_names.contains(&"sha256"),
+            "should skip qualified path component 'sha256'"
+        );
+        assert!(
+            !var_names.contains(&"hash"),
+            "should skip qualified path component 'hash'"
+        );
         // But the variables should still be found.
         assert!(var_names.contains(&"v_0"));
         assert!(var_names.contains(&"v_1"));
@@ -602,7 +617,8 @@ mod tests {
     #[test]
     fn operator_suffix_not_collected() {
         // The `_u32` suffix in `<=_u32` should not be collected.
-        let text = "proc foo(v_0: U32, v_1: U32) -> Bool {\n  v_2 = (v_0 <=_u32 v_1);\n  return v_2;\n}";
+        let text =
+            "proc foo(v_0: U32, v_1: U32) -> Bool {\n  v_2 = (v_0 <=_u32 v_1);\n  return v_2;\n}";
         let doc = parse_dmasm(text);
         let proc = &doc.procedures[0];
         let var_names: Vec<&str> = proc.variables.iter().map(|v| v.name.as_str()).collect();
@@ -618,6 +634,9 @@ mod tests {
         let doc = parse_dmasm(text);
         let proc = &doc.procedures[0];
         let i_count = proc.variables.iter().filter(|v| v.name == "i").count();
-        assert_eq!(i_count, 2, "loop variable 'i' should be found on for-line and in body");
+        assert_eq!(
+            i_count, 2,
+            "loop variable 'i' should be found on for-line and in body"
+        );
     }
 }

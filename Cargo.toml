@@ -3,10 +3,10 @@ members = [".", "crates/masm-instructions", "crates/masm-analysis", "crates/masm
 resolver = "2"
 
 [workspace.dependencies]
-masm-decompiler = { version = "=0.6.1", git = "https://github.com/trailofbits/masm-decompiler", rev = "dac04e17dea54e7e025c48745705f4dc0433bc91" }
-miden-assembly-syntax = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
-miden-debug-types = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
-miden-utils-diagnostics = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = true }
+masm-decompiler = { version = "=0.8.1", git = "https://github.com/huitseeker/masm-decompiler", rev = "1aa3918cb4ddfad03f44e13d75b4b41f1ed88ede" }
+miden-assembly-syntax = { version = "=0.23.0", git = "https://github.com/0xMiden/miden-vm", rev = "c711256c7b8154a31c7955c0c01bb063da095c2b", default-features = true }
+miden-debug-types = { version = "=0.23.0", git = "https://github.com/0xMiden/miden-vm", rev = "c711256c7b8154a31c7955c0c01bb063da095c2b", default-features = true }
+miden-utils-diagnostics = { version = "=0.23.0", git = "https://github.com/0xMiden/miden-vm", rev = "c711256c7b8154a31c7955c0c01bb063da095c2b", default-features = true }
 yansi = "1.0"
 log = "0.4"
 

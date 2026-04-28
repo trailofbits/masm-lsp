@@ -4,8 +4,8 @@ mod stdlib_eval;
 use masm_decompiler::frontend::testing::workspace_from_modules;
 
 use super::{
-    AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind, CallArgumentRequirement,
-    group_advice_diagnostics_by_origin,
+    group_advice_diagnostics_by_origin, AdviceDiagnostic, AdviceDiagnosticsMap, AdviceSinkKind,
+    CallArgumentRequirement,
 };
 use crate::infer_unconstrained_advice_in_workspace;
 
@@ -27,7 +27,7 @@ fn is_u32_relevant_diagnostic(diag: &AdviceDiagnostic) -> bool {
 fn direct_adv_push_to_u32_expr_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    push.1\n    u32wrapping_add\nend\n",
+        "proc bad\n    adv_push\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -42,12 +42,13 @@ fn direct_adv_push_to_u32_expr_warns() {
 fn direct_adv_push_to_u32_intrinsic_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    push.1\n    u32overflowing_add\n    drop\nend\n",
+        "proc bad\n    adv_push\n    push.1\n    u32overflowing_add\n    drop\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
     assert!(
-        bad.iter().any(|diag| diag.message.contains("u32 intrinsic")),
+        bad.iter()
+            .any(|diag| diag.message.contains("u32 intrinsic")),
         "expected u32 intrinsic diagnostic, got: {bad:?}"
     );
 }
@@ -56,7 +57,7 @@ fn direct_adv_push_to_u32_intrinsic_warns() {
 fn u32cast_sanitizes_downstream_use() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc ok\n    adv_push.1\n    u32cast\n    push.1\n    u32wrapping_add\nend\n",
+        "proc ok\n    adv_push\n    u32cast\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -67,7 +68,7 @@ fn u32cast_sanitizes_downstream_use() {
 fn local_round_trip_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc local_bad\n    adv_push.1\n    loc_store.0\n    loc_load.0\n    push.1\n    u32wrapping_add\nend\n",
+        "proc local_bad\n    adv_push\n    loc_store.0\n    loc_load.0\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let local_bad = diagnostics_for(&diagnostics, "advice::local_bad");
@@ -83,12 +84,13 @@ fn local_round_trip_warns() {
 fn word_local_round_trip_tracks_little_endian_slots_precisely() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "@locals(8)\nproc ok\n    adv_push.1\n    push.2\n    push.3\n    push.4\n    loc_storew_le.0\n    dropw\n    push.0.0.0.0\n    loc_loadw_le.0\n    push.1\n    u32wrapping_add\nend\n",
+        "@locals(8)\nproc ok\n    adv_push\n    push.2\n    push.3\n    push.4\n    loc_storew_le.0\n    dropw\n    push.0.0.0.0\n    loc_loadw_le.0\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
     assert!(
-        ok.iter().all(|diag| !diag.message.contains("u32 operation")),
+        ok.iter()
+            .all(|diag| !diag.message.contains("u32 operation")),
         "expected no u32 diagnostics for clean LE top word element, got: {ok:?}"
     );
 }
@@ -97,7 +99,7 @@ fn word_local_round_trip_tracks_little_endian_slots_precisely() {
 fn word_local_round_trip_tracks_slots_precisely() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "@locals(8)\nproc ok\n    adv_push.1\n    push.2\n    push.3\n    push.4\n    loc_storew_be.0\n    dropw\n    push.0.0.0.0\n    loc_loadw_be.0\n    push.1\n    u32wrapping_add\nend\n",
+        "@locals(8)\nproc ok\n    adv_push\n    push.2\n    push.3\n    push.4\n    loc_storew_be.0\n    dropw\n    push.0.0.0.0\n    loc_loadw_be.0\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -112,12 +114,13 @@ fn word_local_round_trip_tracks_slots_precisely() {
 fn word_local_mixed_endianness_reaches_u32_sink() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "@locals(8)\nproc bad\n    adv_push.1\n    push.2\n    push.3\n    push.4\n    loc_storew_be.0\n    dropw\n    push.0.0.0.0\n    loc_loadw_le.0\n    push.1\n    u32wrapping_add\nend\n",
+        "@locals(8)\nproc bad\n    adv_push\n    push.2\n    push.3\n    push.4\n    loc_storew_be.0\n    dropw\n    push.0.0.0.0\n    loc_loadw_le.0\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
     assert!(
-        bad.iter().any(|diag| diag.message.contains("u32 operation")),
+        bad.iter()
+            .any(|diag| diag.message.contains("u32 operation")),
         "expected mixed-endian word-local diagnostic, got: {bad:?}"
     );
 }
@@ -126,7 +129,7 @@ fn word_local_mixed_endianness_reaches_u32_sink() {
 fn call_argument_warning_uses_callee_u32_requirement() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc needs_u32\n    push.1\n    u32wrapping_add\nend\n\nproc caller\n    adv_push.1\n    exec.needs_u32\nend\n",
+        "proc needs_u32\n    push.1\n    u32wrapping_add\nend\n\nproc caller\n    adv_push\n    exec.needs_u32\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let caller = diagnostics_for(&diagnostics, "advice::caller");
@@ -173,7 +176,7 @@ fn u32_filter_excludes_nonzero_call_arguments() {
 fn callee_output_summary_propagates_advice() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc source\n    adv_push.1\nend\n\nproc caller\n    exec.source\n    push.1\n    u32wrapping_add\nend\n",
+        "proc source\n    adv_push\nend\n\nproc caller\n    exec.source\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let caller = diagnostics_for(&diagnostics, "advice::caller");
@@ -189,7 +192,7 @@ fn callee_output_summary_propagates_advice() {
 fn callee_forwarding_input_taint_propagates_to_caller() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc forward\n    dup.0\n    drop\nend\n\nproc caller\n    adv_push.1\n    exec.forward\n    push.1\n    u32wrapping_add\nend\n",
+        "proc forward\n    dup.0\n    drop\nend\n\nproc caller\n    adv_push\n    exec.forward\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let caller = diagnostics_for(&diagnostics, "advice::caller");
@@ -205,12 +208,14 @@ fn callee_forwarding_input_taint_propagates_to_caller() {
 fn branch_join_overtaints_conservatively() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc maybe_bad\n    push.1\n    if.true\n        adv_push.1\n    else\n        push.2\n    end\n    push.1\n    u32wrapping_add\nend\n",
+        "proc maybe_bad\n    push.1\n    if.true\n        adv_push\n    else\n        push.2\n    end\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let maybe_bad = diagnostics_for(&diagnostics, "advice::maybe_bad");
     assert!(
-        maybe_bad.iter().any(|diag| diag.message.contains("u32 operation")),
+        maybe_bad
+            .iter()
+            .any(|diag| diag.message.contains("u32 operation")),
         "expected conservative branch-join diagnostic, got: {maybe_bad:?}"
     );
 }
@@ -219,13 +224,17 @@ fn branch_join_overtaints_conservatively() {
 fn origin_grouping_deduplicates_each_origin_per_diagnostic() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    dup\n    push.1\n    u32wrapping_add\nend\n",
+        "proc bad\n    adv_push\n    dup\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
 
     let groups = group_advice_diagnostics_by_origin(&diagnostics);
 
-    assert_eq!(groups.len(), 1, "expected one root-cause group, got: {groups:?}");
+    assert_eq!(
+        groups.len(),
+        1,
+        "expected one root-cause group, got: {groups:?}"
+    );
     assert_eq!(groups[0].sink_count(), 1);
 }
 
@@ -233,7 +242,7 @@ fn origin_grouping_deduplicates_each_origin_per_diagnostic() {
 fn origin_grouping_sorts_largest_fanout_first() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    dup\n    push.1\n    u32wrapping_add\n    push.1\n    u32wrapping_add\nend\n\nproc other\n    adv_push.1\n    push.1\n    u32wrapping_add\nend\n",
+        "proc bad\n    adv_push\n    dup\n    push.1\n    u32wrapping_add\n    push.1\n    u32wrapping_add\nend\n\nproc other\n    adv_push\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
 
@@ -250,7 +259,7 @@ fn origin_grouping_sorts_largest_fanout_first() {
 fn u32_intrinsic_outputs_are_sanitized() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc source\n    adv_push.1\n    push.1\n    u32overflowing_add\n    drop\nend\n\nproc caller\n    exec.source\n    push.1\n    u32wrapping_add\nend\n",
+        "proc source\n    adv_push\n    push.1\n    u32overflowing_add\n    drop\nend\n\nproc caller\n    exec.source\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let caller = diagnostics_for(&diagnostics, "advice::caller");
@@ -266,7 +275,7 @@ fn u32_intrinsic_outputs_are_sanitized() {
 fn is_odd_output_does_not_carry_unconstrained_advice() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc ok\n    adv_push.1\n    is_odd\n    push.1\n    u32wrapping_add\nend\n",
+        "proc ok\n    adv_push\n    is_odd\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -297,7 +306,7 @@ fn adv_pipe_results_are_tainted() {
 fn interprocedural_u32assert_sanitizes_mem_load_address() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc sanitize\n    u32assert\nend\n\nproc caller\n    adv_push.1\n    exec.sanitize\n    mem_load\nend\n",
+        "proc sanitize\n    u32assert\nend\n\nproc caller\n    adv_push\n    exec.sanitize\n    mem_load\nend\n",
     )]);
     let (summaries, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let sanitize = summaries
@@ -321,7 +330,7 @@ fn interprocedural_u32assert_sanitizes_mem_load_address() {
 fn diagnostics_retain_multiple_advice_origins() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    adv_push.1\n    add\n    push.1\n    u32wrapping_add\nend\n",
+        "proc bad\n    adv_push\n    adv_push\n    add\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -335,7 +344,7 @@ fn diagnostics_retain_multiple_advice_origins() {
 fn direct_adv_push_to_divisor_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    push.2\n    adv_push.1\n    div\nend\n",
+        "proc bad\n    push.2\n    adv_push\n    div\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -347,7 +356,7 @@ fn direct_adv_push_to_divisor_warns() {
 
 #[test]
 fn direct_adv_push_to_inv_warns() {
-    let ws = workspace_from_modules(&[("advice", "proc bad\n    adv_push.1\n    inv\nend\n")]);
+    let ws = workspace_from_modules(&[("advice", "proc bad\n    adv_push\n    inv\nend\n")]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
     assert!(
@@ -360,7 +369,7 @@ fn direct_adv_push_to_inv_warns() {
 fn interprocedural_nonzero_requirement_warns_at_call_site() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc helper\n    inv\nend\n\nproc caller\n    adv_push.1\n    exec.helper\nend\n",
+        "proc helper\n    inv\nend\n\nproc caller\n    adv_push\n    exec.helper\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let caller = diagnostics_for(&diagnostics, "advice::caller");
@@ -376,7 +385,7 @@ fn interprocedural_nonzero_requirement_warns_at_call_site() {
 fn opaque_callee_suppresses_output_claims() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc target\n    nop\nend\n\nproc opaque\n    procref.target\n    mem_storew_le.40\n    dropw\n    push.40\n    dynexec\n    adv_push.1\nend\n\nproc caller\n    exec.opaque\n    push.1\n    u32wrapping_add\nend\n",
+        "proc target\n    nop\nend\n\nproc opaque\n    procref.target\n    mem_storew_le.40\n    dropw\n    push.40\n    dynexec\n    adv_push\nend\n\nproc caller\n    exec.opaque\n    push.1\n    u32wrapping_add\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let caller = diagnostics_for(&diagnostics, "advice::caller");
@@ -392,7 +401,7 @@ fn opaque_callee_suppresses_output_claims() {
 fn eq_zero_assertz_suppresses_divisor_warning() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc ok\n    push.2\n    adv_push.1\n    dup.0\n    eq.0\n    assertz\n    div\nend\n",
+        "proc ok\n    push.2\n    adv_push\n    dup.0\n    eq.0\n    assertz\n    div\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -406,7 +415,7 @@ fn eq_zero_assertz_suppresses_divisor_warning() {
 fn eq_zero_else_branch_suppresses_divisor_warning() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc ok\n    push.2\n    adv_push.1\n    dup.0\n    eq.0\n    if.true\n        drop\n    else\n        div\n    end\nend\n",
+        "proc ok\n    push.2\n    adv_push\n    dup.0\n    eq.0\n    if.true\n        drop\n    else\n        div\n    end\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -420,7 +429,7 @@ fn eq_zero_else_branch_suppresses_divisor_warning() {
 fn proven_nonzero_value_round_trips_through_local() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc ok\n    push.2\n    adv_push.1\n    dup.0\n    eq.0\n    assertz\n    loc_store.0\n    loc_load.0\n    div\nend\n",
+        "proc ok\n    push.2\n    adv_push\n    dup.0\n    eq.0\n    assertz\n    loc_store.0\n    loc_load.0\n    div\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -434,7 +443,7 @@ fn proven_nonzero_value_round_trips_through_local() {
 fn direct_adv_push_to_mem_store_address_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    push.42\n    swap\n    mem_store\n    drop\nend\n",
+        "proc bad\n    adv_push\n    push.42\n    swap\n    mem_store\n    drop\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -452,10 +461,7 @@ fn direct_adv_push_to_mem_store_address_warns() {
 
 #[test]
 fn direct_adv_push_to_mem_load_address_warns() {
-    let ws = workspace_from_modules(&[(
-        "advice",
-        "proc bad\n    adv_push.1\n    mem_load\nend\n",
-    )]);
+    let ws = workspace_from_modules(&[("advice", "proc bad\n    adv_push\n    mem_load\nend\n")]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
     assert!(
@@ -469,7 +475,7 @@ fn direct_adv_push_to_mem_load_address_warns() {
 fn indirect_advice_to_address_via_arithmetic_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    push.4\n    mul\n    mem_load\nend\n",
+        "proc bad\n    adv_push\n    push.4\n    mul\n    mem_load\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -484,7 +490,7 @@ fn indirect_advice_to_address_via_arithmetic_warns() {
 fn u32assert_sanitizes_mem_store_address() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc ok\n    adv_push.1\n    u32assert\n    push.42\n    swap\n    mem_store\n    drop\nend\n",
+        "proc ok\n    adv_push\n    u32assert\n    push.42\n    swap\n    mem_store\n    drop\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -499,7 +505,7 @@ fn u32assert_sanitizes_mem_store_address() {
 fn adv_pipe_tainted_address_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    padw\n    padw\n    padw\n    adv_pipe\n    dropw\n    dropw\n    dropw\n    drop\nend\n",
+        "proc bad\n    adv_push\n    padw\n    padw\n    padw\n    adv_pipe\n    dropw\n    dropw\n    dropw\n    drop\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -514,7 +520,7 @@ fn adv_pipe_tainted_address_warns() {
 fn mem_stream_tainted_address_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.1\n    padw\n    padw\n    padw\n    mem_stream\n    dropw\n    dropw\n    dropw\n    drop\nend\n",
+        "proc bad\n    adv_push\n    padw\n    padw\n    padw\n    mem_stream\n    dropw\n    dropw\n    dropw\n    drop\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -529,7 +535,7 @@ fn mem_stream_tainted_address_warns() {
 fn mem_store_values_not_flagged_as_address() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc ok\n    adv_push.1\n    push.100\n    mem_store\n    drop\nend\n",
+        "proc ok\n    adv_push\n    push.100\n    mem_store\n    drop\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -544,7 +550,7 @@ fn mem_store_values_not_flagged_as_address() {
 fn interprocedural_advice_to_address_warns() {
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc source\n    adv_push.1\nend\n\nproc caller\n    exec.source\n    mem_load\nend\n",
+        "proc source\n    adv_push\nend\n\nproc caller\n    exec.source\n    mem_load\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let caller = diagnostics_for(&diagnostics, "advice::caller");
@@ -566,7 +572,7 @@ fn direct_advice_to_mtree_get_root_warns() {
     // Advice fills the root word (positions 2..6).
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.4\n    push.0\n    push.0\n    mtree_get\n    dropw\nend\n",
+        "proc bad\n    adv_push adv_push adv_push adv_push\n    push.0\n    push.0\n    mtree_get\n    dropw\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -588,7 +594,7 @@ fn direct_advice_to_mtree_set_root_warns() {
     // Advice fills the root word (positions 2..6).
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    padw\n    adv_push.4\n    push.0\n    push.0\n    mtree_set\n    dropw\n    dropw\nend\n",
+        "proc bad\n    padw\n    adv_push adv_push adv_push adv_push\n    push.0\n    push.0\n    mtree_set\n    dropw\n    dropw\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -605,7 +611,7 @@ fn direct_advice_to_mtree_verify_root_warns() {
     // Advice fills the root word (positions 6..10).
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc bad\n    adv_push.4\n    push.0\n    push.0\n    padw\n    mtree_verify\nend\n",
+        "proc bad\n    adv_push adv_push adv_push adv_push\n    push.0\n    push.0\n    padw\n    mtree_verify\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let bad = diagnostics_for(&diagnostics, "advice::bad");
@@ -622,7 +628,7 @@ fn advice_in_non_root_position_not_flagged() {
     // NOT into the root word. No MerkleRoot diagnostic expected.
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc ok\n    push.1.2.3.4\n    adv_push.1\n    adv_push.1\n    mtree_get\n    dropw\nend\n",
+        "proc ok\n    push.1.2.3.4\n    adv_push\n    adv_push\n    mtree_get\n    dropw\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let ok = diagnostics_for(&diagnostics, "advice::ok");
@@ -638,7 +644,7 @@ fn interprocedural_advice_to_merkle_root_warns() {
     // Callee returns advice, caller uses it as mtree_get root.
     let ws = workspace_from_modules(&[(
         "advice",
-        "proc source\n    adv_push.4\nend\n\nproc caller\n    exec.source\n    push.0\n    push.0\n    mtree_get\n    dropw\nend\n",
+        "proc source\n    adv_push adv_push adv_push adv_push\nend\n\nproc caller\n    exec.source\n    push.0\n    push.0\n    mtree_get\n    dropw\nend\n",
     )]);
     let (_, diagnostics) = infer_unconstrained_advice_in_workspace(&ws);
     let caller = diagnostics_for(&diagnostics, "advice::caller");

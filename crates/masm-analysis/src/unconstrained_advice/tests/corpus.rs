@@ -86,7 +86,10 @@ fn procedure_was_analyzed(summaries: &AdviceSummaryMap, procedure: &SymbolPath) 
 
 /// Return whether a sink belongs to this `u32` regression suite.
 const fn is_u32_corpus_sink(sink: AdviceSinkKind) -> bool {
-    matches!(sink, AdviceSinkKind::U32Expression | AdviceSinkKind::U32Intrinsic)
+    matches!(
+        sink,
+        AdviceSinkKind::U32Expression | AdviceSinkKind::U32Intrinsic
+    )
 }
 
 /// Return whether one actual diagnostic matches the expected diagnostic contract.
@@ -127,7 +130,11 @@ fn assert_diagnostics_match(
     case: &CorpusCase,
     actual: &[crate::AdviceDiagnostic],
 ) {
-    let required_count: usize = case.required_diagnostics.iter().map(|expected| expected.count).sum();
+    let required_count: usize = case
+        .required_diagnostics
+        .iter()
+        .map(|expected| expected.count)
+        .sum();
     assert_eq!(
         required_count,
         case.expected_count,
@@ -150,7 +157,9 @@ fn assert_diagnostics_match(
             let next_match = actual
                 .iter()
                 .enumerate()
-                .find(|(index, diag)| !matched[*index] && matches_expected(sources, diag, *expected))
+                .find(|(index, diag)| {
+                    !matched[*index] && matches_expected(sources, diag, *expected)
+                })
                 .map(|(index, _)| index);
 
             let index = next_match.unwrap_or_else(|| {
@@ -347,7 +356,7 @@ const CORPUS_CASES: [CorpusCase; 7] = [
         name: "mod_12289_like_missing_remainder_validation",
         modules: &[(
             "falcon",
-            "proc mod_12289_like\n    adv_push.2\n    u32assert2\n    adv_push.1\n    push.12289\n    u32overflowing_sub\n    drop\n    push.1\n    u32overflowing_add\n    drop\nend\n",
+            "proc mod_12289_like\n    adv_push adv_push\n    u32assert2\n    adv_push\n    push.12289\n    u32overflowing_sub\n    drop\n    push.1\n    u32overflowing_add\n    drop\nend\n",
         )],
         procedure: "falcon::mod_12289_like",
         expected_count: 1,
@@ -358,7 +367,7 @@ const CORPUS_CASES: [CorpusCase; 7] = [
         name: "call_argument_requires_u32",
         modules: &[(
             "calls",
-            "proc needs_u32\n    push.1\n    u32wrapping_add\nend\n\nproc caller\n    adv_push.1\n    exec.needs_u32\nend\n",
+            "proc needs_u32\n    push.1\n    u32wrapping_add\nend\n\nproc caller\n    adv_push\n    exec.needs_u32\nend\n",
         )],
         procedure: "calls::caller",
         expected_count: 1,
@@ -369,7 +378,7 @@ const CORPUS_CASES: [CorpusCase; 7] = [
         name: "single_origin_warns_once_then_reuses_sanitized_u32",
         modules: &[(
             "noise",
-            "proc noisy\n    adv_push.1\n    dup\n    push.1\n    u32overflowing_add\n    drop\n    push.2\n    u32wrapping_add\nend\n",
+            "proc noisy\n    adv_push\n    dup\n    push.1\n    u32overflowing_add\n    drop\n    push.2\n    u32wrapping_add\nend\n",
         )],
         procedure: "noise::noisy",
         expected_count: 1,
@@ -380,7 +389,7 @@ const CORPUS_CASES: [CorpusCase; 7] = [
         name: "single_origin_fans_out_to_two_u32_call_warnings",
         modules: &[(
             "calls",
-            "proc needs_u32\n    push.1\n    u32wrapping_add\nend\n\nproc noisy\n    adv_push.1\n    dup\n    exec.needs_u32\n    drop\n    exec.needs_u32\nend\n",
+            "proc needs_u32\n    push.1\n    u32wrapping_add\nend\n\nproc noisy\n    adv_push\n    dup\n    exec.needs_u32\n    drop\n    exec.needs_u32\nend\n",
         )],
         procedure: "calls::noisy",
         expected_count: 2,
@@ -391,7 +400,7 @@ const CORPUS_CASES: [CorpusCase; 7] = [
         name: "validated_once_then_reused",
         modules: &[(
             "validated",
-            "proc ok\n    adv_push.1\n    u32assert\n    dup\n    push.1\n    u32overflowing_add\n    drop\n    push.2\n    u32wrapping_add\nend\n",
+            "proc ok\n    adv_push\n    u32assert\n    dup\n    push.1\n    u32overflowing_add\n    drop\n    push.2\n    u32wrapping_add\nend\n",
         )],
         procedure: "validated::ok",
         expected_count: 0,
@@ -402,7 +411,7 @@ const CORPUS_CASES: [CorpusCase; 7] = [
         name: "validated_local_round_trip",
         modules: &[(
             "validated",
-            "@locals(1)\nproc ok\n    adv_push.1\n    u32assert\n    loc_store.0\n    loc_load.0\n    push.1\n    u32wrapping_add\nend\n",
+            "@locals(1)\nproc ok\n    adv_push\n    u32assert\n    loc_store.0\n    loc_load.0\n    push.1\n    u32wrapping_add\nend\n",
         )],
         procedure: "validated::ok",
         expected_count: 0,
@@ -413,7 +422,7 @@ const CORPUS_CASES: [CorpusCase; 7] = [
         name: "validated_once_then_reused_across_call",
         modules: &[(
             "validated",
-            "proc needs_u32\n    push.1\n    u32wrapping_add\nend\n\nproc ok\n    adv_push.1\n    u32assert\n    dup\n    exec.needs_u32\n    drop\n    exec.needs_u32\nend\n",
+            "proc needs_u32\n    push.1\n    u32wrapping_add\nend\n\nproc ok\n    adv_push\n    u32assert\n    dup\n    exec.needs_u32\n    drop\n    exec.needs_u32\nend\n",
         )],
         procedure: "validated::ok",
         expected_count: 0,
@@ -442,8 +451,12 @@ fn u32_regression_corpus_matches_current_labels() {
             case.procedure
         );
 
-        let procedure_diags =
-            diagnostics_for_case(&workspace.source_manager(), case, &diagnostics, case.procedure);
+        let procedure_diags = diagnostics_for_case(
+            &workspace.source_manager(),
+            case,
+            &diagnostics,
+            case.procedure,
+        );
         if !case.allow_other_diagnostics {
             assert_eq!(
                 procedure_diags.len(),

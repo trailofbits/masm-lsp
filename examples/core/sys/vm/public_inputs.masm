@@ -202,7 +202,7 @@ proc reduce_variable_length_public_inputs
     # stored temporarily and they will be over-written by, among other data, the result of reducing
     # the variable public inputs.
 
-    adv_push.1 exec.reduce_kernel_digests
+    adv_push exec.reduce_kernel_digests
     # => [next_var_len_pub_inputs_ptr, var_len_pub_inputs_res_ptr, ...]
 
     # 3) Clean up the stack.

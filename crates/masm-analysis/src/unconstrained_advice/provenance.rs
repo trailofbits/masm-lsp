@@ -114,7 +114,9 @@ fn build_summary(
             .map(|var| env.u32_validity_for_var(var))
             .unwrap_or(U32Validity::Unknown);
         let forwarded_validity = forwarded_input
-            .map(|input_position| env.u32_validity_for_var(&input_var_for_position(input_count, input_position)))
+            .map(|input_position| {
+                env.u32_validity_for_var(&input_var_for_position(input_count, input_position))
+            })
             .unwrap_or(U32Validity::Unknown);
         let validity = if direct_validity.is_proven() || forwarded_validity.is_proven() {
             U32Validity::ProvenU32
@@ -136,7 +138,8 @@ fn build_summary(
 fn exact_forwarded_input(input_count: usize, output: &Var, env: &Env) -> Option<usize> {
     let output_identity = env.identity_for_var(output);
     (0..input_count).find(|&input_position| {
-        env.identity_for_var(&input_var_for_position(input_count, input_position)) == output_identity
+        env.identity_for_var(&input_var_for_position(input_count, input_position))
+            == output_identity
     })
 }
 
@@ -415,8 +418,7 @@ mod tests {
         );
         assert_eq!(loop_head.identity_for_var(&dest), shared_identity);
 
-        let mut state =
-            ProvenanceLoopState::at_loop_head(&entry_env, std::slice::from_ref(&phi));
+        let mut state = ProvenanceLoopState::at_loop_head(&entry_env, std::slice::from_ref(&phi));
         let candidate = ProvenanceLoopState::from_body_env(
             body_env.clone(),
             &entry_env,

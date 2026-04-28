@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use clap::Parser;
 use masm_analysis::{
-    AdviceDiagnostic, AdviceRootCauseGroup, AnalysisSnapshot, SignatureMismatch, TypeDiagnostic,
     group_advice_diagnostics_by_origin, signature_mismatch_message,
-    signature_mismatches_from_snapshot,
+    signature_mismatches_from_snapshot, AdviceDiagnostic, AdviceRootCauseGroup, AnalysisSnapshot,
+    SignatureMismatch, TypeDiagnostic,
 };
 use masm_decompiler::{
-    SymbolPath,
     frontend::{LibraryRoot, Workspace},
+    SymbolPath,
 };
 use miden_debug_types::DefaultSourceManager;
 
@@ -193,10 +193,7 @@ fn emit_summary(warning_count: usize, error_count: usize) -> i32 {
             1
         }
         (e, 0) => {
-            eprintln!(
-                "{}: masm-lint found {e} error(s)",
-                "error".red().bold(),
-            );
+            eprintln!("{}: masm-lint found {e} error(s)", "error".red().bold(),);
             1
         }
         (e, w) => {
@@ -273,7 +270,11 @@ fn root_cause_group_to_lint(group: &AdviceRootCauseGroup) -> LintDiagnostic {
         .iter()
         .map(|diag| RelatedSpan {
             span: diag.span,
-            message: format!("{} (in procedure `{}`)", diag.message, diag.procedure.as_str()),
+            message: format!(
+                "{} (in procedure `{}`)",
+                diag.message,
+                diag.procedure.as_str()
+            ),
         })
         .collect();
 
@@ -310,7 +311,10 @@ fn grouped_procedure_note(diagnostics: &[AdviceDiagnostic]) -> String {
 // ── Sorting ───────────────────────────────────────────────────────────────────
 
 /// Sort diagnostics by (uri, line, col) of their primary span.
-fn sort_diagnostics(diagnostics: &mut [LintDiagnostic], sources: &dyn miden_debug_types::SourceManager) {
+fn sort_diagnostics(
+    diagnostics: &mut [LintDiagnostic],
+    sources: &dyn miden_debug_types::SourceManager,
+) {
     diagnostics.sort_by(|a, b| {
         let key_a = sort_key(a.span, sources);
         let key_b = sort_key(b.span, sources);
