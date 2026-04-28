@@ -2,10 +2,7 @@
 
 use std::collections::HashMap;
 
-use masm_decompiler::{
-    ir::Stmt,
-    SymbolPath,
-};
+use masm_decompiler::{ir::Stmt, SymbolPath};
 
 use super::{
     domain::AdviceFact,
@@ -99,8 +96,12 @@ impl AddressDetector {
         message: impl Into<String>,
         fact: &AdviceFact,
     ) -> AdviceDiagnostic {
-        let mut diagnostic =
-            AdviceDiagnostic::new(self.proc_path.clone(), span, AdviceSinkKind::MemoryAddress, message);
+        let mut diagnostic = AdviceDiagnostic::new(
+            self.proc_path.clone(),
+            span,
+            AdviceSinkKind::MemoryAddress,
+            message,
+        );
         diagnostic.origins = fact.source_spans.iter().copied().collect();
         diagnostic
     }

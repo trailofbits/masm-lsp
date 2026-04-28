@@ -11,7 +11,7 @@ use masm_decompiler::frontend::{LibraryRoot, Workspace};
 use miden_debug_types::{DefaultSourceManager, SourceManager};
 use serde_json::json;
 
-use crate::{AnalysisSnapshot, AdviceDiagnostic, AdviceSinkKind};
+use crate::{AdviceDiagnostic, AdviceSinkKind, AnalysisSnapshot};
 
 /// Environment variable pointing at the stdlib ASM root to analyze.
 const STDLIB_ROOT_ENV: &str = "MASM_PHASE2_STDLIB_ROOT";
@@ -53,9 +53,8 @@ fn collect_masm_files(dir: &Path, out: &mut BTreeSet<PathBuf>) -> io::Result<()>
 /// Build a workspace for the stdlib root using the same library-root layout as `masm-lint`.
 fn workspace_from_stdlib_root(root: &Path) -> Workspace {
     let sources: Arc<DefaultSourceManager> = Arc::new(DefaultSourceManager::default());
-    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|err| {
-        panic!("failed to resolve stdlib root {}: {err}", root.display())
-    });
+    let canonical_root = std::fs::canonicalize(root)
+        .unwrap_or_else(|err| panic!("failed to resolve stdlib root {}: {err}", root.display()));
     assert!(
         canonical_root.is_dir(),
         "stdlib root {} is not a directory",
@@ -93,7 +92,10 @@ fn is_u32_relevant_diagnostic(diag: &AdviceDiagnostic) -> bool {
     matches!(
         diag.sink,
         AdviceSinkKind::U32Expression | AdviceSinkKind::U32Intrinsic
-    ) || matches!(diag.call_requirement, Some(crate::CallArgumentRequirement::U32))
+    ) || matches!(
+        diag.call_requirement,
+        Some(crate::CallArgumentRequirement::U32)
+    )
 }
 
 /// Return `true` when one procedure name refers to the Falcon `mod_12289` reduction helper.
@@ -101,7 +103,10 @@ fn is_falcon_mod_12289(procedure: &str) -> bool {
     let mut segments = procedure.rsplit("::");
     matches!(
         (segments.next(), segments.next()),
-        (Some("mod_12289"), Some("falcon512_poseidon2" | "falcon512poseidon2"))
+        (
+            Some("mod_12289"),
+            Some("falcon512_poseidon2" | "falcon512poseidon2")
+        )
     )
 }
 
@@ -165,7 +170,9 @@ fn stdlib_u32_noise_report() {
     let mut falcon_mod_12289 = Vec::new();
 
     for diag in &u32_diagnostics {
-        *sink_counts.entry(sink_name(diag.sink).to_string()).or_default() += 1;
+        *sink_counts
+            .entry(sink_name(diag.sink).to_string())
+            .or_default() += 1;
         *procedure_counts
             .entry(diag.procedure.as_str().to_string())
             .or_default() += 1;

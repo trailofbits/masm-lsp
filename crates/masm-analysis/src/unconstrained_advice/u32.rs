@@ -385,7 +385,9 @@ fn expr_u32_sink_fact(expr: &Expr, env: &Env) -> AdviceFact {
                 | BinOp::U32Gte
                 | BinOp::U32WrappingAdd
                 | BinOp::U32WrappingSub
-                | BinOp::U32WrappingMul => u32_operand_fact(lhs, env).join(&u32_operand_fact(rhs, env)),
+                | BinOp::U32WrappingMul => {
+                    u32_operand_fact(lhs, env).join(&u32_operand_fact(rhs, env))
+                }
                 BinOp::U32Exp => u32_operand_fact(rhs, env),
                 _ => AdviceFact::bottom(),
             };

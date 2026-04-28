@@ -262,7 +262,7 @@ mod tests {
     }
 
     fn felt(v: u64) -> miden_assembly_syntax::Felt {
-        miden_assembly_syntax::Felt::new(v)
+        miden_assembly_syntax::Felt::new(v).expect("test values are valid field elements")
     }
 
     fn push_word_inst(

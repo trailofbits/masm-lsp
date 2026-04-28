@@ -185,7 +185,7 @@ async fn unknown_type_does_not_emit_mismatch_warning() {
 end
 
 proc caller_unknown_bool
-    adv_push.1
+    adv_push
     exec.needs_bool
 end
 "#;
@@ -214,7 +214,7 @@ async fn unresolved_modules_suppress_unconstrained_advice_warnings() {
     let content = r#"use ::tmp::missing::add->plus
 
 proc bad
-    adv_push.1
+    adv_push
     push.1
     u32wrapping_add
     exec.plus
@@ -233,7 +233,9 @@ end
         diags
     );
     assert!(
-        diags.iter().any(|diag| diag.source.as_deref() != Some(SOURCE_ANALYSIS)),
+        diags
+            .iter()
+            .any(|diag| diag.source.as_deref() != Some(SOURCE_ANALYSIS)),
         "expected a non-analysis diagnostic from the unresolved dependency, got: {:?}",
         diags
     );
@@ -243,7 +245,7 @@ end
 async fn unconstrained_advice_to_u32_operation_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc bad
-    adv_push.1
+    adv_push
     push.1
     u32wrapping_add
 end
@@ -276,7 +278,7 @@ async fn unconstrained_advice_to_u32_call_argument_produces_warning() {
 end
 
 proc caller
-    adv_push.1
+    adv_push
     exec.needs_u32
 end
 "#;
@@ -299,7 +301,7 @@ end
 async fn u32cast_sanitizes_unconstrained_advice_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc ok
-    adv_push.1
+    adv_push
     u32cast
     push.1
     u32wrapping_add
@@ -322,7 +324,7 @@ end
 async fn direct_u32_intrinsic_sink_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc bad
-    adv_push.1
+    adv_push
     push.1
     u32overflowing_add
     drop
@@ -349,7 +351,7 @@ end
 async fn local_round_trip_of_unconstrained_advice_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc local_bad
-    adv_push.1
+    adv_push
     loc_store.0
     loc_load.0
     push.1
@@ -375,7 +377,7 @@ end
 async fn interprocedural_unconstrained_advice_output_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc source
-    adv_push.1
+    adv_push
 end
 
 proc caller
@@ -404,7 +406,7 @@ async fn callee_returning_local_advice_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"@locals(1)
 proc source
-    adv_push.1
+    adv_push
     loc_store.0
     loc_load.0
 end
@@ -436,7 +438,7 @@ end
 async fn u32_intrinsic_output_is_sanitized_for_follow_on_u32_use() {
     let harness = TestHarness::new().await;
     let content = r#"proc source
-    adv_push.1
+    adv_push
     push.1
     u32overflowing_add
     drop
@@ -469,7 +471,7 @@ end
 async fn is_odd_output_does_not_trigger_unconstrained_advice_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc ok
-    adv_push.1
+    adv_push
     is_odd
     push.1
     u32wrapping_add
@@ -491,8 +493,8 @@ end
 async fn unconstrained_advice_warning_includes_multiple_related_sources() {
     let harness = TestHarness::new().await;
     let content = r#"proc bad
-    adv_push.1
-    adv_push.1
+    adv_push
+    adv_push
     add
     push.1
     u32wrapping_add
@@ -524,7 +526,7 @@ end
 async fn interprocedural_warning_includes_cross_file_related_source() {
     let harness = TestHarness::new().await;
     let source_uri = harness
-        .open_inline("utils.masm", "proc source\n    adv_push.1\nend\n")
+        .open_inline("utils.masm", "proc source\n    adv_push\nend\n")
         .await;
     let caller_uri = harness
         .open_inline(
@@ -583,7 +585,7 @@ async fn word_local_round_trip_tracks_slots_precisely() {
     let harness = TestHarness::new().await;
     let content = r#"@locals(8)
 proc ok
-    adv_push.1
+    adv_push
     push.2
     push.3
     push.4
@@ -618,7 +620,7 @@ async fn little_endian_word_local_round_trip_tracks_slots_precisely() {
     let harness = TestHarness::new().await;
     let content = r#"@locals(8)
 proc ok
-    adv_push.1
+    adv_push
     push.2
     push.3
     push.4
@@ -653,7 +655,7 @@ async fn mixed_endian_word_local_round_trip_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"@locals(8)
 proc bad
-    adv_push.1
+    adv_push
     push.2
     push.3
     push.4
@@ -688,7 +690,7 @@ async fn unconstrained_advice_to_divisor_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc bad
     push.2
-    adv_push.1
+    adv_push
     div
 end
 "#;
@@ -714,7 +716,7 @@ end
 async fn unconstrained_advice_to_inv_produces_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc bad
-    adv_push.1
+    adv_push
     inv
 end
 "#;
@@ -740,7 +742,7 @@ async fn interprocedural_nonzero_requirement_produces_call_warning() {
 end
 
 proc caller
-    adv_push.1
+    adv_push
     exec.helper
 end
 "#;
@@ -766,7 +768,7 @@ async fn eq_zero_assertz_suppresses_divisor_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc ok
     push.2
-    adv_push.1
+    adv_push
     dup.0
     eq.0
     assertz
@@ -792,7 +794,7 @@ async fn eq_zero_else_branch_suppresses_divisor_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc ok
     push.2
-    adv_push.1
+    adv_push
     dup.0
     eq.0
     if.true
@@ -821,7 +823,7 @@ async fn proven_nonzero_local_round_trip_suppresses_divisor_warning() {
     let harness = TestHarness::new().await;
     let content = r#"proc ok
     push.2
-    adv_push.1
+    adv_push
     dup.0
     eq.0
     assertz

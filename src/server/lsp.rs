@@ -1,9 +1,9 @@
 use crate::client::PublishDiagnostics;
 use crate::core_lib::{default_core_library_path, normalize_core_library_path};
 use crate::dmasm::{DocumentLanguage, detect_language};
-use crate::masm::diagnostics::{normalize_message, span_to_range};
 use crate::masm::code_lens::collect_code_lenses;
 use crate::masm::cursor_resolution::resolve_symbol_at_position;
+use crate::masm::diagnostics::{normalize_message, span_to_range};
 use crate::masm::inlay_hints::collect_inlay_hints;
 use crate::util::{extract_token_at_position, to_miden_uri};
 use crate::{InlayHintType, LibraryPath};
@@ -121,7 +121,8 @@ where
             }
             CMD_DECOMPILE_FILE => self.execute_decompile_file(&params).await,
             CMD_GROUP_ADVICE_DIAGNOSTICS_BY_ORIGIN => {
-                self.execute_group_advice_diagnostics_by_origin(&params).await
+                self.execute_group_advice_diagnostics_by_origin(&params)
+                    .await
             }
             _ => Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
                 "unknown command: {}",
@@ -797,40 +798,41 @@ where
             .as_ref()
             .and_then(|uri| self.sources.find(&to_miden_uri(uri)));
 
-        let groups = masm_analysis::group_advice_diagnostics_by_origin(&analysis.advice_diagnostics)
-            .into_iter()
-            .filter(|group| {
-                focus_source_id.is_none_or(|source_id| {
-                    group.origin.source_id() == source_id
-                        || group
-                            .diagnostics
-                            .iter()
-                            .any(|diag| diag.span.source_id() == source_id)
-                })
-            })
-            .filter_map(|group| {
-                let origin = span_location_value(self.sources.as_ref(), group.origin)?;
-                let sinks = group
-                    .diagnostics
-                    .iter()
-                    .filter_map(|diag| {
-                        Some(serde_json::json!({
-                            "location": span_location_value(self.sources.as_ref(), diag.span)?,
-                            "procedure": diag.procedure.as_str(),
-                            "message": normalize_message(&diag.message),
-                        }))
+        let groups =
+            masm_analysis::group_advice_diagnostics_by_origin(&analysis.advice_diagnostics)
+                .into_iter()
+                .filter(|group| {
+                    focus_source_id.is_none_or(|source_id| {
+                        group.origin.source_id() == source_id
+                            || group
+                                .diagnostics
+                                .iter()
+                                .any(|diag| diag.span.source_id() == source_id)
                     })
-                    .collect::<Vec<_>>();
-                let procedures = grouped_procedures(&group.diagnostics);
-                Some(serde_json::json!({
-                    "origin": origin,
-                    "message": normalize_message(&group.summary_message()),
-                    "sinkCount": sinks.len(),
-                    "procedures": procedures,
-                    "sinks": sinks,
-                }))
-            })
-            .collect::<Vec<_>>();
+                })
+                .filter_map(|group| {
+                    let origin = span_location_value(self.sources.as_ref(), group.origin)?;
+                    let sinks = group
+                        .diagnostics
+                        .iter()
+                        .filter_map(|diag| {
+                            Some(serde_json::json!({
+                                "location": span_location_value(self.sources.as_ref(), diag.span)?,
+                                "procedure": diag.procedure.as_str(),
+                                "message": normalize_message(&diag.message),
+                            }))
+                        })
+                        .collect::<Vec<_>>();
+                    let procedures = grouped_procedures(&group.diagnostics);
+                    Some(serde_json::json!({
+                        "origin": origin,
+                        "message": normalize_message(&group.summary_message()),
+                        "sinkCount": sinks.len(),
+                        "procedures": procedures,
+                        "sinks": sinks,
+                    }))
+                })
+                .collect::<Vec<_>>();
 
         Ok(Some(serde_json::json!({
             "scopeUri": focus_uri,

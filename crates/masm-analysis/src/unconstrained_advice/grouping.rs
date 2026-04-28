@@ -38,7 +38,10 @@ pub fn group_advice_diagnostics_by_origin(
 ) -> Vec<AdviceRootCauseGroup> {
     let mut grouped = HashMap::<SourceSpan, Vec<AdviceDiagnostic>>::new();
 
-    for diagnostic in diagnostics.values().flat_map(|proc_diags| proc_diags.iter()) {
+    for diagnostic in diagnostics
+        .values()
+        .flat_map(|proc_diags| proc_diags.iter())
+    {
         let mut origins = diagnostic.origins.clone();
         origins.sort_by_key(|span| source_span_sort_key(*span));
         origins.dedup();
@@ -55,7 +58,9 @@ pub fn group_advice_diagnostics_by_origin(
                 left.procedure
                     .as_str()
                     .cmp(right.procedure.as_str())
-                    .then_with(|| source_span_sort_key(left.span).cmp(&source_span_sort_key(right.span)))
+                    .then_with(|| {
+                        source_span_sort_key(left.span).cmp(&source_span_sort_key(right.span))
+                    })
                     .then_with(|| left.message.cmp(&right.message))
             });
             AdviceRootCauseGroup {
@@ -66,14 +71,17 @@ pub fn group_advice_diagnostics_by_origin(
         .collect::<Vec<_>>();
 
     groups.sort_by(|left, right| {
-        right
-            .sink_count()
-            .cmp(&left.sink_count())
-            .then_with(|| source_span_sort_key(left.origin).cmp(&source_span_sort_key(right.origin)))
+        right.sink_count().cmp(&left.sink_count()).then_with(|| {
+            source_span_sort_key(left.origin).cmp(&source_span_sort_key(right.origin))
+        })
     });
     groups
 }
 
 fn source_span_sort_key(span: SourceSpan) -> (u32, u32, u32) {
-    (span.source_id().to_u32(), span.start().to_u32(), span.end().to_u32())
+    (
+        span.source_id().to_u32(),
+        span.start().to_u32(),
+        span.end().to_u32(),
+    )
 }

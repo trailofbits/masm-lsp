@@ -61,7 +61,13 @@ pub fn render_diagnostic_to_string(diag: &LintDiagnostic, sources: &dyn SourceMa
 /// ```
 fn write_diagnostic(out: &mut impl Write, diag: &LintDiagnostic, sources: &dyn SourceManager) {
     // Heading: warning message.
-    writeln!(out, "{}: {}", "warning".yellow().bold(), diag.message.bold()).unwrap();
+    writeln!(
+        out,
+        "{}: {}",
+        "warning".yellow().bold(),
+        diag.message.bold()
+    )
+    .unwrap();
 
     // Primary location.
     if let Some(loc) = location_string(diag.span, sources) {
@@ -93,7 +99,12 @@ fn location_string(span: SourceSpan, sources: &dyn SourceManager) -> Option<Stri
     let flc = sources.file_line_col(span).ok()?;
     let raw_uri = flc.uri.as_str();
     let path = strip_file_scheme(raw_uri);
-    Some(format!("{}:{}:{}", path, flc.line.to_usize(), flc.column.to_usize()))
+    Some(format!(
+        "{}:{}:{}",
+        path,
+        flc.line.to_usize(),
+        flc.column.to_usize()
+    ))
 }
 
 /// Strip the `file://` (or `file:`) scheme prefix from a URI for display.
@@ -111,7 +122,12 @@ fn strip_file_scheme(uri: &str) -> &str {
 ///
 /// `indent` is prepended to every line of output (typically four spaces so
 /// the snippet aligns with the `-->` arrow).
-fn write_snippet(out: &mut impl Write, span: SourceSpan, sources: &dyn SourceManager, indent: &str) {
+fn write_snippet(
+    out: &mut impl Write,
+    span: SourceSpan,
+    sources: &dyn SourceManager,
+    indent: &str,
+) {
     let Some((line_text, line_number, col_zero)) = resolve_line(span, sources) else {
         return;
     };
@@ -154,10 +170,7 @@ fn write_snippet(out: &mut impl Write, span: SourceSpan, sources: &dyn SourceMan
 /// offset for the start of `span`.
 ///
 /// Returns `None` if the span cannot be resolved.
-fn resolve_line(
-    span: SourceSpan,
-    sources: &dyn SourceManager,
-) -> Option<(String, usize, usize)> {
+fn resolve_line(span: SourceSpan, sources: &dyn SourceManager) -> Option<(String, usize, usize)> {
     let flc = sources.file_line_col(span).ok()?;
 
     // line is one-indexed; lines().nth() is zero-indexed.
@@ -165,11 +178,7 @@ fn resolve_line(
     let col_zero = flc.column.to_usize().saturating_sub(1);
 
     let source_file = sources.get(span.source_id()).ok()?;
-    let line_text = source_file
-        .as_str()
-        .lines()
-        .nth(line_idx)?
-        .to_owned();
+    let line_text = source_file.as_str().lines().nth(line_idx)?.to_owned();
 
     Some((line_text, flc.line.to_usize(), col_zero))
 }
@@ -213,7 +222,13 @@ mod tests {
         let sf = sm.load(SourceLanguage::Masm, uri, content.to_string());
         let source_id = sf.id();
         let owned = content.to_string();
-        (sm, SpanFinder { content: owned, source_id })
+        (
+            sm,
+            SpanFinder {
+                content: owned,
+                source_id,
+            },
+        )
     }
 
     /// Helper to create [`SourceSpan`] values by searching for a substring.
@@ -228,7 +243,8 @@ mod tests {
             let start = self
                 .content
                 .find(needle)
-                .unwrap_or_else(|| panic!("needle {needle:?} not found in source")) as u32;
+                .unwrap_or_else(|| panic!("needle {needle:?} not found in source"))
+                as u32;
             let end = start + needle.len() as u32;
             SourceSpan::new(self.source_id, start..end)
         }
@@ -278,7 +294,7 @@ end
     fn render_advice_with_related_spans() {
         let source = "\
 proc.baz.1
-    adv_push.1
+    adv_push
     add
 end
 ";
@@ -288,7 +304,7 @@ end
             span: finder.span_of("add"),
             note: "in procedure `baz`".into(),
             related: vec![RelatedSpan {
-                span: finder.span_of("adv_push.1"),
+                span: finder.span_of("adv_push"),
                 message: "unconstrained advice introduced here".to_string(),
             }],
         };
@@ -337,7 +353,7 @@ end
     fn render_memory_address_diagnostic() {
         let source = "\
 proc.unsafe_load.1
-    adv_push.1
+    adv_push
     mem_load
 end
 ";
@@ -347,7 +363,7 @@ end
             span: finder.span_of("mem_load"),
             note: "in procedure `unsafe_load`".into(),
             related: vec![RelatedSpan {
-                span: finder.span_of("adv_push.1"),
+                span: finder.span_of("adv_push"),
                 message: "unconstrained advice introduced here".to_string(),
             }],
         };
@@ -359,7 +375,7 @@ end
     fn render_merkle_root_diagnostic() {
         let source = "\
 proc.unsafe_verify.1
-    adv_push.4
+    adv_push adv_push adv_push adv_push
     push.0
     push.0
     mtree_get
@@ -371,7 +387,7 @@ end
             span: finder.span_of("mtree_get"),
             note: "in procedure `unsafe_verify`".into(),
             related: vec![RelatedSpan {
-                span: finder.span_of("adv_push.4"),
+                span: finder.span_of("adv_push adv_push adv_push adv_push"),
                 message: "unconstrained advice introduced here".to_string(),
             }],
         };

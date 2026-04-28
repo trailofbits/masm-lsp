@@ -1152,19 +1152,13 @@ fn format_inferred_signature(
             let ret = match *outputs {
                 0 => String::new(),
                 1 => {
-                    let ty = output_types
-                        .first()
-                        .copied()
-                        .unwrap_or(InferredType::Felt);
+                    let ty = output_types.first().copied().unwrap_or(InferredType::Felt);
                     format!(" -> {}", inferred_type_for_display(ty))
                 }
                 n => {
                     let types = (0..n)
                         .map(|idx| {
-                            let ty = output_types
-                                .get(idx)
-                                .copied()
-                                .unwrap_or(InferredType::Felt);
+                            let ty = output_types.get(idx).copied().unwrap_or(InferredType::Felt);
                             inferred_type_for_display(ty)
                         })
                         .collect::<Vec<_>>()
@@ -1285,7 +1279,6 @@ fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
         TypeRequirement::Felt => "Felt",
         TypeRequirement::Bool => "Bool",
         TypeRequirement::U32 => "U32",
-        TypeRequirement::Address => "Address",
     }
 }
 
@@ -1294,7 +1287,6 @@ fn inferred_type_for_display(ty: InferredType) -> &'static str {
         InferredType::Felt => "Felt",
         InferredType::Bool => "Bool",
         InferredType::U32 => "U32",
-        InferredType::Address => "Address",
     }
 }
 

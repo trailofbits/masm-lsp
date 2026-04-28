@@ -340,10 +340,13 @@ impl Env {
 
     /// Refresh the cached `u32` proof bit for one alias identity.
     fn refresh_u32_identity_cache(&mut self, identity: &VarKey) {
-        let has_proven_var = self
-            .u32_validity
-            .keys()
-            .any(|key| self.aliases.get(key).cloned().unwrap_or_else(|| key.clone()) == *identity);
+        let has_proven_var = self.u32_validity.keys().any(|key| {
+            self.aliases
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| key.clone())
+                == *identity
+        });
         let has_proven_local = self
             .local_u32_validity
             .keys()
@@ -361,8 +364,17 @@ impl Env {
         let identities = self
             .u32_validity
             .keys()
-            .map(|key| self.aliases.get(key).cloned().unwrap_or_else(|| key.clone()))
-            .chain(self.local_u32_validity.keys().filter_map(|slot| self.local_aliases.get(slot).cloned()))
+            .map(|key| {
+                self.aliases
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| key.clone())
+            })
+            .chain(
+                self.local_u32_validity
+                    .keys()
+                    .filter_map(|slot| self.local_aliases.get(slot).cloned()),
+            )
             .collect::<Vec<_>>();
         for identity in identities {
             self.refresh_u32_identity_cache(&identity);
@@ -632,7 +644,7 @@ pub(crate) fn apply_intrinsic_effect(
     intrinsic: &Intrinsic,
     env: &mut Env,
 ) {
-    if intrinsic.name.starts_with("adv_push.") {
+    if intrinsic.name == "adv_push" {
         for result in &intrinsic.results {
             env.set_var_fact(result, AdviceFact::from_source(span));
             env.clear_var_metadata(result);
@@ -868,7 +880,10 @@ fn apply_adv_pipe_effect(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_intrinsic_effect, assign_expr_metadata, apply_local_load_scalar, apply_local_store, Env};
+    use super::{
+        apply_intrinsic_effect, apply_local_load_scalar, apply_local_store, assign_expr_metadata,
+        Env,
+    };
     use crate::{
         abstract_interp::JoinSemiLattice,
         unconstrained_advice::{domain::AdviceFact, u32_domain::U32Validity},
@@ -927,9 +942,16 @@ mod tests {
         let mut env = Env::default();
         env.set_var_fact(&input, AdviceFact::from_input(0));
 
-        assign_expr_metadata(&result, &Expr::Unary(UnOp::U32Cast, Box::new(Expr::Var(input))), &mut env);
+        assign_expr_metadata(
+            &result,
+            &Expr::Unary(UnOp::U32Cast, Box::new(Expr::Var(input))),
+            &mut env,
+        );
 
-        assert_eq!(env.place_u32_validity_for_var(&result), U32Validity::ProvenU32);
+        assert_eq!(
+            env.place_u32_validity_for_var(&result),
+            U32Validity::ProvenU32
+        );
     }
 
     #[test]
@@ -943,6 +965,9 @@ mod tests {
         apply_local_load_scalar(std::slice::from_ref(&output), 0, &mut env);
 
         assert_eq!(env.place_u32_validity_for_local(0), U32Validity::ProvenU32);
-        assert_eq!(env.place_u32_validity_for_var(&output), U32Validity::ProvenU32);
+        assert_eq!(
+            env.place_u32_validity_for_var(&output),
+            U32Validity::ProvenU32
+        );
     }
 }
